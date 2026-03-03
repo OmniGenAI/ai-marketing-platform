@@ -1,10 +1,5 @@
-from google import genai
-
+import httpx
 from app.config import settings
-
-
-def get_gemini_client() -> genai.Client:
-    return genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
 
 
 def generate_social_post(
@@ -18,8 +13,10 @@ def generate_social_post(
     platform: str,
     topic: str = "",
 ) -> dict:
-    client = get_gemini_client()
-
+    """
+    Generate a social media post using Google Gemini AI via direct REST API.
+    This approach is more reliable than SDK packages.
+    """
     platform_guidelines = {
         "facebook": "Keep it under 500 characters. Use engaging, conversational language. Include a call-to-action.",
         "instagram": "Keep it under 2200 characters. Use emojis sparingly. Make it visually descriptive. End with relevant hashtags.",
@@ -47,20 +44,47 @@ HASHTAGS:
 [Your hashtags here, including any preferred: {hashtags}]
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
-    text = response.text or ""
+    # Use direct REST API - most reliable method
+    # Using gemini-flash-latest which is an alias for the latest flash model
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
 
-    content = ""
-    generated_hashtags = ""
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
 
-    if "CONTENT:" in text and "HASHTAGS:" in text:
-        parts = text.split("HASHTAGS:")
-        content = parts[0].replace("CONTENT:", "").strip()
-        generated_hashtags = parts[1].strip()
-    else:
-        content = text.strip()
+    try:
+        response = httpx.post(
+            api_url,
+            json=payload,
+            timeout=30.0
+        )
+        response.raise_for_status()
 
-    return {"content": content, "hashtags": generated_hashtags}
+        result = response.json()
+
+        # Extract text from response
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+        content = ""
+        generated_hashtags = ""
+
+        if "CONTENT:" in text and "HASHTAGS:" in text:
+            parts = text.split("HASHTAGS:")
+            content = parts[0].replace("CONTENT:", "").strip()
+            generated_hashtags = parts[1].strip()
+        else:
+            content = text.strip()
+
+        return {"content": content, "hashtags": generated_hashtags}
+
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text
+        raise Exception(f"Gemini API error: {e.response.status_code} - {error_body}")
+    except Exception as e:
+        raise Exception(f"Failed to generate content: {str(e)}")

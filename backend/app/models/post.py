@@ -16,6 +16,7 @@ class Post(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"))
     content: Mapped[str] = mapped_column(Text, default="")
     hashtags: Mapped[str] = mapped_column(Text, default="")
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     platform: Mapped[str] = mapped_column(String(50), default="facebook")
     tone: Mapped[str] = mapped_column(String(50), default="professional")
     status: Mapped[str] = mapped_column(String(50), default="draft")

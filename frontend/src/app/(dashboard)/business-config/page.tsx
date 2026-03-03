@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,6 +24,7 @@ import api from "@/lib/api";
 
 export default function BusinessConfigPage() {
   const [isLoading, setIsLoading] = useState(false);
+  const [isFetching, setIsFetching] = useState(true);
   const [config, setConfig] = useState({
     business_name: "",
     niche: "",
@@ -34,6 +35,24 @@ export default function BusinessConfigPage() {
     target_audience: "",
     platform_preference: "both",
   });
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const response = await api.get("/api/business-config");
+        if (response.data) {
+          setConfig(response.data);
+        }
+      } catch (error: any) {
+        if (error.response?.status !== 404) {
+          toast.error("Failed to load configuration");
+        }
+      } finally {
+        setIsFetching(false);
+      }
+    };
+    fetchConfig();
+  }, []);
 
   const handleChange = (field: string, value: string) => {
     setConfig((prev) => ({ ...prev, [field]: value }));
@@ -52,6 +71,17 @@ export default function BusinessConfigPage() {
       setIsLoading(false);
     }
   };
+
+  if (isFetching) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading your configuration...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

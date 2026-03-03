@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class PostCreate(BaseModel):
     content: str
     hashtags: str = ""
+    image_url: str | None = None
     platform: str = "facebook"
     tone: str = "professional"
     status: str = "draft"
@@ -14,6 +15,7 @@ class PostCreate(BaseModel):
 class PostUpdate(BaseModel):
     content: str | None = None
     hashtags: str | None = None
+    image_url: str | None = None
     status: str | None = None
 
 
@@ -22,6 +24,7 @@ class PostResponse(BaseModel):
     user_id: str
     content: str
     hashtags: str
+    image_url: str | None
     platform: str
     tone: str
     status: str
