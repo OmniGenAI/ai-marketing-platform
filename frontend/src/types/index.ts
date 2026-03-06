@@ -22,7 +22,7 @@ export interface Subscription {
   id: string;
   user_id: string;
   plan_id: string;
-  plan: Plan;
+  plan?: Plan;
   stripe_subscription_id: string | null;
   status: "active" | "canceled" | "past_due" | "trialing";
   current_period_start: string;

@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Trash2, ExternalLink } from "lucide-react";
+import { Trash2, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/lib/api";
 import type { Post } from "@/types";
@@ -24,6 +24,7 @@ const statusColors: Record<string, string> = {
 export default function PostsPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [publishingId, setPublishingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchPosts();
@@ -37,6 +38,23 @@ export default function PostsPage() {
       toast.error("Failed to load posts");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handlePublish = async (id: string) => {
+    setPublishingId(id);
+    try {
+      const response = await api.post<Post>(`/api/posts/${id}/publish`);
+      setPosts((prev) =>
+        prev.map((p) => (p.id === id ? response.data : p))
+      );
+      toast.success("Post published successfully!");
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      const message = err.response?.data?.detail || "Failed to publish post";
+      toast.error(message);
+    } finally {
+      setPublishingId(null);
     }
   };
 
@@ -101,9 +119,19 @@ export default function PostsPage() {
                 )}
                 <div className="flex gap-2">
                   {post.status === "draft" && (
-                    <Button size="sm" variant="outline" className="gap-1">
-                      <ExternalLink className="h-3 w-3" />
-                      Publish
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1"
+                      onClick={() => handlePublish(post.id)}
+                      disabled={publishingId === post.id}
+                    >
+                      {publishingId === post.id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <ExternalLink className="h-3 w-3" />
+                      )}
+                      {publishingId === post.id ? "Publishing..." : "Publish"}
                     </Button>
                   )}
                   <Button

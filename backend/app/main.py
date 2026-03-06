@@ -1,13 +1,97 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.database import SessionLocal
+from app.models.plan import Plan
 from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev
+
+
+def seed_default_plans():
+    """Seed default subscription plans if they don't exist"""
+    db = SessionLocal()
+    try:
+        # Check if plans already exist
+        existing = db.query(Plan).first()
+        if existing:
+            return
+
+        default_plans = [
+            Plan(
+                name="Free",
+                slug="free",
+                description="Get started with basic features",
+                price=0,
+                credits=10,
+                features={
+                    "basic_tones": True,
+                    "draft_saving": True,
+                    "all_tones": False,
+                    "facebook_publishing": False,
+                    "instagram_publishing": False,
+                    "priority_support": False,
+                },
+                is_active=True,
+            ),
+            Plan(
+                name="Starter",
+                slug="starter",
+                description="Perfect for small businesses",
+                price=9,
+                credits=100,
+                features={
+                    "basic_tones": True,
+                    "draft_saving": True,
+                    "all_tones": True,
+                    "facebook_publishing": True,
+                    "instagram_publishing": False,
+                    "priority_support": False,
+                },
+                is_active=True,
+            ),
+            Plan(
+                name="Pro",
+                slug="pro",
+                description="For growing businesses",
+                price=29,
+                credits=-1,  # Unlimited
+                features={
+                    "basic_tones": True,
+                    "draft_saving": True,
+                    "all_tones": True,
+                    "facebook_publishing": True,
+                    "instagram_publishing": True,
+                    "priority_support": True,
+                },
+                is_active=True,
+            ),
+        ]
+
+        for plan in default_plans:
+            db.add(plan)
+
+        db.commit()
+        print("✅ Default plans seeded successfully")
+    except Exception as e:
+        print(f"❌ Error seeding plans: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    seed_default_plans()
+    yield
+    # Shutdown (nothing to do)
 
 app = FastAPI(
     title="AI Marketing Platform API",
     description="Backend API for AI-powered social media marketing platform",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS

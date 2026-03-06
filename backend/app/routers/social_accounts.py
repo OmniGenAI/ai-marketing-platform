@@ -22,6 +22,19 @@ FACEBOOK_REDIRECT_URI = f"{settings.FRONTEND_URL}/auth/facebook/callback"
 INSTAGRAM_REDIRECT_URI = f"{settings.FRONTEND_URL}/auth/instagram/callback"
 
 
+@router.get("/debug/config")
+def debug_oauth_config(current_user: User = Depends(get_current_user)):
+    """Debug endpoint to check OAuth configuration"""
+    return {
+        "facebook_app_id": FACEBOOK_APP_ID[:10] + "..." if FACEBOOK_APP_ID else "NOT SET",
+        "facebook_app_secret": "SET" if FACEBOOK_APP_SECRET else "NOT SET",
+        "facebook_redirect_uri": FACEBOOK_REDIRECT_URI,
+        "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
+        "frontend_url": settings.FRONTEND_URL,
+        "config_valid": bool(FACEBOOK_APP_ID and FACEBOOK_APP_SECRET),
+    }
+
+
 @router.get("/accounts")
 def list_social_accounts(
     current_user: User = Depends(get_current_user),
@@ -90,15 +103,28 @@ def facebook_auth(current_user: User = Depends(get_current_user)):
 
 @router.get("/facebook/callback")
 async def facebook_callback(
-    code: str,
-    state: str,  # user_id
+    code: str = None,
+    state: str = None,  # user_id
+    error: str = None,
+    error_description: str = None,
     db: Session = Depends(get_db),
 ):
     """Handle Facebook OAuth callback"""
+    # Handle OAuth errors from Facebook
+    if error:
+        print(f"[OAuth Error] {error}: {error_description}")
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/settings?error=facebook_denied&message={error_description or error}"
+        )
+
     if not code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Authorization code not provided"
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No authorization code"
+        )
+
+    if not state:
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No state parameter"
         )
 
     # Exchange code for access token
@@ -114,9 +140,11 @@ async def facebook_callback(
         )
 
         if token_response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to obtain access token"
+            error_data = token_response.json()
+            error_msg = error_data.get("error", {}).get("message", "Unknown error")
+            print(f"[OAuth Token Error] {token_response.status_code}: {error_msg}")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message={error_msg}"
             )
 
         token_data = token_response.json()
@@ -129,18 +157,20 @@ async def facebook_callback(
         )
 
         if pages_response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to fetch Facebook pages"
+            error_data = pages_response.json()
+            error_msg = error_data.get("error", {}).get("message", "Failed to fetch pages")
+            print(f"[OAuth Pages Error] {pages_response.status_code}: {error_msg}")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message={error_msg}"
             )
 
         pages_data = pages_response.json()
         pages = pages_data.get("data", [])
 
         if not pages:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No Facebook pages found. Please create a page first."
+            print("[OAuth Error] No Facebook pages found for this user")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No Facebook pages found. Please create a Facebook Page first."
             )
 
         # Store the first page (or let user select in frontend)

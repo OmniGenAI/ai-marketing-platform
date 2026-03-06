@@ -134,8 +134,16 @@ async def publish_post(
         )
 
     try:
+        # Check if this is a mock/dev account (skip actual API calls)
+        is_mock_account = social_account.access_token.startswith("MOCK_")
+
+        if is_mock_account:
+            # Simulate successful publish for development testing
+            print(f"[DEV MODE] Simulating publish to {post.platform}: {post.content[:50]}...")
+            result = {"id": f"mock_post_{post.id}"}
+
         # Publish to the platform
-        if post.platform.lower() == "facebook":
+        elif post.platform.lower() == "facebook":
             # Combine content and hashtags for Facebook
             full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
 
