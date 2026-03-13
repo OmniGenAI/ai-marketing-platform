@@ -17,6 +17,9 @@ class Subscription(Base):
         String(36), ForeignKey("users.id"), unique=True
     )
     plan_id: Mapped[str] = mapped_column(String(36), ForeignKey("plans.id"))
+    stripe_customer_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     stripe_subscription_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )

@@ -10,6 +10,7 @@ class SubscriptionResponse(BaseModel):
     user_id: str
     plan_id: str
     plan: PlanResponse
+    stripe_customer_id: str | None
     stripe_subscription_id: str | None
     status: str
     current_period_start: datetime | None

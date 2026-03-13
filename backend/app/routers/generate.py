@@ -22,7 +22,12 @@ def generate_post(
     wallet = (
         db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
     )
-    if not wallet or wallet.balance <= 0:
+
+    # Wallet balance of -1 means unlimited credits
+    has_unlimited_credits = wallet and wallet.balance == -1
+    has_credits = wallet and wallet.balance > 0
+
+    if not wallet or (not has_unlimited_credits and not has_credits):
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="Insufficient credits. Please upgrade your plan.",
@@ -53,8 +58,9 @@ def generate_post(
         topic=data.topic,
     )
 
-    # Deduct credit
-    wallet.balance -= 1
+    # Deduct credit (unless unlimited)
+    if wallet.balance != -1:
+        wallet.balance -= 1
     wallet.total_credits_used += 1
 
     usage_log = UsageLog(

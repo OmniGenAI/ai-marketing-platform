@@ -23,10 +23,33 @@ export interface Subscription {
   user_id: string;
   plan_id: string;
   plan?: Plan;
+  stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
-  status: "active" | "canceled" | "past_due" | "trialing";
+  status: "active" | "cancelled" | "past_due" | "trialing";
   current_period_start: string;
   current_period_end: string;
+}
+
+/**
+ * Helper to determine if a subscription is effectively active.
+ * A cancelled subscription is still active until period end.
+ */
+export function isSubscriptionActive(subscription: Subscription | null): boolean {
+  if (!subscription) return false;
+  if (subscription.status === "active") return true;
+  // Cancelled subscriptions remain active until period end
+  if (subscription.status === "cancelled" && subscription.current_period_end) {
+    return new Date(subscription.current_period_end) > new Date();
+  }
+  return false;
+}
+
+/**
+ * Get the current plan slug, defaulting to "free" if no active subscription.
+ */
+export function getCurrentPlanSlug(subscription: Subscription | null): string {
+  if (!subscription || !isSubscriptionActive(subscription)) return "free";
+  return subscription.plan?.slug || "free";
 }
 
 export interface Wallet {
