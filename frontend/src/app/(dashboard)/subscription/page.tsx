@@ -168,10 +168,12 @@ export default function SubscriptionPage() {
     setOpeningPortal(true);
     try {
       const response = await api.get<{ portal_url: string }>("/api/subscription/billing-portal");
-      window.location.href = response.data.portal_url;
+      // Open in new tab to avoid navigation issues
+      window.open(response.data.portal_url, '_blank', 'noopener,noreferrer');
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to open billing portal");
+    } finally {
       setOpeningPortal(false);
     }
   };
