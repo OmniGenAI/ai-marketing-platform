@@ -1,12 +1,13 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class PostCreate(BaseModel):
     content: str
     hashtags: str = ""
     image_url: str | None = None
+    image_option: str = "none"
     platform: str = "facebook"
     tone: str = "professional"
     status: str = "draft"
@@ -16,6 +17,7 @@ class PostUpdate(BaseModel):
     content: str | None = None
     hashtags: str | None = None
     image_url: str | None = None
+    image_option: str | None = None
     status: str | None = None
 
 
@@ -25,6 +27,7 @@ class PostResponse(BaseModel):
     content: str
     hashtags: str
     image_url: str | None
+    image_option: str
     platform: str
     tone: str
     status: str
@@ -38,9 +41,27 @@ class PostResponse(BaseModel):
 class GenerateRequest(BaseModel):
     platform: str = "facebook"
     tone: str = "professional"
-    topic: str = ""
+    topic: str
+    image_option: str = "none"  # none, business, ai
+    business_image_id: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Topic is required")
+        return v.strip()
+
+    @field_validator("image_option")
+    @classmethod
+    def validate_image_option(cls, v: str) -> str:
+        valid_options = ["none", "business", "ai"]
+        if v not in valid_options:
+            raise ValueError(f"image_option must be one of: {', '.join(valid_options)}")
+        return v
 
 
 class GenerateResponse(BaseModel):
     content: str
     hashtags: str
+    image_url: str | None = None

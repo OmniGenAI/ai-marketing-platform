@@ -19,13 +19,33 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import { Globe, Loader2, CheckCircle } from "lucide-react";
 import api from "@/lib/api";
+
+interface BusinessConfigState {
+  business_name: string;
+  niche: string;
+  tone: string;
+  products: string;
+  brand_voice: string;
+  hashtags: string;
+  target_audience: string;
+  platform_preference: string;
+  email: string;
+  phone: string;
+  address: string;
+  website: string;
+  website_context: string | null;
+}
 
 export default function BusinessConfigPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isFetching, setIsFetching] = useState(true);
-  const [config, setConfig] = useState({
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [config, setConfig] = useState<BusinessConfigState>({
     business_name: "",
     niche: "",
     tone: "professional",
@@ -34,6 +54,11 @@ export default function BusinessConfigPage() {
     hashtags: "",
     target_audience: "",
     platform_preference: "both",
+    email: "",
+    phone: "",
+    address: "",
+    website: "",
+    website_context: null,
   });
 
   useEffect(() => {
@@ -41,10 +66,18 @@ export default function BusinessConfigPage() {
       try {
         const response = await api.get("/api/business-config");
         if (response.data) {
-          setConfig(response.data);
+          setConfig({
+            ...config,
+            ...response.data,
+            email: response.data.email || "",
+            phone: response.data.phone || "",
+            address: response.data.address || "",
+            website: response.data.website || "",
+          });
         }
-      } catch (error: any) {
-        if (error.response?.status !== 404) {
+      } catch (error: unknown) {
+        const err = error as { response?: { status?: number } };
+        if (err.response?.status !== 404) {
           toast.error("Failed to load configuration");
         }
       } finally {
@@ -63,12 +96,48 @@ export default function BusinessConfigPage() {
     setIsLoading(true);
 
     try {
-      await api.post("/api/business-config", config);
+      const dataToSend = {
+        ...config,
+        email: config.email || null,
+        phone: config.phone || null,
+        address: config.address || null,
+        website: config.website || null,
+      };
+      await api.post("/api/business-config", dataToSend);
       toast.success("Business configuration saved!");
     } catch {
       toast.error("Failed to save configuration");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleAnalyzeWebsite = async () => {
+    if (!config.website) {
+      toast.error("Please enter a website URL first");
+      return;
+    }
+
+    setIsAnalyzing(true);
+
+    try {
+      const response = await api.post("/api/business-config/scrape-website", {
+        url: config.website,
+      });
+
+      if (response.data.success) {
+        toast.success("Website analyzed successfully!");
+        setConfig((prev) => ({
+          ...prev,
+          website_context: JSON.stringify(response.data.context),
+        }));
+      } else {
+        toast.error(response.data.message || "Failed to analyze website");
+      }
+    } catch {
+      toast.error("Failed to analyze website");
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -93,7 +162,7 @@ export default function BusinessConfigPage() {
         </p>
       </div>
 
-      <form onSubmit={handleSubmit}>
+      <form onSubmit={handleSubmit} className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle>Business Details</CardTitle>
@@ -212,12 +281,107 @@ export default function BusinessConfigPage() {
                 onChange={(e) => handleChange("hashtags", e.target.value)}
               />
             </div>
-
-            <Button type="submit" disabled={isLoading}>
-              {isLoading ? "Saving..." : "Save Configuration"}
-            </Button>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Contact Information</CardTitle>
+            <CardDescription>
+              Add your contact details for AI to include in posts when relevant.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="email">Business Email</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="hello@yourbusiness.com"
+                  value={config.email}
+                  onChange={(e) => handleChange("email", e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="phone">Phone Number</Label>
+                <Input
+                  id="phone"
+                  type="tel"
+                  placeholder="+1 (555) 123-4567"
+                  value={config.phone}
+                  onChange={(e) => handleChange("phone", e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="address">Business Address</Label>
+              <Textarea
+                id="address"
+                placeholder="123 Main Street, City, State 12345"
+                value={config.address}
+                onChange={(e) => handleChange("address", e.target.value)}
+                rows={2}
+              />
+            </div>
+
+            <Separator />
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="website">Website URL</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="website"
+                    type="url"
+                    placeholder="https://www.yourbusiness.com"
+                    value={config.website}
+                    onChange={(e) => handleChange("website", e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleAnalyzeWebsite}
+                    disabled={isAnalyzing || !config.website}
+                  >
+                    {isAnalyzing ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <Globe className="mr-2 h-4 w-4" />
+                        Analyze Website
+                      </>
+                    )}
+                  </Button>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  We&apos;ll analyze your website to help AI understand your business better.
+                </p>
+              </div>
+
+              {config.website_context && (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950 rounded-md">
+                  <CheckCircle className="h-5 w-5 text-green-600" />
+                  <span className="text-sm text-green-700 dark:text-green-300">
+                    Website analyzed successfully
+                  </span>
+                  <Badge variant="secondary" className="ml-auto">
+                    Context saved
+                  </Badge>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Button type="submit" disabled={isLoading} size="lg">
+          {isLoading ? "Saving..." : "Save Configuration"}
+        </Button>
       </form>
     </div>
   );

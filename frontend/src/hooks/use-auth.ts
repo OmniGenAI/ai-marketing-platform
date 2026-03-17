@@ -1,58 +1,118 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import Cookies from "js-cookie";
+import { createClient } from "@/lib/supabase/client";
 import api from "@/lib/api";
 import type { User } from "@/types";
+import type { User as SupabaseUser, Session } from "@supabase/supabase-js";
 
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
+  const [supabaseUser, setSupabaseUser] = useState<SupabaseUser | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchUser = useCallback(async () => {
-    const token = Cookies.get("access_token");
-    if (!token) {
-      setUser(null);
-      setLoading(false);
-      return;
-    }
+  const supabase = createClient();
 
+  const fetchUser = useCallback(async () => {
     try {
-      const response = await api.get<User>("/api/auth/me");
-      setUser(response.data);
+      const { data: { session } } = await supabase.auth.getSession();
+      setSession(session);
+      setSupabaseUser(session?.user ?? null);
+
+      if (session?.user) {
+        // Fetch user profile from our backend
+        const response = await api.get<User>("/api/auth/me");
+        setUser(response.data);
+      } else {
+        setUser(null);
+      }
     } catch {
-      Cookies.remove("access_token");
       setUser(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [supabase.auth]);
 
   useEffect(() => {
     fetchUser();
-  }, [fetchUser]);
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        setSession(session);
+        setSupabaseUser(session?.user ?? null);
+
+        if (session?.user) {
+          try {
+            const response = await api.get<User>("/api/auth/me");
+            setUser(response.data);
+          } catch {
+            setUser(null);
+          }
+        } else {
+          setUser(null);
+        }
+
+        if (event === "SIGNED_OUT") {
+          setUser(null);
+        }
+      }
+    );
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [fetchUser, supabase.auth]);
 
   const login = async (email: string, password: string) => {
-    const response = await api.post("/api/auth/login", { email, password });
-    Cookies.set("access_token", response.data.access_token, { expires: 1 });
-    await fetchUser();
-    return response.data;
-  };
-
-  const register = async (name: string, email: string, password: string) => {
-    const response = await api.post("/api/auth/register", {
-      name,
+    const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
-    return response.data;
+
+    if (error) {
+      throw error;
+    }
+
+    return data;
   };
 
-  const logout = () => {
-    Cookies.remove("access_token");
+  const register = async (name: string, email: string, password: string) => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          name,
+          full_name: name,
+        },
+      },
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    return data;
+  };
+
+  const logout = async () => {
+    await supabase.auth.signOut();
     setUser(null);
+    setSupabaseUser(null);
+    setSession(null);
     window.location.href = "/login";
   };
 
-  return { user, loading, login, register, logout, fetchUser };
+  return {
+    user,
+    supabaseUser,
+    session,
+    loading,
+    login,
+    register,
+    logout,
+    fetchUser,
+  };
 }

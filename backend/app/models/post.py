@@ -17,6 +17,7 @@ class Post(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     hashtags: Mapped[str] = mapped_column(Text, default="")
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_option: Mapped[str] = mapped_column(String(50), default="none")
     platform: Mapped[str] = mapped_column(String(50), default="facebook")
     tone: Mapped[str] = mapped_column(String(50), default="professional")
     status: Mapped[str] = mapped_column(String(50), default="draft")

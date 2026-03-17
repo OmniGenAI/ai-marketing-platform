@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -23,16 +24,28 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
-import { Sparkles, Copy, Save, RefreshCw, Coins, AlertTriangle } from "lucide-react";
+import {
+  Sparkles,
+  Copy,
+  Save,
+  RefreshCw,
+  Coins,
+  AlertTriangle,
+  Image as ImageIcon,
+  Send,
+  ImageOff,
+  Wand2,
+} from "lucide-react";
 import api from "@/lib/api";
-import { useSubscription, PLAN_LIMITS } from "@/hooks/use-subscription";
+import { useSubscription } from "@/hooks/use-subscription";
+import { BusinessImages } from "@/components/business-images";
+import type { BusinessImage, GenerateResponse } from "@/types";
+
+type ImageOption = "none" | "business" | "ai";
 
 export default function GeneratePage() {
   const router = useRouter();
   const {
-    subscription,
-    wallet,
-    loading: subscriptionLoading,
     canUseCredits,
     hasFeature,
     creditsRemaining,
@@ -44,10 +57,15 @@ export default function GeneratePage() {
   const [platform, setPlatform] = useState("facebook");
   const [tone, setTone] = useState("professional");
   const [topic, setTopic] = useState("");
+  const [topicError, setTopicError] = useState("");
+  const [imageOption, setImageOption] = useState<ImageOption>("none");
+  const [selectedImage, setSelectedImage] = useState<BusinessImage | null>(null);
   const [generatedContent, setGeneratedContent] = useState("");
   const [generatedHashtags, setGeneratedHashtags] = useState("");
+  const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   // Get available tones based on plan
   const getAvailableTones = () => {
@@ -70,8 +88,21 @@ export default function GeneratePage() {
 
   const availableTones = getAvailableTones();
 
+  const validateTopic = (): boolean => {
+    if (!topic.trim()) {
+      setTopicError("Topic is required");
+      return false;
+    }
+    setTopicError("");
+    return true;
+  };
+
   const handleGenerate = async () => {
-    // Check credits before generating
+    if (!validateTopic()) {
+      toast.error("Please enter a topic for your post");
+      return;
+    }
+
     if (!canUseCredits(1)) {
       toast.error("Not enough credits! Upgrade your plan to get more.");
       return;
@@ -79,22 +110,31 @@ export default function GeneratePage() {
 
     setIsGenerating(true);
     try {
-      const response = await api.post("/api/generate", {
+      const response = await api.post<GenerateResponse>("/api/generate", {
         platform,
         tone,
         topic,
+        image_option: imageOption,
+        business_image_id: imageOption === "business" ? selectedImage?.id : null,
       });
       setGeneratedContent(response.data.content);
       setGeneratedHashtags(response.data.hashtags);
+      setGeneratedImageUrl(response.data.image_url);
       toast.success("Post generated! 1 credit used.");
-      // Refresh subscription/wallet to update credit count
       refreshSubscription();
     } catch (error: unknown) {
-      const err = error as { response?: { data?: { detail?: string }; status?: number } };
-      if (err.response?.status === 402 || err.response?.data?.detail?.includes("credit")) {
+      const err = error as { response?: { data?: { detail?: string | { msg: string }[] }; status?: number } };
+      if (err.response?.status === 402 || (typeof err.response?.data?.detail === 'string' && err.response?.data?.detail?.includes("credit"))) {
         toast.error("Not enough credits! Upgrade your plan to continue.");
+      } else if (err.response?.status === 422) {
+        const detail = err.response?.data?.detail;
+        if (Array.isArray(detail) && detail[0]?.msg) {
+          toast.error(detail[0].msg);
+        } else {
+          toast.error("Please fill in all required fields");
+        }
       } else {
-        toast.error(err.response?.data?.detail || "Failed to generate post.");
+        toast.error((typeof err.response?.data?.detail === 'string' ? err.response?.data?.detail : null) || "Failed to generate post.");
       }
     } finally {
       setIsGenerating(false);
@@ -102,7 +142,6 @@ export default function GeneratePage() {
   };
 
   const handleSaveDraft = async () => {
-    // Check if user has draft saving feature
     if (!hasFeature("draft_saving") && isFreePlan) {
       toast.error("Draft saving requires a paid plan. Upgrade to save drafts!");
       return;
@@ -113,6 +152,8 @@ export default function GeneratePage() {
       await api.post("/api/posts", {
         content: generatedContent,
         hashtags: generatedHashtags,
+        image_url: getDisplayImageUrl(),
+        image_option: imageOption,
         platform,
         tone,
         status: "draft",
@@ -125,6 +166,32 @@ export default function GeneratePage() {
     }
   };
 
+  const handlePostNow = async () => {
+    setIsPublishing(true);
+    try {
+      // Create the post
+      const createResponse = await api.post("/api/posts", {
+        content: generatedContent,
+        hashtags: generatedHashtags,
+        image_url: getDisplayImageUrl(),
+        image_option: imageOption,
+        platform,
+        tone,
+        status: "draft",
+      });
+
+      // Publish it
+      await api.post(`/api/posts/${createResponse.data.id}/publish`);
+      toast.success("Post published successfully!");
+      router.push("/posts");
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      toast.error(err.response?.data?.detail || "Failed to publish post");
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
   const handleCopy = () => {
     navigator.clipboard.writeText(
       `${generatedContent}\n\n${generatedHashtags}`
@@ -132,13 +199,22 @@ export default function GeneratePage() {
     toast.success("Copied to clipboard!");
   };
 
-  // Format credits display
   const formatCredits = (credits: number) => {
     if (credits === Infinity || credits === -1) return "Unlimited";
     return credits.toString();
   };
 
-  const showLowCreditsWarning = creditsRemaining !== Infinity && creditsRemaining <= 3;
+  const getDisplayImageUrl = () => {
+    if (imageOption === "business" && selectedImage) {
+      return selectedImage.url;
+    }
+    if (imageOption === "ai" && generatedImageUrl) {
+      return generatedImageUrl;
+    }
+    return null;
+  };
+
+  const showLowCreditsWarning = creditsRemaining !== Infinity && creditsRemaining <= 3 && creditsRemaining > 0;
 
   return (
     <div className="space-y-6">
@@ -150,7 +226,6 @@ export default function GeneratePage() {
           </p>
         </div>
 
-        {/* Credits Display */}
         <Card className="w-fit">
           <CardContent className="py-3 px-4 flex items-center gap-2">
             <Coins className="h-5 w-5 text-primary" />
@@ -166,7 +241,6 @@ export default function GeneratePage() {
         </Card>
       </div>
 
-      {/* Low Credits Warning */}
       {showLowCreditsWarning && (
         <Alert variant="destructive" className="bg-yellow-50 border-yellow-200 text-yellow-800">
           <AlertTriangle className="h-4 w-4" />
@@ -186,7 +260,6 @@ export default function GeneratePage() {
         </Alert>
       )}
 
-      {/* No Credits Warning */}
       {creditsRemaining === 0 && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
@@ -207,81 +280,146 @@ export default function GeneratePage() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Post Settings</CardTitle>
-            <CardDescription>
-              Configure what kind of post you want to generate.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Platform</Label>
-                <Select value={platform} onValueChange={setPlatform}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="facebook">Facebook</SelectItem>
-                    <SelectItem value="instagram">Instagram</SelectItem>
-                  </SelectContent>
-                </Select>
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Post Settings</CardTitle>
+              <CardDescription>
+                Configure what kind of post you want to generate.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Platform</Label>
+                  <Select value={platform} onValueChange={setPlatform}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="facebook">Facebook</SelectItem>
+                      <SelectItem value="instagram">Instagram</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>
+                    Tone
+                    {isFreePlan && (
+                      <span className="text-xs text-muted-foreground ml-2">
+                        (Upgrade for more options)
+                      </span>
+                    )}
+                  </Label>
+                  <Select value={tone} onValueChange={setTone}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableTones.map((t) => (
+                        <SelectItem key={t.value} value={t.value}>
+                          {t.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
+
               <div className="space-y-2">
-                <Label>
-                  Tone
-                  {isFreePlan && (
-                    <span className="text-xs text-muted-foreground ml-2">
-                      (Upgrade for more options)
-                    </span>
-                  )}
+                <Label htmlFor="topic">
+                  Topic <span className="text-red-500">*</span>
                 </Label>
-                <Select value={tone} onValueChange={setTone}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableTones.map((t) => (
-                      <SelectItem key={t.value} value={t.value}>
-                        {t.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Textarea
+                  id="topic"
+                  placeholder="e.g., New product launch, Holiday sale, Behind the scenes..."
+                  value={topic}
+                  onChange={(e) => {
+                    setTopic(e.target.value);
+                    if (topicError) setTopicError("");
+                  }}
+                  rows={3}
+                  className={topicError ? "border-red-500" : ""}
+                />
+                {topicError && (
+                  <p className="text-sm text-red-500">{topicError}</p>
+                )}
               </div>
-            </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="topic">Topic (optional)</Label>
-              <Textarea
-                id="topic"
-                placeholder="e.g., New product launch, Holiday sale, Behind the scenes..."
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                rows={3}
-              />
-            </div>
+              <Separator />
 
-            <Button
-              onClick={handleGenerate}
-              disabled={isGenerating || creditsRemaining === 0}
-              className="w-full gap-2"
-            >
-              {isGenerating ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-4 w-4" />
-                  Generate Post (1 Credit)
-                </>
+              <div className="space-y-3">
+                <Label>Image Option</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  <Button
+                    type="button"
+                    variant={imageOption === "none" ? "default" : "outline"}
+                    className="h-auto py-3 flex flex-col gap-1"
+                    onClick={() => {
+                      setImageOption("none");
+                      setSelectedImage(null);
+                    }}
+                  >
+                    <ImageOff className="h-5 w-5" />
+                    <span className="text-xs">No Image</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={imageOption === "business" ? "default" : "outline"}
+                    className="h-auto py-3 flex flex-col gap-1"
+                    onClick={() => setImageOption("business")}
+                  >
+                    <ImageIcon className="h-5 w-5" />
+                    <span className="text-xs">Business Image</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={imageOption === "ai" ? "default" : "outline"}
+                    className="h-auto py-3 flex flex-col gap-1"
+                    onClick={() => {
+                      setImageOption("ai");
+                      setSelectedImage(null);
+                    }}
+                  >
+                    <Wand2 className="h-5 w-5" />
+                    <span className="text-xs">Generate with AI</span>
+                  </Button>
+                </div>
+              </div>
+
+              {imageOption === "business" && (
+                <div className="space-y-2">
+                  <Label>Select Image</Label>
+                  <div className="border rounded-lg p-4 max-h-64 overflow-y-auto">
+                    <BusinessImages
+                      selectedImageId={selectedImage?.id}
+                      onSelectImage={setSelectedImage}
+                      selectionMode
+                    />
+                  </div>
+                </div>
               )}
-            </Button>
-          </CardContent>
-        </Card>
+
+              <Button
+                onClick={handleGenerate}
+                disabled={isGenerating || creditsRemaining === 0}
+                className="w-full gap-2"
+              >
+                {isGenerating ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-4 w-4" />
+                    Generate Post (1 Credit)
+                  </>
+                )}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
 
         <Card>
           <CardHeader>
@@ -296,6 +434,16 @@ export default function GeneratePage() {
           <CardContent className="space-y-4">
             {generatedContent ? (
               <>
+                {getDisplayImageUrl() && (
+                  <div className="rounded-lg overflow-hidden border">
+                    <img
+                      src={getDisplayImageUrl()!}
+                      alt="Post image"
+                      className="w-full h-48 object-cover"
+                    />
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label>Content</Label>
                   <Textarea
@@ -316,7 +464,7 @@ export default function GeneratePage() {
 
                 <Separator />
 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button
                     variant="outline"
                     size="sm"
@@ -343,6 +491,7 @@ export default function GeneratePage() {
                     )}
                   </Button>
                   <Button
+                    variant="outline"
                     size="sm"
                     onClick={handleGenerate}
                     disabled={isGenerating || creditsRemaining === 0}
@@ -350,6 +499,24 @@ export default function GeneratePage() {
                   >
                     <RefreshCw className="h-3 w-3" />
                     Regenerate
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handlePostNow}
+                    disabled={isPublishing}
+                    className="gap-1 ml-auto"
+                  >
+                    {isPublishing ? (
+                      <>
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        Publishing...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3 w-3" />
+                        Post Now
+                      </>
+                    )}
                   </Button>
                 </div>
               </>

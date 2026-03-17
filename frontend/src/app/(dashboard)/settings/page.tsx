@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
 import api from "@/lib/api";
@@ -20,7 +20,7 @@ import { toast } from "sonner";
 import { Facebook, Instagram, Loader2, Trash2, Bug } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
-export default function SettingsPage() {
+function SettingsContent() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -324,5 +324,13 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>}>
+      <SettingsContent />
+    </Suspense>
   );
 }

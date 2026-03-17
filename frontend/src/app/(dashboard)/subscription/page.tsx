@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, Suspense, useEffect, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   Card,
@@ -17,7 +17,7 @@ import { toast } from "sonner";
 import api from "@/lib/api";
 import type { Plan, Subscription } from "@/types";
 
-export default function SubscriptionPage() {
+function SubscriptionContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -420,5 +420,13 @@ export default function SubscriptionPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function SubscriptionPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>}>
+      <SubscriptionContent />
+    </Suspense>
   );
 }

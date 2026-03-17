@@ -79,8 +79,21 @@ export interface BusinessConfig {
   hashtags: string;
   target_audience: string;
   platform_preference: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  website: string | null;
+  website_context: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface BusinessImage {
+  id: string;
+  user_id: string;
+  url: string;
+  filename: string;
+  created_at: string;
 }
 
 export interface Post {
@@ -88,6 +101,8 @@ export interface Post {
   user_id: string;
   content: string;
   hashtags: string;
+  image_url: string | null;
+  image_option: "none" | "business" | "ai";
   platform: string;
   tone: string;
   status: "draft" | "published" | "failed";
@@ -111,4 +126,20 @@ export interface AuthTokens {
 
 export interface ApiError {
   detail: string;
+}
+
+export interface GenerateResponse {
+  content: string;
+  hashtags: string;
+  image_url: string | null;
+}
+
+export interface WebsiteContext {
+  url: string;
+  title: string;
+  meta_description: string;
+  main_content: string;
+  about_content: string;
+  services: string;
+  contact_info: string;
 }

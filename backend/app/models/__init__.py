@@ -5,6 +5,7 @@ from app.models.wallet import Wallet, UsageLog
 from app.models.business_config import BusinessConfig
 from app.models.post import Post
 from app.models.social_account import SocialAccount
+from app.models.business_image import BusinessImage
 
 __all__ = [
     "User",
@@ -15,4 +16,5 @@ __all__ = [
     "BusinessConfig",
     "Post",
     "SocialAccount",
+    "BusinessImage",
 ]

@@ -63,4 +63,7 @@ uritemplate==4.2.0
 urllib3==2.6.3
 uvicorn==0.41.0
 watchfiles==1.1.1
-websockets==16.0
+websockets==14.1
+supabase==2.15.2
+beautifulsoup4==4.13.4
+lxml==5.3.2

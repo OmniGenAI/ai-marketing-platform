@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "sonner";
+import type { AuthError } from "@supabase/supabase-js";
 
 export default function RegisterPage() {
   const [name, setName] = useState("");
@@ -37,11 +38,25 @@ export default function RegisterPage() {
     setIsLoading(true);
 
     try {
-      await register(name, email, password);
-      toast.success("Account created! Please sign in.");
-      router.push("/login");
-    } catch {
-      toast.error("Registration failed. Please try again.");
+      const result = await register(name, email, password);
+
+      // Check if email confirmation is required
+      if (result.user && !result.session) {
+        toast.success(
+          "Account created! Please check your email to verify your account."
+        );
+        router.push("/login");
+      } else {
+        toast.success("Account created successfully!");
+        router.push("/dashboard");
+      }
+    } catch (error) {
+      const authError = error as AuthError;
+      if (authError.message?.includes("already registered")) {
+        toast.error("An account with this email already exists");
+      } else {
+        toast.error(authError.message || "Registration failed. Please try again.");
+      }
     } finally {
       setIsLoading(false);
     }

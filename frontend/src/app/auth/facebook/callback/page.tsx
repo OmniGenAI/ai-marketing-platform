@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
-export default function FacebookCallbackPage() {
+function FacebookCallbackContent() {
   const searchParams = useSearchParams();
 
   useEffect(() => {
@@ -35,5 +35,13 @@ export default function FacebookCallbackPage() {
         <p className="text-muted-foreground">Connecting your Facebook account...</p>
       </div>
     </div>
+  );
+}
+
+export default function FacebookCallbackPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>}>
+      <FacebookCallbackContent />
+    </Suspense>
   );
 }

@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "sonner";
+import type { AuthError } from "@supabase/supabase-js";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -32,8 +33,15 @@ export default function LoginPage() {
       await login(email, password);
       toast.success("Logged in successfully!");
       router.push("/dashboard");
-    } catch {
-      toast.error("Invalid email or password");
+    } catch (error) {
+      const authError = error as AuthError;
+      if (authError.message === "Invalid login credentials") {
+        toast.error("Invalid email or password");
+      } else if (authError.message === "Email not confirmed") {
+        toast.error("Please verify your email before signing in");
+      } else {
+        toast.error(authError.message || "Failed to sign in");
+      }
     } finally {
       setIsLoading(false);
     }

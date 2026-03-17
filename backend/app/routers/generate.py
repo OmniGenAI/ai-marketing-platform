@@ -4,10 +4,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.models.business_config import BusinessConfig
+from app.models.business_image import BusinessImage
 from app.models.wallet import Wallet, UsageLog
 from app.schemas.post import GenerateRequest, GenerateResponse
 from app.dependencies import get_current_user
-from app.services.ai import generate_social_post
+from app.services.ai import generate_social_post, generate_image_from_prompt
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
 
@@ -45,7 +46,7 @@ def generate_post(
             detail="Please configure your business profile first.",
         )
 
-    # Generate post using AI
+    # Generate post using AI with website context
     result = generate_social_post(
         business_name=config.business_name,
         niche=config.niche,
@@ -56,7 +57,32 @@ def generate_post(
         hashtags=config.hashtags,
         platform=data.platform,
         topic=data.topic,
+        website_context=config.website_context,
     )
+
+    # Handle image option
+    image_url = None
+
+    if data.image_option == "business" and data.business_image_id:
+        # Get the selected business image
+        business_image = (
+            db.query(BusinessImage)
+            .filter(
+                BusinessImage.id == data.business_image_id,
+                BusinessImage.user_id == current_user.id
+            )
+            .first()
+        )
+        if business_image:
+            image_url = business_image.url
+
+    elif data.image_option == "ai":
+        # Generate image using AI
+        image_url = generate_image_from_prompt(
+            topic=data.topic,
+            business_name=config.business_name,
+            niche=config.niche,
+        )
 
     # Deduct credit (unless unlimited)
     if wallet.balance != -1:
@@ -75,4 +101,5 @@ def generate_post(
     return GenerateResponse(
         content=result["content"],
         hashtags=result["hashtags"],
+        image_url=image_url,
     )
