@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
+    # Comma-separated list of additional allowed origins
+    ADDITIONAL_CORS_ORIGINS: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

@@ -94,10 +94,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS - allow both local and production URLs
+cors_origins = [
+    settings.FRONTEND_URL,
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://frontend-seven-ruby-55.vercel.app",
+]
+# Add any additional origins from environment variable
+if settings.ADDITIONAL_CORS_ORIGINS:
+    cors_origins.extend(settings.ADDITIONAL_CORS_ORIGINS.split(","))
+# Remove duplicates and empty strings
+cors_origins = list(set(origin.strip() for origin in cors_origins if origin and origin.strip()))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
