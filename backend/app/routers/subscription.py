@@ -386,15 +386,45 @@ def get_billing_portal(
             detail="No billing information found. Please subscribe to a plan first.",
         )
 
+    # Check for dev subscriptions
+    if subscription.stripe_customer_id.startswith("dev_") or subscription.stripe_subscription_id.startswith("dev_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Billing portal is not available for development subscriptions. Please use a real Stripe subscription.",
+        )
+
     try:
         portal_url = create_customer_portal_session(
             subscription.stripe_customer_id,
             return_url=f"{settings.FRONTEND_URL}/subscription",
         )
+
+        if not portal_url:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Stripe returned an empty portal URL. Please configure the Customer Portal in your Stripe Dashboard.",
+            )
+
         return {"portal_url": portal_url}
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[Stripe Error] Failed to create portal session: {e}")
+        error_msg = str(e)
+        print(f"[Stripe Error] Failed to create portal session: {error_msg}")
+
+        # Check for common issues
+        if "No such customer" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Customer not found in Stripe. The subscription may have been created in a different Stripe account.",
+            )
+        if "portal configuration" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please configure the Customer Portal in your Stripe Dashboard: https://dashboard.stripe.com/test/settings/billing/portal",
+            )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create billing portal session",
+            detail=f"Failed to create billing portal: {error_msg}",
         )

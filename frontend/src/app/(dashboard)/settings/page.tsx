@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
 import api from "@/lib/api";
@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Facebook, Instagram, Loader2, Trash2, Bug } from "lucide-react";
+import { Facebook, Instagram, Loader2, Trash2, Bug, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 function SettingsContent() {
@@ -29,7 +29,36 @@ function SettingsContent() {
   const [connecting, setConnecting] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
 
-  // Handle OAuth callback query params
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const response = await api.get<SocialAccount[]>("/api/social/accounts");
+      setAccounts(response.data);
+    } catch {
+      toast.error("Failed to load connected accounts");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Listen for messages from popup window
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "FACEBOOK_CONNECTED" || event.data?.type === "INSTAGRAM_CONNECTED") {
+        const platform = event.data.platform || "Account";
+        toast.success(`${platform.charAt(0).toUpperCase() + platform.slice(1)} connected successfully!`);
+        setConnecting(null);
+        fetchAccounts();
+      } else if (event.data?.type === "FACEBOOK_ERROR" || event.data?.type === "INSTAGRAM_ERROR") {
+        toast.error("Connection failed or was cancelled");
+        setConnecting(null);
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [fetchAccounts]);
+
+  // Handle OAuth callback query params (fallback for non-popup flow)
   useEffect(() => {
     const connected = searchParams.get("connected");
     const error = searchParams.get("error");
@@ -38,6 +67,7 @@ function SettingsContent() {
     if (connected) {
       toast.success(`${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully!`);
       router.replace("/settings");
+      fetchAccounts();
     } else if (error) {
       const errorMessages: Record<string, string> = {
         facebook_denied: "Facebook connection was cancelled",
@@ -49,30 +79,66 @@ function SettingsContent() {
       toast.error(errorMsg, { duration: 5000 });
       router.replace("/settings");
     }
-  }, [searchParams, router]);
+  }, [searchParams, router, fetchAccounts]);
 
   useEffect(() => {
     fetchAccounts();
-  }, []);
+  }, [fetchAccounts]);
 
-  const fetchAccounts = async () => {
-    try {
-      const response = await api.get<SocialAccount[]>("/api/social/accounts");
-      setAccounts(response.data);
-    } catch {
-      toast.error("Failed to load connected accounts");
-    } finally {
-      setLoading(false);
+  // Open OAuth in a popup window
+  const openAuthPopup = (url: string, name: string): boolean => {
+    const width = 600;
+    const height = 700;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+
+    const popup = window.open(
+      url,
+      name,
+      `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes,resizable=yes`
+    );
+
+    // Check if popup was blocked
+    if (!popup || popup.closed || typeof popup.closed === "undefined") {
+      return false;
     }
+    return true;
   };
 
   const connectFacebook = async () => {
     setConnecting("facebook");
     try {
       const response = await api.get<{ auth_url: string }>("/api/social/facebook/auth");
-      window.location.href = response.data.auth_url;
+      const opened = openAuthPopup(response.data.auth_url, "facebook_auth");
+
+      if (!opened) {
+        // Popup was blocked, fall back to redirect
+        toast.info("Popup blocked. Redirecting to Facebook...");
+        window.location.href = response.data.auth_url;
+        return;
+      }
+
+      // Reset connecting state after popup opens
+      // The message listener will handle success/error
+      setTimeout(() => {
+        setConnecting(null);
+      }, 1000);
     } catch {
       toast.error("Failed to initiate Facebook connection");
+      setConnecting(null);
+    }
+  };
+
+  const quickConnectFacebook = async () => {
+    setConnecting("facebook-quick");
+    try {
+      const response = await api.post<{ message: string; page_name: string }>("/api/social/facebook/quick-connect");
+      await fetchAccounts();
+      toast.success(`Connected to ${response.data.page_name}`);
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      toast.error(err.response?.data?.detail || "Failed to quick connect Facebook");
+    } finally {
       setConnecting(null);
     }
   };
@@ -81,7 +147,19 @@ function SettingsContent() {
     setConnecting("instagram");
     try {
       const response = await api.get<{ auth_url: string }>("/api/social/instagram/auth");
-      window.location.href = response.data.auth_url;
+      const opened = openAuthPopup(response.data.auth_url, "instagram_auth");
+
+      if (!opened) {
+        // Popup was blocked, fall back to redirect
+        toast.info("Popup blocked. Redirecting to Instagram...");
+        window.location.href = response.data.auth_url;
+        return;
+      }
+
+      // Reset connecting state after popup opens
+      setTimeout(() => {
+        setConnecting(null);
+      }, 1000);
     } catch {
       toast.error("Failed to initiate Instagram connection");
       setConnecting(null);
@@ -221,6 +299,19 @@ function SettingsContent() {
 
               {/* Connect Buttons */}
               <div className="flex flex-col sm:flex-row gap-3">
+                {/* <Button
+                  variant="default"
+                  onClick={quickConnectFacebook}
+                  disabled={connecting === "facebook-quick" || facebookConnected}
+                  className="flex items-center gap-2"
+                >
+                  {connecting === "facebook-quick" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Zap className="h-4 w-4" />
+                  )}
+                  {facebookConnected ? "Facebook Connected" : "Quick Connect Facebook"}
+                </Button> */}
                 <Button
                   variant={facebookConnected ? "outline" : "default"}
                   onClick={connectFacebook}

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     FACEBOOK_APP_ID: str = ""
     FACEBOOK_APP_SECRET: str = ""
 
+    # Pre-configured Facebook Page (Quick Connect)
+    FACEBOOK_PAGE_ID: str = ""
+    FACEBOOK_PAGE_NAME: str = ""
+    FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
     # Comma-separated list of additional allowed origins

@@ -128,8 +128,8 @@ FB_AUTH_RESPONSE=$(curl -s $BASE_URL/api/social/facebook/auth \
 if echo "$FB_AUTH_RESPONSE" | grep -q "auth_url"; then
     echo "✅ Facebook credentials loaded"
     AUTH_URL=$(echo $FB_AUTH_RESPONSE | grep -o '"auth_url":"[^"]*' | cut -d'"' -f4)
-    if echo "$AUTH_URL" | grep -q "1601239620924716"; then
-        echo "   App ID: 1601239620924716 ✓"
+    if echo "$AUTH_URL" | grep -q "client_id="; then
+        echo "   Facebook App ID configured ✓"
     fi
 else
     echo "❌ Facebook credentials not loaded"

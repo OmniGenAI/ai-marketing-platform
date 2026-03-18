@@ -168,12 +168,17 @@ function SubscriptionContent() {
     setOpeningPortal(true);
     try {
       const response = await api.get<{ portal_url: string }>("/api/subscription/billing-portal");
-      // Open in new tab to avoid navigation issues
-      window.open(response.data.portal_url, '_blank', 'noopener,noreferrer');
+
+      if (!response.data.portal_url) {
+        toast.error("Unable to get billing portal URL. Please try again.");
+        return;
+      }
+
+      // Redirect to Stripe Customer Portal
+      window.location.href = response.data.portal_url;
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to open billing portal");
-    } finally {
       setOpeningPortal(false);
     }
   };

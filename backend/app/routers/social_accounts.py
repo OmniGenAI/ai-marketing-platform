@@ -101,6 +101,82 @@ def facebook_auth(current_user: User = Depends(get_current_user)):
     return {"auth_url": auth_url}
 
 
+@router.post("/facebook/quick-connect")
+async def facebook_quick_connect(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Quick connect to Facebook using pre-configured Page Access Token.
+    No OAuth redirect required - uses credentials from environment variables.
+    """
+    page_id = settings.FACEBOOK_PAGE_ID
+    page_name = settings.FACEBOOK_PAGE_NAME
+    page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+
+    if not page_id or not page_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Facebook Page credentials not configured. Please set FACEBOOK_PAGE_ID, FACEBOOK_PAGE_NAME, and FACEBOOK_PAGE_ACCESS_TOKEN in environment variables."
+        )
+
+    # Validate the token by making a test API call
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"https://graph.facebook.com/v18.0/{page_id}",
+            params={
+                "access_token": page_token,
+                "fields": "id,name"
+            }
+        )
+
+        if response.status_code != 200:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Invalid token")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Facebook token validation failed: {error_msg}"
+            )
+
+        page_data = response.json()
+        # Use the name from API if not configured
+        actual_page_name = page_name or page_data.get("name", "Facebook Page")
+
+    # Check if account already exists
+    existing = (
+        db.query(SocialAccount)
+        .filter(
+            SocialAccount.user_id == current_user.id,
+            SocialAccount.platform == "facebook",
+            SocialAccount.page_id == page_id
+        )
+        .first()
+    )
+
+    if existing:
+        # Update existing account
+        existing.access_token = page_token
+        existing.page_name = actual_page_name
+    else:
+        # Create new account
+        social_account = SocialAccount(
+            user_id=current_user.id,
+            platform="facebook",
+            access_token=page_token,
+            page_id=page_id,
+            page_name=actual_page_name
+        )
+        db.add(social_account)
+
+    db.commit()
+
+    return {
+        "message": "Facebook connected successfully",
+        "page_name": actual_page_name,
+        "page_id": page_id
+    }
+
+
 @router.get("/facebook/callback")
 async def facebook_callback(
     code: str = None,
@@ -114,17 +190,17 @@ async def facebook_callback(
     if error:
         print(f"[OAuth Error] {error}: {error_description}")
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/settings?error=facebook_denied&message={error_description or error}"
+            url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_denied&message={error_description or error}"
         )
 
     if not code:
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No authorization code"
+            url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_failed&message=No authorization code"
         )
 
     if not state:
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No state parameter"
+            url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_failed&message=No state parameter"
         )
 
     # Exchange code for access token
@@ -144,7 +220,7 @@ async def facebook_callback(
             error_msg = error_data.get("error", {}).get("message", "Unknown error")
             print(f"[OAuth Token Error] {token_response.status_code}: {error_msg}")
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message={error_msg}"
+                url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_failed&message={error_msg}"
             )
 
         token_data = token_response.json()
@@ -161,7 +237,7 @@ async def facebook_callback(
             error_msg = error_data.get("error", {}).get("message", "Failed to fetch pages")
             print(f"[OAuth Pages Error] {pages_response.status_code}: {error_msg}")
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message={error_msg}"
+                url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_failed&message={error_msg}"
             )
 
         pages_data = pages_response.json()
@@ -170,7 +246,7 @@ async def facebook_callback(
         if not pages:
             print("[OAuth Error] No Facebook pages found for this user")
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/settings?error=facebook_failed&message=No Facebook pages found. Please create a Facebook Page first."
+                url=f"{settings.FRONTEND_URL}/auth/facebook/callback?error=facebook_failed&message=No Facebook pages found. Please create a Facebook Page first."
             )
 
         # Store the first page (or let user select in frontend)
@@ -204,9 +280,9 @@ async def facebook_callback(
 
         db.commit()
 
-    # Redirect back to frontend
+    # Redirect back to frontend callback page (for popup handling)
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/settings?connected=facebook"
+        url=f"{settings.FRONTEND_URL}/auth/facebook/callback?connected=facebook"
     )
 
 
@@ -229,15 +305,27 @@ def instagram_auth(current_user: User = Depends(get_current_user)):
 
 @router.get("/instagram/callback")
 async def instagram_callback(
-    code: str,
-    state: str,  # user_id
+    code: str = None,
+    state: str = None,  # user_id
+    error: str = None,
+    error_description: str = None,
     db: Session = Depends(get_db),
 ):
     """Handle Instagram OAuth callback"""
+    # Handle OAuth errors
+    if error:
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_denied&message={error_description or error}"
+        )
+
     if not code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Authorization code not provided"
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message=Authorization code not provided"
+        )
+
+    if not state:
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message=No state parameter"
         )
 
     # Exchange code for access token
@@ -253,9 +341,10 @@ async def instagram_callback(
         )
 
         if token_response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to obtain access token"
+            error_data = token_response.json()
+            error_msg = error_data.get("error", {}).get("message", "Failed to obtain access token")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message={error_msg}"
             )
 
         token_data = token_response.json()
@@ -271,9 +360,10 @@ async def instagram_callback(
         )
 
         if pages_response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to fetch Facebook pages"
+            error_data = pages_response.json()
+            error_msg = error_data.get("error", {}).get("message", "Failed to fetch Facebook pages")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message={error_msg}"
             )
 
         pages_data = pages_response.json()
@@ -287,9 +377,8 @@ async def instagram_callback(
                 break
 
         if not instagram_page:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No Instagram Business Account found. Please connect your Instagram account to a Facebook page."
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message=No Instagram Business Account found. Please connect your Instagram account to a Facebook page."
             )
 
         instagram_account_id = instagram_page["instagram_business_account"]["id"]
@@ -304,9 +393,10 @@ async def instagram_callback(
         )
 
         if ig_response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to fetch Instagram account details"
+            error_data = ig_response.json()
+            error_msg = error_data.get("error", {}).get("message", "Failed to fetch Instagram account details")
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/auth/instagram/callback?error=instagram_failed&message={error_msg}"
             )
 
         ig_data = ig_response.json()
@@ -339,7 +429,7 @@ async def instagram_callback(
 
         db.commit()
 
-    # Redirect back to frontend
+    # Redirect back to frontend callback page (for popup handling)
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/settings?connected=instagram"
+        url=f"{settings.FRONTEND_URL}/auth/instagram/callback?connected=instagram"
     )
