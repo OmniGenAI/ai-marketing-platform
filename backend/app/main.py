@@ -94,36 +94,36 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS - allow both local and production URLs
+# CORS configuration
 cors_origins = [
-    settings.FRONTEND_URL,
     "http://localhost:3000",
     "http://localhost:3001",
-    # Vercel production URLs
     "https://frontend-seven-ruby-55.vercel.app",
     "https://ai-marketing-platform.vercel.app",
     "https://ai-marketing-platform-nine.vercel.app",
 ]
-# Add any additional origins from environment variable
-if settings.ADDITIONAL_CORS_ORIGINS:
-    cors_origins.extend(settings.ADDITIONAL_CORS_ORIGINS.split(","))
-# Remove duplicates and empty strings
-cors_origins = list(set(origin.strip() for origin in cors_origins if origin and origin.strip()))
 
-# Check if any Vercel preview URLs should be allowed
-allow_all_origins = False
-for origin in cors_origins:
-    if ".vercel.app" in origin:
-        # If we have Vercel URLs, we may need to allow preview deployments too
-        pass
+# Add FRONTEND_URL from settings
+if settings.FRONTEND_URL and settings.FRONTEND_URL not in cors_origins:
+    cors_origins.append(settings.FRONTEND_URL)
+
+# Add any additional origins from environment
+if settings.ADDITIONAL_CORS_ORIGINS:
+    for origin in settings.ADDITIONAL_CORS_ORIGINS.split(","):
+        origin = origin.strip()
+        if origin and origin not in cors_origins:
+            cors_origins.append(origin)
+
+print(f"[CORS] Allowed origins: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",  # Allow all Vercel preview deployments
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
 # Routers
