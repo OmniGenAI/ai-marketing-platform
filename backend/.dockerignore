@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.env
+venv/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+*.log
+.pytest_cache/
+htmlcov/
