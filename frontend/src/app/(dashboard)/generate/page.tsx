@@ -41,7 +41,7 @@ import { useSubscription } from "@/hooks/use-subscription";
 import { BusinessImages } from "@/components/business-images";
 import type { BusinessImage, GenerateResponse } from "@/types";
 
-type ImageOption = "none" | "business" | "ai";
+type ImageOption = "none" | "business" | "ai" | "upload";
 
 export default function GeneratePage() {
   const router = useRouter();
@@ -66,6 +66,8 @@ export default function GeneratePage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   // Get available tones based on plan
   const getAvailableTones = () => {
@@ -97,6 +99,41 @@ export default function GeneratePage() {
     return true;
   };
 
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error("Invalid file type. Please upload a JPEG, PNG, GIF, or WebP image.");
+      return;
+    }
+
+    // Validate file size (5MB)
+    const maxSize = 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+      toast.error(`File too large. Maximum size: 5MB. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await api.post<{ url: string }>("/api/upload/image", formData);
+
+      setUploadedImageUrl(response.data.url);
+      toast.success("Image uploaded successfully!");
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      toast.error(err.response?.data?.detail || "Failed to upload image");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleGenerate = async () => {
     if (!validateTopic()) {
       toast.error("Please enter a topic for your post");
@@ -116,6 +153,7 @@ export default function GeneratePage() {
         topic,
         image_option: imageOption,
         business_image_id: imageOption === "business" ? selectedImage?.id : null,
+        uploaded_image_url: imageOption === "upload" ? uploadedImageUrl : null,
       });
       setGeneratedContent(response.data.content);
       setGeneratedHashtags(response.data.hashtags);
@@ -210,6 +248,9 @@ export default function GeneratePage() {
     }
     if (imageOption === "ai" && generatedImageUrl) {
       return generatedImageUrl;
+    }
+    if (imageOption === "upload" && uploadedImageUrl) {
+      return uploadedImageUrl;
     }
     return null;
   };
@@ -350,7 +391,7 @@ export default function GeneratePage() {
 
               <div className="space-y-3">
                 <Label>Image Option</Label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-4 gap-2">
                   <Button
                     type="button"
                     variant={imageOption === "none" ? "default" : "outline"}
@@ -358,6 +399,7 @@ export default function GeneratePage() {
                     onClick={() => {
                       setImageOption("none");
                       setSelectedImage(null);
+                      setUploadedImageUrl(null);
                     }}
                   >
                     <ImageOff className="h-5 w-5" />
@@ -367,10 +409,25 @@ export default function GeneratePage() {
                     type="button"
                     variant={imageOption === "business" ? "default" : "outline"}
                     className="h-auto py-3 flex flex-col gap-1"
-                    onClick={() => setImageOption("business")}
+                    onClick={() => {
+                      setImageOption("business");
+                      setUploadedImageUrl(null);
+                    }}
                   >
                     <ImageIcon className="h-5 w-5" />
                     <span className="text-xs">Business Image</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={imageOption === "upload" ? "default" : "outline"}
+                    className="h-auto py-3 flex flex-col gap-1"
+                    onClick={() => {
+                      setImageOption("upload");
+                      setSelectedImage(null);
+                    }}
+                  >
+                    <ImageIcon className="h-5 w-5" />
+                    <span className="text-xs">Upload Image</span>
                   </Button>
                   <Button
                     type="button"
@@ -379,6 +436,7 @@ export default function GeneratePage() {
                     onClick={() => {
                       setImageOption("ai");
                       setSelectedImage(null);
+                      setUploadedImageUrl(null);
                     }}
                   >
                     <Wand2 className="h-5 w-5" />
@@ -396,6 +454,61 @@ export default function GeneratePage() {
                       onSelectImage={setSelectedImage}
                       selectionMode
                     />
+                  </div>
+                </div>
+              )}
+
+              {imageOption === "upload" && (
+                <div className="space-y-2">
+                  <Label>Upload Image</Label>
+                  <div className="border-2 border-dashed rounded-lg p-6 text-center">
+                    {uploadedImageUrl ? (
+                      <div className="space-y-3">
+                        <div className="relative w-full h-48 rounded-lg overflow-hidden">
+                          <img
+                            src={uploadedImageUrl}
+                            alt="Uploaded"
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setUploadedImageUrl(null);
+                            document.getElementById("image-upload")?.click();
+                          }}
+                        >
+                          Change Image
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <ImageIcon className="h-12 w-12 mx-auto text-muted-foreground" />
+                        <div>
+                          <p className="text-sm text-muted-foreground">
+                            Click to upload or drag and drop
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            PNG, JPG, GIF or WebP (max 5MB)
+                          </p>
+                        </div>
+                        <Input
+                          id="image-upload"
+                          type="file"
+                          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+                          onChange={handleImageUpload}
+                          disabled={isUploading}
+                          className="cursor-pointer"
+                        />
+                        {isUploading && (
+                          <p className="text-sm text-muted-foreground">
+                            Uploading...
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     FACEBOOK_PAGE_NAME: str = ""
     FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
 
+    # Pre-configured Instagram Account (Quick Connect)
+    INSTAGRAM_ACCOUNT_ID: str = ""
+    INSTAGRAM_USERNAME: str = ""
+    INSTAGRAM_ACCESS_TOKEN: str = ""
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
     # Comma-separated list of additional allowed origins

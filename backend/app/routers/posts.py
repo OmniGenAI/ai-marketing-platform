@@ -150,7 +150,8 @@ async def publish_post(
             result = await publish_to_facebook(
                 page_id=social_account.page_id,
                 access_token=social_account.access_token,
-                content=full_content
+                content=full_content,
+                image_url=post.image_url if hasattr(post, 'image_url') else None
             )
 
         elif post.platform.lower() == "instagram":
@@ -168,7 +169,8 @@ async def publish_post(
                 instagram_account_id=social_account.page_id,
                 access_token=social_account.access_token,
                 image_url=post.image_url,
-                caption=caption
+                caption=caption,
+                user_id=current_user.id
             )
 
         else:

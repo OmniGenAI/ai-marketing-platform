@@ -3,9 +3,7 @@ import { createClient } from "@/lib/supabase/client";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  headers: {
-    "Content-Type": "application/json",
-  },
+  // Don't set default Content-Type - let axios set it based on the data being sent
 });
 
 api.interceptors.request.use(async (config) => {

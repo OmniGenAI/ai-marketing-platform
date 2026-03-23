@@ -84,6 +84,10 @@ def generate_post(
             niche=config.niche,
         )
 
+    elif data.image_option == "upload" and data.uploaded_image_url:
+        # Use the uploaded image URL
+        image_url = data.uploaded_image_url
+
     # Deduct credit (unless unlimited)
     if wallet.balance != -1:
         wallet.balance -= 1

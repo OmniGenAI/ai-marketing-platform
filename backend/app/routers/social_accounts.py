@@ -121,7 +121,12 @@ async def facebook_quick_connect(
         )
 
     # Validate the token by making a test API call
+    # Try multiple methods to validate the token
+    actual_page_name = page_name or "Facebook Page"
+    token_valid = False
+
     async with httpx.AsyncClient() as client:
+        # Method 1: Try to access the page directly
         response = await client.get(
             f"https://graph.facebook.com/v18.0/{page_id}",
             params={
@@ -130,17 +135,50 @@ async def facebook_quick_connect(
             }
         )
 
-        if response.status_code != 200:
-            error_data = response.json()
-            error_msg = error_data.get("error", {}).get("message", "Invalid token")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Facebook token validation failed: {error_msg}"
+        if response.status_code == 200:
+            page_data = response.json()
+            actual_page_name = page_data.get("name", actual_page_name)
+            token_valid = True
+        else:
+            # Method 2: Try to validate token using debug_token endpoint
+            response = await client.get(
+                "https://graph.facebook.com/v18.0/debug_token",
+                params={
+                    "input_token": page_token,
+                    "access_token": page_token
+                }
             )
 
-        page_data = response.json()
-        # Use the name from API if not configured
-        actual_page_name = page_name or page_data.get("name", "Facebook Page")
+            if response.status_code == 200:
+                debug_data = response.json().get("data", {})
+                if debug_data.get("is_valid"):
+                    token_valid = True
+                    # Token is valid, even if we can't access the page details
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Facebook token is invalid or expired"
+                    )
+            else:
+                # Method 3: Try to access /me endpoint (works with both user and page tokens)
+                response = await client.get(
+                    "https://graph.facebook.com/v18.0/me",
+                    params={
+                        "access_token": page_token
+                    }
+                )
+
+                if response.status_code == 200:
+                    token_valid = True
+                    me_data = response.json()
+                    # If token is for the page itself, use that name
+                    if me_data.get("id") == page_id:
+                        actual_page_name = me_data.get("name", actual_page_name)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Facebook token validation failed. Please ensure the token has access to page {page_id}"
+                    )
 
     # Check if account already exists
     existing = (
@@ -174,6 +212,82 @@ async def facebook_quick_connect(
         "message": "Facebook connected successfully",
         "page_name": actual_page_name,
         "page_id": page_id
+    }
+
+
+@router.post("/instagram/quick-connect")
+async def instagram_quick_connect(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Quick connect to Instagram using pre-configured Instagram Business Account.
+    No OAuth redirect required - uses credentials from environment variables.
+    """
+    account_id = settings.INSTAGRAM_ACCOUNT_ID
+    username = settings.INSTAGRAM_USERNAME
+    access_token = settings.INSTAGRAM_ACCESS_TOKEN
+
+    if not account_id or not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Instagram credentials not configured. Please set INSTAGRAM_ACCOUNT_ID, INSTAGRAM_USERNAME, and INSTAGRAM_ACCESS_TOKEN in environment variables."
+        )
+
+    # Validate the token by making a test API call
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"https://graph.facebook.com/v18.0/{account_id}",
+            params={
+                "access_token": access_token,
+                "fields": "id,username"
+            }
+        )
+
+        if response.status_code != 200:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Invalid token")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Instagram token validation failed: {error_msg}"
+            )
+
+        account_data = response.json()
+        # Use the username from API if not configured
+        actual_username = username or account_data.get("username", "Instagram Account")
+
+    # Check if account already exists
+    existing = (
+        db.query(SocialAccount)
+        .filter(
+            SocialAccount.user_id == current_user.id,
+            SocialAccount.platform == "instagram",
+            SocialAccount.page_id == account_id
+        )
+        .first()
+    )
+
+    if existing:
+        # Update existing account
+        existing.access_token = access_token
+        existing.page_name = actual_username
+    else:
+        # Create new account
+        social_account = SocialAccount(
+            user_id=current_user.id,
+            platform="instagram",
+            access_token=access_token,
+            page_id=account_id,
+            page_name=actual_username
+        )
+        db.add(social_account)
+
+    db.commit()
+
+    return {
+        "message": "Instagram connected successfully",
+        "page_name": actual_username,
+        "page_id": account_id
     }
 
 

@@ -91,6 +91,34 @@ function SettingsContent() {
     }
   };
 
+  const quickConnectFacebook = async () => {
+    setConnecting("facebook-quick");
+    try {
+      const response = await api.post<{ message: string; page_name: string; page_id: string }>("/api/social/facebook/quick-connect");
+      await fetchAccounts();
+      toast.success(`Quick connected to ${response.data.page_name}!`);
+    } catch (error: any) {
+      const errorMessage = error?.response?.data?.detail || "Failed to quick connect Facebook";
+      toast.error(errorMessage);
+    } finally {
+      setConnecting(null);
+    }
+  };
+
+  const quickConnectInstagram = async () => {
+    setConnecting("instagram-quick");
+    try {
+      const response = await api.post<{ message: string; page_name: string; page_id: string }>("/api/social/instagram/quick-connect");
+      await fetchAccounts();
+      toast.success(`Quick connected to @${response.data.page_name}!`);
+    } catch (error: any) {
+      const errorMessage = error?.response?.data?.detail || "Failed to quick connect Instagram";
+      toast.error(errorMessage);
+    } finally {
+      setConnecting(null);
+    }
+  };
+
   const disconnectAccount = async (accountId: string) => {
     setDisconnecting(accountId);
     try {
@@ -226,31 +254,37 @@ function SettingsContent() {
               <div className="flex flex-col sm:flex-row gap-3">
                 <Button
                   variant={facebookConnected ? "outline" : "default"}
-                  onClick={connectFacebook}
-                  disabled={connecting === "facebook" || facebookConnected}
+                  onClick={quickConnectFacebook}
+                  disabled={connecting === "facebook-quick" || facebookConnected}
                   className="flex items-center gap-2"
                 >
-                  {connecting === "facebook" ? (
+                  {connecting === "facebook-quick" ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Facebook className="h-4 w-4" />
                   )}
-                  {facebookConnected ? "Facebook Connected" : "Connect Facebook"}
+                  {facebookConnected ? "Facebook Connected" : "Quick Connect Facebook"}
                 </Button>
                 <Button
                   variant={instagramConnected ? "outline" : "default"}
-                  onClick={connectInstagram}
-                  disabled={connecting === "instagram" || instagramConnected}
+                  onClick={quickConnectInstagram}
+                  disabled={connecting === "instagram-quick" || instagramConnected}
                   className="flex items-center gap-2"
                 >
-                  {connecting === "instagram" ? (
+                  {connecting === "instagram-quick" ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Instagram className="h-4 w-4" />
                   )}
-                  {instagramConnected ? "Instagram Connected" : "Connect Instagram"}
+                  {instagramConnected ? "Instagram Connected" : "Quick Connect Instagram"}
                 </Button>
               </div>
+
+              {(!facebookConnected || !instagramConnected) && (
+                <p className="text-xs text-muted-foreground">
+                  <strong>Quick Connect</strong> uses pre-configured accounts - no OAuth redirect needed!
+                </p>
+              )}
 
               {!facebookConnected && !instagramConnected && (
                 <p className="text-sm text-muted-foreground mt-2">

@@ -42,8 +42,9 @@ class GenerateRequest(BaseModel):
     platform: str = "facebook"
     tone: str = "professional"
     topic: str
-    image_option: str = "none"  # none, business, ai
+    image_option: str = "none"  # none, business, ai, upload
     business_image_id: str | None = None
+    uploaded_image_url: str | None = None  # For upload option
 
     @field_validator("topic")
     @classmethod
@@ -55,7 +56,7 @@ class GenerateRequest(BaseModel):
     @field_validator("image_option")
     @classmethod
     def validate_image_option(cls, v: str) -> str:
-        valid_options = ["none", "business", "ai"]
+        valid_options = ["none", "business", "ai", "upload"]
         if v not in valid_options:
             raise ValueError(f"image_option must be one of: {', '.join(valid_options)}")
         return v
