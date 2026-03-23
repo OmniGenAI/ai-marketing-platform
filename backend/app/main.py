@@ -10,6 +10,10 @@ from app.routers import auth, plans, subscription, wallet, business_config, gene
 
 def seed_default_plans():
     """Seed default subscription plans if they don't exist"""
+    if not SessionLocal:
+        print("⚠️ Database not configured, skipping plan seeding")
+        return
+
     db = SessionLocal()
     try:
         # Check if plans already exist
