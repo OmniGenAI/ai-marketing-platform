@@ -36,11 +36,22 @@ async def publish_to_facebook(
     async with httpx.AsyncClient(timeout=30.0) as client:
         # If we have an image, use the photos endpoint
         if image_url:
+            print(f"🖼️  Posting image to Facebook: {image_url}")
+
+            # First, verify the image URL is accessible
+            try:
+                test_response = await client.head(image_url, timeout=10.0)
+                if test_response.status_code != 200:
+                    print(f"⚠️  Warning: Image URL returned status {test_response.status_code}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not verify image URL: {str(e)}")
+
             url = f"https://graph.facebook.com/v18.0/{page_id}/photos"
             payload = {
                 "url": image_url,
                 "caption": content,
-                "access_token": access_token
+                "access_token": access_token,
+                "published": "true"  # Ensure photo is published immediately
             }
         else:
             # Text-only or text+link post
@@ -52,12 +63,26 @@ async def publish_to_facebook(
             if link:
                 payload["link"] = link
 
+        print(f"📤 Posting to Facebook: {url}")
         response = await client.post(url, data=payload)
 
         # Log error details if request failed
         if response.status_code not in [200, 201]:
             error_detail = response.text
             print(f"❌ Facebook API Error ({response.status_code}): {error_detail}")
+
+            # Try to parse error details
+            try:
+                error_json = response.json()
+                error_msg = error_json.get("error", {}).get("message", "Unknown error")
+                error_code = error_json.get("error", {}).get("code", "N/A")
+                print(f"❌ Error Code: {error_code}, Message: {error_msg}")
+
+                # If image URL error, suggest using feed endpoint instead
+                if "url" in error_msg.lower() or "image" in error_msg.lower():
+                    print("💡 Tip: Image URL might not be publicly accessible. Try using 'published=false' or upload directly.")
+            except:
+                pass
 
         response.raise_for_status()
         result = response.json()
