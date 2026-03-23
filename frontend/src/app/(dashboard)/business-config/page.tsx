@@ -183,7 +183,7 @@ export default function BusinessConfigPage() {
                   }
                   required
                 />
-              </div>
+              </div> 
               <div className="space-y-2">
                 <Label htmlFor="niche">Niche / Industry</Label>
                 <Input
