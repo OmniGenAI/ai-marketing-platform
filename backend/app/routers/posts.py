@@ -9,6 +9,7 @@ from app.models.social_account import SocialAccount
 from app.schemas.post import PostCreate, PostUpdate, PostResponse
 from app.dependencies import get_current_user
 from app.services.social import publish_to_facebook, publish_to_instagram
+from app.config import settings
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 
@@ -98,6 +99,13 @@ async def publish_post(
     Publish a post to the specified social media platform.
     Requires a connected social account for the platform.
     """
+    # Check if social posting is enabled
+    if not settings.SOCIAL_POSTING_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Social media posting is temporarily disabled. Facebook/Instagram tokens need to be reconfigured. Please try again later.",
+        )
+
     # Get the post
     post = (
         db.query(Post)

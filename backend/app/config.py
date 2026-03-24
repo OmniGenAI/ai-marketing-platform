@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     INSTAGRAM_USERNAME: str = ""
     INSTAGRAM_ACCESS_TOKEN: str = ""
 
+    # Social Media Posting - set to false to disable Facebook/Instagram posting
+    SOCIAL_POSTING_ENABLED: bool = True
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
     # Comma-separated list of additional allowed origins
