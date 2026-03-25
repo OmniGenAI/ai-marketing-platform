@@ -143,3 +143,36 @@ export interface WebsiteContext {
   services: string;
   contact_info: string;
 }
+
+export interface Reel {
+  id: string;
+  user_id: string;
+  topic: string;
+  tone: string;
+  voice: string;
+  duration_target: number;
+  script: string | null;
+  hashtags: string | null;
+  audio_url: string | null;
+  video_url: string | null;
+  thumbnail_url: string | null;
+  status: "pending" | "generating_script" | "generating_audio" | "fetching_videos" | "downloading_videos" | "composing_video" | "ready" | "published" | "failed" | "publish_failed";
+  error_message: string | null;
+  platform: string;
+  published_at: string | null;
+  instagram_media_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VoiceOption {
+  id: string;
+  name: string;
+  gender: "male" | "female";
+  language: string;
+  description: string;
+}
+
+export interface VoicesResponse {
+  voices: VoiceOption[];
+}

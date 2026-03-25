@@ -10,6 +10,7 @@ import {
   FileText,
   CreditCard,
   Building2,
+  Film,
 } from "lucide-react";
 
 const navItems = [
@@ -27,6 +28,11 @@ const navItems = [
     title: "Generate Post",
     href: "/generate",
     icon: Sparkles,
+  },
+  {
+    title: "Create Reel",
+    href: "/reels",
+    icon: Film,
   },
   {
     title: "My Posts",

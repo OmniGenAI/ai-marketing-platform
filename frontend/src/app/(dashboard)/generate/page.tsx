@@ -104,16 +104,21 @@ export default function GeneratePage() {
     if (!file) return;
 
     // Validate file type
-    const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
+    const imageTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
+    const videoTypes = ["video/mp4", "video/quicktime"];
+    const allowedTypes = [...imageTypes, ...videoTypes];
+    const isVideo = videoTypes.includes(file.type);
+
     if (!allowedTypes.includes(file.type)) {
-      toast.error("Invalid file type. Please upload a JPEG, PNG, GIF, or WebP image.");
+      toast.error("Invalid file type. Please upload JPEG, PNG, GIF, WebP, or MP4.");
       return;
     }
 
-    // Validate file size (5MB)
-    const maxSize = 5 * 1024 * 1024;
+    // Validate file size (50MB for videos, 15MB for images)
+    const maxSize = isVideo ? 50 * 1024 * 1024 : 15 * 1024 * 1024;
+    const maxSizeMB = isVideo ? 50 : 15;
     if (file.size > maxSize) {
-      toast.error(`File too large. Maximum size: 5MB. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      toast.error(`File too large. Maximum size: ${maxSizeMB}MB. Your file: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
       return;
     }
 
@@ -491,13 +496,13 @@ export default function GeneratePage() {
                             Click to upload or drag and drop
                           </p>
                           <p className="text-xs text-muted-foreground mt-1">
-                            PNG, JPG, GIF or WebP (max 5MB)
+                            PNG, JPG, GIF, WebP or MP4 (max 50MB)
                           </p>
                         </div>
                         <Input
                           id="image-upload"
                           type="file"
-                          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+                          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp,video/mp4,video/quicktime"
                           onChange={handleImageUpload}
                           disabled={isUploading}
                           className="cursor-pointer"

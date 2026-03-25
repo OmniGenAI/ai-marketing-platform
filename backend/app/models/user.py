@@ -36,3 +36,4 @@ class User(Base):
     posts: Mapped[list["Post"]] = relationship(back_populates="user")  # type: ignore  # noqa: F821
     social_accounts: Mapped[list["SocialAccount"]] = relationship(back_populates="user")  # type: ignore  # noqa: F821
     business_images: Mapped[list["BusinessImage"]] = relationship(back_populates="user")  # type: ignore  # noqa: F821
+    reels: Mapped[list["Reel"]] = relationship(back_populates="user")  # type: ignore  # noqa: F821

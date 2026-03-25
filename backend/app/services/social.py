@@ -219,6 +219,101 @@ async def publish_to_instagram(
     return result
 
 
+async def publish_to_instagram_reels(
+    instagram_account_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+    thumbnail_url: str | None = None,
+) -> dict:
+    """
+    Publish a video to Instagram Reels.
+
+    Args:
+        instagram_account_id: Instagram Business Account ID
+        access_token: Page access token
+        video_url: Public URL of the video to post (must be MP4, H.264)
+        caption: Post caption (content + hashtags)
+        thumbnail_url: Optional custom thumbnail URL
+
+    Returns:
+        dict with 'id' of the published media
+
+    Raises:
+        httpx.HTTPStatusError: If the API request fails
+    """
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        # Step 1: Create media container for REELS
+        container_url = f"https://graph.facebook.com/v18.0/{instagram_account_id}/media"
+        container_payload = {
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption,
+            "access_token": access_token,
+            "share_to_feed": "true",  # Also share to main feed
+        }
+
+        if thumbnail_url:
+            container_payload["thumb_offset"] = "0"  # Use custom thumbnail
+
+        print(f"📤 Creating Instagram Reels container...")
+        container_response = await client.post(container_url, data=container_payload)
+
+        if container_response.status_code != 200:
+            error_detail = container_response.text
+            print(f"❌ Instagram API Error: {error_detail}")
+
+        container_response.raise_for_status()
+        creation_id = container_response.json()["id"]
+        print(f"✅ Media container created: {creation_id}")
+
+        # Step 2: Wait for Instagram to process the video
+        # Reels can take longer to process than images
+        print("⏳ Waiting for Instagram to process the video...")
+        max_attempts = 30  # 5 minutes max wait
+        for attempt in range(max_attempts):
+            status_url = f"https://graph.facebook.com/v18.0/{creation_id}"
+            status_params = {
+                "fields": "status_code",
+                "access_token": access_token,
+            }
+            status_response = await client.get(status_url, params=status_params)
+            status_data = status_response.json()
+
+            status_code = status_data.get("status_code")
+            print(f"   Status: {status_code} (attempt {attempt + 1}/{max_attempts})")
+
+            if status_code == "FINISHED":
+                break
+            elif status_code == "ERROR":
+                raise Exception("Instagram video processing failed")
+
+            # Wait 10 seconds before checking again
+            await asyncio.sleep(10)
+        else:
+            raise Exception("Video processing timeout - Instagram taking too long")
+
+        # Step 3: Publish the media container
+        publish_url = f"https://graph.facebook.com/v18.0/{instagram_account_id}/media_publish"
+        publish_payload = {
+            "creation_id": creation_id,
+            "access_token": access_token,
+        }
+
+        print(f"📤 Publishing Reel...")
+        publish_response = await client.post(publish_url, data=publish_payload)
+
+        if publish_response.status_code not in [200, 201]:
+            error_detail = publish_response.text
+            print(f"❌ Instagram Publish Error ({publish_response.status_code}): {error_detail}")
+
+        publish_response.raise_for_status()
+        result = publish_response.json()
+
+    print(f"✅ Published to Instagram Reels: Media ID {result.get('id')}")
+    return result
+
+
 async def publish_to_instagram_carousel(
     instagram_account_id: str,
     access_token: str,

@@ -48,6 +48,12 @@ export default function DashboardPage() {
   const planName = subscription?.plan?.name || "Free";
   const credits = wallet?.balance ?? 0;
 
+  // Format credits: -1 means unlimited
+  const formatCredits = (balance: number) => {
+    if (balance === -1) return "Unlimited";
+    return balance.toString();
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -69,7 +75,7 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {loading ? <Loader2 className="h-6 w-6 animate-spin" /> : credits}
+              {loading ? <Loader2 className="h-6 w-6 animate-spin" /> : formatCredits(credits)}
             </div>
             <p className="text-xs text-muted-foreground">available credits</p>
           </CardContent>

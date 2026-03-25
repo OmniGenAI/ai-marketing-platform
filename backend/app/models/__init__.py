@@ -6,6 +6,7 @@ from app.models.business_config import BusinessConfig
 from app.models.post import Post
 from app.models.social_account import SocialAccount
 from app.models.business_image import BusinessImage
+from app.models.reel import Reel
 
 __all__ = [
     "User",
@@ -17,4 +18,5 @@ __all__ = [
     "Post",
     "SocialAccount",
     "BusinessImage",
+    "Reel",
 ]

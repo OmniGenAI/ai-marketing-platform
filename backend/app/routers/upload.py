@@ -25,22 +25,27 @@ async def upload_image(
     """
 
     # Validate file type
-    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
+    allowed_types = [
+        "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
+        "video/mp4", "video/quicktime", "video/x-msvideo"
+    ]
     if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Allowed types: {', '.join(allowed_types)}"
+            detail=f"Invalid file type. Allowed types: JPEG, PNG, GIF, WebP, MP4"
         )
 
-    # Validate file size (max 5MB)
+    # Validate file size (max 50MB for videos, 15MB for images)
     file_content = await file.read()
     file_size = len(file_content)
-    max_size = 5 * 1024 * 1024  # 5MB
+    is_video = file.content_type.startswith("video/")
+    max_size = 50 * 1024 * 1024 if is_video else 15 * 1024 * 1024  # 50MB video, 15MB image
 
     if file_size > max_size:
+        max_mb = 50 if is_video else 15
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File too large. Maximum size: 5MB. Your file: {file_size / 1024 / 1024:.2f}MB"
+            detail=f"File too large. Maximum size: {max_mb}MB. Your file: {file_size / 1024 / 1024:.2f}MB"
         )
 
     # Generate unique filename
@@ -50,7 +55,8 @@ async def upload_image(
     try:
         # Upload to Supabase Storage
         supabase_url = settings.SUPABASE_URL
-        bucket_name = "post-images"
+        # Use "uploads" bucket for videos, "post-images" for images
+        bucket_name = "uploads" if is_video else "post-images"
 
         upload_url = f"{supabase_url}/storage/v1/object/{bucket_name}/{unique_filename}"
 
@@ -59,7 +65,9 @@ async def upload_image(
             "Content-Type": file.content_type,
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Longer timeout for video uploads
+        timeout = 120.0 if is_video else 30.0
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 upload_url,
                 headers=headers,
@@ -71,16 +79,21 @@ async def upload_image(
                 if response.status_code == 404:
                     # Try to create bucket
                     create_bucket_url = f"{supabase_url}/storage/v1/bucket"
+                    bucket_config = {
+                        "name": bucket_name,
+                        "public": True,
+                    }
+                    # Set higher file size limit for uploads bucket
+                    if bucket_name == "uploads":
+                        bucket_config["file_size_limit"] = 52428800  # 50MB
+
                     bucket_response = await client.post(
                         create_bucket_url,
                         headers={
                             "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
                             "Content-Type": "application/json",
                         },
-                        json={
-                            "name": bucket_name,
-                            "public": True,
-                        }
+                        json=bucket_config
                     )
 
                     if bucket_response.status_code in [200, 201]:
