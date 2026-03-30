@@ -11,7 +11,6 @@ import uuid
 from typing import Optional
 
 import edge_tts
-from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 
 from app.config import settings
 
@@ -227,6 +226,9 @@ def compose_reel(
     Compose final reel video by combining stock videos with voiceover audio.
     Returns path to the final video.
     """
+    # Import moviepy here to avoid startup issues if ffmpeg is missing
+    from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+
     # Load audio to get actual duration
     audio = AudioFileClip(audio_path)
     audio_duration = audio.duration
@@ -399,6 +401,9 @@ async def generate_thumbnail(video_path: str, output_path: str, time: float = 1.
     Generate a thumbnail from the video at specified time.
     Returns path to thumbnail image.
     """
+    # Import moviepy here to avoid startup issues if ffmpeg is missing
+    from moviepy import VideoFileClip
+
     clip = VideoFileClip(video_path)
     # Get frame at specified time (or middle if time exceeds duration)
     t = min(time, clip.duration / 2)
