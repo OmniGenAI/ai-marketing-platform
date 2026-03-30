@@ -25,11 +25,11 @@ def scrape_website(url: str) -> dict:
             url = "https://" + url
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; AIMarketingBot/1.0; +https://aimarketing.app)"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
-        # Fetch main page
-        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
+        # Fetch main page (disable SSL verification to avoid macOS certificate issues)
+        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True, verify=False)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "lxml")
@@ -58,7 +58,7 @@ def scrape_website(url: str) -> dict:
         about_url = _find_about_page(soup, url)
         if about_url:
             try:
-                about_response = httpx.get(about_url, headers=headers, timeout=10.0, follow_redirects=True)
+                about_response = httpx.get(about_url, headers=headers, timeout=10.0, follow_redirects=True, verify=False)
                 about_response.raise_for_status()
                 about_soup = BeautifulSoup(about_response.text, "lxml")
                 about_content = _extract_main_content(about_soup)
