@@ -57,9 +57,24 @@ function SubscriptionContent() {
 
     setVerifying(true);
     try {
-      // Refresh token before verification to ensure fresh auth after Stripe redirect
       const supabase = createClient();
-      await supabase.auth.refreshSession();
+
+      // First check if we have a valid session
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) {
+        // Try to refresh
+        const { data: refreshData } = await supabase.auth.refreshSession();
+
+        if (!refreshData.session) {
+          // No session available - redirect to login with callback
+          toast.error("Please log in to complete payment verification");
+          setVerifying(false);
+          // Preserve session_id so user can verify after login
+          window.location.href = `/login?callbackUrl=${encodeURIComponent(`/subscription?success=true&session_id=${sessionId}`)}`;
+          return;
+        }
+      }
 
       const response = await api.post("/api/subscription/verify", {
         session_id: sessionId,

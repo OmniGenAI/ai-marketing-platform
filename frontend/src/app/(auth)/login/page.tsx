@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,14 +16,15 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "sonner";
+import { Loader2 } from "lucide-react";
 import type { AuthError } from "@supabase/supabase-js";
 
-export default function LoginPage() {
+function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { login } = useAuth();
-  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +33,12 @@ export default function LoginPage() {
     try {
       await login(email, password);
       toast.success("Logged in successfully!");
-      router.push("/dashboard");
+
+      // Get callback URL or default to dashboard
+      const callbackUrl = searchParams.get("callbackUrl") || "/dashboard";
+
+      // Use window.location for full page reload to ensure session is properly set
+      window.location.href = callbackUrl;
     } catch (error) {
       const authError = error as AuthError;
       if (authError.message === "Invalid login credentials") {
@@ -42,7 +48,6 @@ export default function LoginPage() {
       } else {
         toast.error(authError.message || "Failed to sign in");
       }
-    } finally {
       setIsLoading(false);
     }
   };
@@ -95,5 +100,19 @@ export default function LoginPage() {
         </form>
       </Card>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
