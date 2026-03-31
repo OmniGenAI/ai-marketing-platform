@@ -37,17 +37,9 @@ api.interceptors.request.use(
         return config;
       }
 
-      // Get the Supabase session token with timeout
+      // Get the Supabase session token (no timeout - reads from local storage)
       const supabase = createClient();
-
-      const sessionPromise = supabase.auth.getSession();
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Session fetch timeout")), 5000)
-      );
-
-      const {
-        data: { session },
-      } = await Promise.race([sessionPromise, timeoutPromise]);
+      const { data: { session } } = await supabase.auth.getSession();
 
       if (session?.access_token) {
         // Cache for 5 minutes
