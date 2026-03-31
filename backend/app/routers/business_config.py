@@ -79,6 +79,7 @@ def scrape_website_endpoint(
         config.website = data.url
         config.website_context = website_context_to_json(context)
         db.commit()
+        db.refresh(config)
 
         return ScrapeWebsiteResponse(
             success=True,
@@ -90,4 +91,39 @@ def scrape_website_endpoint(
             success=False,
             message=str(e),
             context=None,
+        )
+
+
+@router.post("/scrape-and-update", response_model=BusinessConfigResponse)
+def scrape_and_update_config(
+    data: ScrapeWebsiteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Convenience endpoint: Scrape website and update config in one call.
+    """
+    config = (
+        db.query(BusinessConfig)
+        .filter(BusinessConfig.user_id == current_user.id)
+        .first()
+    )
+
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please create a business configuration first.",
+        )
+
+    try:
+        context = scrape_website(data.url)
+        config.website = data.url
+        config.website_context = website_context_to_json(context)
+        db.commit()
+        db.refresh(config)
+        return config
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )

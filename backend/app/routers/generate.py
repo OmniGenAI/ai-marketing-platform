@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+import json
+import logging
 
 from app.database import get_db
 from app.models.user import User
@@ -9,6 +11,8 @@ from app.models.wallet import Wallet, UsageLog
 from app.schemas.post import GenerateRequest, GenerateResponse
 from app.dependencies import get_current_user
 from app.services.ai import generate_social_post, generate_image_from_prompt
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
 
@@ -45,6 +49,18 @@ def generate_post(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Please configure your business profile first.",
         )
+
+    # Check if website context is available and valid
+    website_context_used = False
+    if config.website_context:
+        try:
+            json.loads(config.website_context)  # Validate it's proper JSON
+            website_context_used = True
+            logger.info(f"Website context validated for user {current_user.id}")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Invalid website context for user {current_user.id}: {str(e)}")
+    else:
+        logger.info(f"No website context for user {current_user.id} - post will be generated without website data")
 
     # Generate post using AI with website context
     result = generate_social_post(
@@ -106,4 +122,5 @@ def generate_post(
         content=result["content"],
         hashtags=result["hashtags"],
         image_url=image_url,
+        website_context_used=website_context_used,
     )

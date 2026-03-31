@@ -151,22 +151,38 @@ export default function GeneratePage() {
     }
 
     setIsGenerating(true);
+    console.log("[Generate] Validations passed, making API call...");
+    
     try {
-      const response = await api.post<GenerateResponse>("/api/generate", {
+      const payload = {
         platform,
         tone,
         topic,
         image_option: imageOption,
         business_image_id: imageOption === "business" ? selectedImage?.id : null,
         uploaded_image_url: imageOption === "upload" ? uploadedImageUrl : null,
-      });
+      };
+      console.log("[Generate] Payload:", payload);
+      
+      const response = await api.post<GenerateResponse>("/api/generate", payload);
+      console.log("[Generate] Response:", response.data);
+      
       setGeneratedContent(response.data.content);
       setGeneratedHashtags(response.data.hashtags);
       setGeneratedImageUrl(response.data.image_url);
       toast.success("Post generated! 1 credit used.");
       refreshSubscription();
     } catch (error: unknown) {
-      const err = error as { response?: { data?: { detail?: string | { msg: string }[] }; status?: number } };
+      console.error("[Generate] Error:", error);
+      const err = error as { response?: { data?: { detail?: string | { msg: string }[] }; status?: number }; message?: string };
+      
+      // Log full error details
+      if (err.response) {
+        console.error("[Generate] Response error:", err.response.status, err.response.data);
+      } else if (err.message) {
+        console.error("[Generate] Network error:", err.message);
+      }
+      
       if (err.response?.status === 402 || (typeof err.response?.data?.detail === 'string' && err.response?.data?.detail?.includes("credit"))) {
         toast.error("Not enough credits! Upgrade your plan to continue.");
       } else if (err.response?.status === 422) {
@@ -176,6 +192,9 @@ export default function GeneratePage() {
         } else {
           toast.error("Please fill in all required fields");
         }
+      } else if (!err.response) {
+        // Network error - no response from server
+        toast.error("Network error: Cannot reach the server. Please check if the backend is running.");
       } else {
         toast.error((typeof err.response?.data?.detail === 'string' ? err.response?.data?.detail : null) || "Failed to generate post.");
       }

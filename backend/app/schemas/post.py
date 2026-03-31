@@ -66,3 +66,4 @@ class GenerateResponse(BaseModel):
     content: str
     hashtags: str
     image_url: str | None = None
+    website_context_used: bool = False  # Indicates if website data was used for generation

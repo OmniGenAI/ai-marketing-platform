@@ -2,12 +2,39 @@
 Social media integration service.
 Facebook and Instagram Graph API integrations for publishing posts.
 """
+import base64
 import httpx
 import uuid
 import asyncio
 from typing import Optional
-from app.utils.image_processor import resize_for_instagram, upload_processed_image
+from app.utils.image_processor import resize_for_instagram, resize_for_instagram_bytes, upload_processed_image
 from app.config import settings
+
+
+def _is_public_http_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _is_data_url(value: str) -> bool:
+    return value.startswith("data:image/") and ";base64," in value
+
+
+def _decode_data_url_image(data_url: str) -> tuple[bytes, str, str]:
+    """Decode a base64 data URL and return bytes, mime type, and extension."""
+    header, b64_data = data_url.split(",", 1)
+    mime_type = "image/jpeg"
+    if ";" in header and ":" in header:
+        mime_type = header.split(":", 1)[1].split(";", 1)[0]
+
+    image_bytes = base64.b64decode(b64_data)
+
+    extension = "jpg"
+    if "/" in mime_type:
+        extension = mime_type.split("/", 1)[1].lower()
+        if extension == "jpeg":
+            extension = "jpg"
+
+    return image_bytes, mime_type, extension
 
 
 async def publish_to_facebook(
@@ -37,22 +64,55 @@ async def publish_to_facebook(
         # If we have an image, use the photos endpoint
         if image_url:
             print(f"🖼️  Posting image to Facebook: {image_url}")
-
-            # First, verify the image URL is accessible
-            try:
-                test_response = await client.head(image_url, timeout=10.0)
-                if test_response.status_code != 200:
-                    print(f"⚠️  Warning: Image URL returned status {test_response.status_code}")
-            except Exception as e:
-                print(f"⚠️  Warning: Could not verify image URL: {str(e)}")
-
             url = f"https://graph.facebook.com/v18.0/{page_id}/photos"
             payload = {
-                "url": image_url,
                 "caption": content,
                 "access_token": access_token,
                 "published": "true"  # Ensure photo is published immediately
             }
+
+            files = None
+            use_remote_url = _is_public_http_url(image_url) and len(image_url) <= 2000
+
+            # Handle generated base64 data URLs by uploading bytes directly.
+            if _is_data_url(image_url):
+                try:
+                    image_bytes, mime_type, extension = _decode_data_url_image(image_url)
+                    files = {
+                        "source": (f"generated.{extension}", image_bytes, mime_type)
+                    }
+                    use_remote_url = False
+                    print("ℹ️  Detected data URL image. Uploading bytes directly to Facebook.")
+                except Exception as e:
+                    raise ValueError(f"Invalid data URL image format: {str(e)}")
+
+            # First, verify the image URL is accessible
+            if use_remote_url:
+                try:
+                    test_response = await client.head(image_url, timeout=10.0)
+                    if test_response.status_code != 200:
+                        print(f"⚠️  Warning: Image URL returned status {test_response.status_code}")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not verify image URL: {str(e)}")
+
+                payload["url"] = image_url
+            elif files is None:
+                # For long/non-http URLs, try downloading bytes and upload via multipart source.
+                try:
+                    response = await client.get(image_url, timeout=20.0)
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                    if not content_type.startswith("image/"):
+                        content_type = "image/jpeg"
+                    extension = content_type.split("/", 1)[1] if "/" in content_type else "jpg"
+                    if extension == "jpeg":
+                        extension = "jpg"
+                    files = {
+                        "source": (f"facebook_upload.{extension}", response.content, content_type)
+                    }
+                    print("ℹ️  Uploading image bytes directly to Facebook (fallback mode).")
+                except Exception as e:
+                    raise ValueError(f"Unable to use image URL for Facebook post: {str(e)}")
         else:
             # Text-only or text+link post
             url = f"https://graph.facebook.com/v18.0/{page_id}/feed"
@@ -64,7 +124,10 @@ async def publish_to_facebook(
                 payload["link"] = link
 
         print(f"📤 Posting to Facebook: {url}")
-        response = await client.post(url, data=payload)
+        if image_url and files:
+            response = await client.post(url, data=payload, files=files)
+        else:
+            response = await client.post(url, data=payload)
 
         # Log error details if request failed
         if response.status_code not in [200, 201]:
@@ -118,9 +181,17 @@ async def publish_to_instagram(
     """
     # Process image to ensure it meets Instagram's requirements
     print(f"🖼️  Processing image for Instagram compatibility...")
+    source_image_bytes: bytes | None = None
     try:
-        # Resize/crop image to Instagram's aspect ratio requirements
-        processed_image_bytes = await resize_for_instagram(image_url)
+        if _is_data_url(image_url):
+            print("ℹ️  Detected data URL image for Instagram. Converting to public image URL.")
+            source_image_bytes, _, _ = _decode_data_url_image(image_url)
+            processed_image_bytes = resize_for_instagram_bytes(source_image_bytes)
+        elif _is_public_http_url(image_url) and len(image_url) <= 2000:
+            # Resize/crop image to Instagram's aspect ratio requirements
+            processed_image_bytes = await resize_for_instagram(image_url)
+        else:
+            raise ValueError("Image URL must be a public HTTP/HTTPS URL or a valid data URL")
 
         # Upload processed image to Supabase
         filename = f"instagram_{uuid.uuid4()}.jpeg"
@@ -137,9 +208,28 @@ async def publish_to_instagram(
         print(f"✅ Using processed image: {final_image_url}")
 
     except Exception as e:
-        print(f"⚠️  Image processing failed, using original: {str(e)}")
-        # Fallback to original image if processing fails
-        final_image_url = image_url
+        print(f"⚠️  Image processing failed, trying safe fallback: {str(e)}")
+
+        # For data URLs, never pass the original URI to Instagram Graph API.
+        if _is_data_url(image_url):
+            if source_image_bytes is None:
+                source_image_bytes, _, _ = _decode_data_url_image(image_url)
+
+            fallback_filename = f"instagram_raw_{uuid.uuid4()}.jpeg"
+            final_image_url = await upload_processed_image(
+                image_bytes=source_image_bytes,
+                user_id=user_id,
+                filename=fallback_filename,
+                supabase_url=settings.SUPABASE_URL,
+                service_key=settings.SUPABASE_SERVICE_ROLE_KEY,
+            )
+            print(f"✅ Using raw uploaded image fallback: {final_image_url}")
+        elif _is_public_http_url(image_url) and len(image_url) <= 2000:
+            # If source is already a public URL, keep current fallback behavior.
+            final_image_url = image_url
+            print(f"✅ Using original public image URL fallback: {final_image_url}")
+        else:
+            raise ValueError("Instagram requires a public HTTP/HTTPS image URL. Received non-public image URI.")
 
     # Step 1: Create media container
     container_url = f"https://graph.facebook.com/v18.0/{instagram_account_id}/media"

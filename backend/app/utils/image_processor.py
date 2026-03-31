@@ -68,6 +68,20 @@ async def resize_for_instagram(image_url: str, max_size: int = 1080) -> bytes:
         response.raise_for_status()
         image_data = response.content
 
+    return resize_for_instagram_bytes(image_data=image_data, max_size=max_size)
+
+
+def resize_for_instagram_bytes(image_data: bytes, max_size: int = 1080) -> bytes:
+    """
+    Resize/crop image bytes to Instagram-compatible dimensions.
+
+    Args:
+        image_data: Raw image bytes
+        max_size: Maximum width/height (default 1080px)
+
+    Returns:
+        bytes: JPEG image data ready for upload
+    """
     # Open image with PIL
     img = Image.open(io.BytesIO(image_data))
 
