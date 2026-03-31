@@ -2,6 +2,7 @@
 
 import { useState, Suspense, useEffect, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   Card,
   CardContent,
@@ -56,6 +57,10 @@ function SubscriptionContent() {
 
     setVerifying(true);
     try {
+      // Refresh token before verification to ensure fresh auth after Stripe redirect
+      const supabase = createClient();
+      await supabase.auth.refreshSession();
+
       const response = await api.post("/api/subscription/verify", {
         session_id: sessionId,
       });
