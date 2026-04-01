@@ -98,31 +98,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration
-cors_origins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://frontend-seven-ruby-55.vercel.app",
-    "https://ai-marketing-platform.vercel.app",
-    "https://ai-marketing-platform-nine.vercel.app",
-]
-
-# Add FRONTEND_URL from settings
-if settings.FRONTEND_URL and settings.FRONTEND_URL not in cors_origins:
-    cors_origins.append(settings.FRONTEND_URL)
-
-# Add any additional origins from environment
-if settings.ADDITIONAL_CORS_ORIGINS:
-    for origin in settings.ADDITIONAL_CORS_ORIGINS.split(","):
-        origin = origin.strip()
-        if origin and origin not in cors_origins:
-            cors_origins.append(origin)
-
-print(f"[CORS] Allowed origins: {cors_origins}")
+# CORS configuration - use regex to allow all Vercel deployments
+print("[CORS] Allowing localhost and all *.vercel.app domains")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],
