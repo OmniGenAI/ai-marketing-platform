@@ -138,6 +138,38 @@ def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/api/debug/reels")
+def debug_reels():
+    """Debug endpoint to test reels functionality."""
+    from app.database import SessionLocal
+    from sqlalchemy import text
+
+    results = {}
+    db = None
+    try:
+        db = SessionLocal()
+        # Check if reels table exists
+        result = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'reels')"))
+        exists = result.scalar()
+        results["reels_table_exists"] = exists
+
+        if exists:
+            # Count reels
+            result = db.execute(text("SELECT COUNT(*) FROM reels"))
+            count = result.scalar()
+            results["reels_count"] = count
+        else:
+            results["error"] = "Reels table does not exist! Run migrations: alembic upgrade head"
+
+    except Exception as e:
+        results["db_error"] = str(e)
+    finally:
+        if db:
+            db.close()
+
+    return results
+
+
 @app.get("/api/debug/imports")
 def debug_imports():
     """Debug endpoint to check if all modules import correctly."""
