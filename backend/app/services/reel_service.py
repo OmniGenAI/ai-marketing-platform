@@ -295,8 +295,10 @@ async def add_audio_to_video(video_path: str, audio_path: str, output_path: str)
     """
     try:
         from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = True
     except ImportError:
         from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = False
 
     video = VideoFileClip(video_path)
     audio = AudioFileClip(audio_path)
@@ -307,10 +309,12 @@ async def add_audio_to_video(video_path: str, audio_path: str, output_path: str)
         video = concatenate_videoclips([video] * loops_needed, method="compose")
 
     # Trim video to audio length
-    video = video.subclipped(0, min(audio.duration + 0.5, video.duration))
-
-    # Add audio
-    video = video.with_audio(audio)
+    if MOVIEPY_V2:
+        video = video.subclipped(0, min(audio.duration + 0.5, video.duration))
+        video = video.with_audio(audio)
+    else:
+        video = video.subclip(0, min(audio.duration + 0.5, video.duration))
+        video = video.set_audio(audio)
 
     # Write output
     video.write_videofile(
@@ -432,8 +436,29 @@ def compose_reel(
     # Import moviepy here to avoid startup issues if ffmpeg is missing
     try:
         from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = True
     except ImportError:
         from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = False
+
+    # Helper functions for v1/v2 compatibility
+    def crop_clip(clip, x1=None, y1=None, x2=None, y2=None):
+        if MOVIEPY_V2:
+            return clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
+        else:
+            return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+
+    def resize_clip(clip, size):
+        if MOVIEPY_V2:
+            return clip.resized(size)
+        else:
+            return clip.resize(size)
+
+    def subclip_video(clip, start, end):
+        if MOVIEPY_V2:
+            return clip.subclipped(start, end)
+        else:
+            return clip.subclip(start, end)
 
     # Load audio to get actual duration
     audio = AudioFileClip(audio_path)
@@ -456,7 +481,7 @@ def compose_reel(
                 # Video is wider, crop horizontally
                 new_width = int(clip.h * target_aspect)
                 x_center = clip.w / 2
-                clip = clip.cropped(
+                clip = crop_clip(clip,
                     x1=x_center - new_width / 2,
                     x2=x_center + new_width / 2
                 )
@@ -464,13 +489,13 @@ def compose_reel(
                 # Video is taller, crop vertically
                 new_height = int(clip.w / target_aspect)
                 y_center = clip.h / 2
-                clip = clip.cropped(
+                clip = crop_clip(clip,
                     y1=y_center - new_height / 2,
                     y2=y_center + new_height / 2
                 )
 
             # Resize to exact target dimensions
-            clip = clip.resized((target_width, target_height))
+            clip = resize_clip(clip, (target_width, target_height))
 
             clips.append(clip)
             total_duration += clip.duration
@@ -496,10 +521,13 @@ def compose_reel(
         video = concatenate_videoclips([video] * loops_needed, method="compose")
 
     # Trim to audio duration (plus small fade out buffer)
-    video = video.subclipped(0, min(audio_duration + 0.5, video.duration))
+    video = subclip_video(video, 0, min(audio_duration + 0.5, video.duration))
 
-    # Add audio
-    video = video.with_audio(audio)
+    # Add audio (v1: set_audio, v2: with_audio)
+    if MOVIEPY_V2:
+        video = video.with_audio(audio)
+    else:
+        video = video.set_audio(audio)
 
     # Write final video with Instagram-compatible settings
     video.write_videofile(
