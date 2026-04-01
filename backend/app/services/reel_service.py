@@ -868,16 +868,13 @@ async def process_reel_generation(
                 reel.status = "generating_audio"
                 db_session.commit()
 
-        # Step 2: Generate voiceover (only needed if Gemini native audio won't be used)
-        # We pre-check: if GOOGLE_GEMINI_API_KEY is set we'll use Veo 3 native audio,
-        # so skip Edge TTS generation entirely in that case.
+        # Step 2: Always generate Edge TTS voiceover so the file exists on disk
+        # as a fallback if Gemini fails and we need it for fal.ai / Pexels paths.
+        # Only upload to Supabase if it will actually be used in the final video.
+        print(f"[Reel {reel_id}] Generating voiceover...")
         audio_path = os.path.join(temp_dir, "voiceover.mp3")
         audio_url = None
-        if not settings.GOOGLE_GEMINI_API_KEY:
-            print(f"[Reel {reel_id}] Generating voiceover...")
-            await generate_voiceover(result["script"], voice, audio_path)
-            audio_url = await upload_reel_to_supabase(audio_path, user_id, "audio")
-            result["audio_url"] = audio_url
+        await generate_voiceover(result["script"], voice, audio_path)
 
         if db_session:
             reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
@@ -999,12 +996,17 @@ async def process_reel_generation(
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, _reencode, ai_video_path, output_path)
             else:
-                # fal.ai silent video — mix in Edge TTS voiceover
+                # fal.ai silent video — upload and mix in Edge TTS voiceover
                 print(f"[Reel {reel_id}] Adding Edge TTS voiceover to AI video...")
+                audio_url = await upload_reel_to_supabase(audio_path, user_id, "audio")
+                result["audio_url"] = audio_url
                 await add_audio_to_video(ai_video_path, audio_path, output_path)
 
         else:
-            # Traditional flow: download stock videos and compose
+            # Traditional flow (Pexels) — upload and mix in Edge TTS voiceover
+            audio_url = await upload_reel_to_supabase(audio_path, user_id, "audio")
+            result["audio_url"] = audio_url
+            # download stock videos and compose
             print(f"[Reel {reel_id}] Downloading {len(videos[:3])} videos in parallel...")
 
             async def download_with_path(i: int, video: dict) -> str | None:
@@ -1054,6 +1056,7 @@ async def process_reel_generation(
         if db_session:
             reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
             if reel:
+                reel.audio_url = audio_url
                 reel.video_url = video_url
                 reel.thumbnail_url = thumbnail_url
                 reel.status = "ready"
