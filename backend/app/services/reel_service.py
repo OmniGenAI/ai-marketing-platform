@@ -412,12 +412,16 @@ async def fetch_pexels_videos(
 
 async def download_video(url: str, output_path: str) -> str:
     """Download video from URL to local path using streaming."""
+    print(f"[download_video] Downloading: {url[:100]}...")
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
+            total_size = 0
             with open(output_path, "wb") as f:
                 async for chunk in response.aiter_bytes(chunk_size=8192):
                     f.write(chunk)
+                    total_size += len(chunk)
+    print(f"[download_video] Downloaded {total_size} bytes to {output_path}")
     return output_path
 
 
@@ -452,7 +456,8 @@ def compose_reel(
         if MOVIEPY_V2:
             return clip.resized(size)
         else:
-            return clip.resize(size)
+            # moviepy v1 uses resize with newsize parameter
+            return clip.resize(newsize=size)
 
     def subclip_video(clip, start, end):
         if MOVIEPY_V2:
@@ -470,46 +475,35 @@ def compose_reel(
 
     for video_path in video_paths:
         try:
+            print(f"[compose_reel] Loading video: {video_path}")
             clip = VideoFileClip(video_path)
+            print(f"[compose_reel] Loaded clip: {clip.w}x{clip.h}, duration={clip.duration}")
 
-            # Resize to target dimensions (9:16 aspect ratio)
-            # Center crop if needed
-            clip_aspect = clip.w / clip.h
-            target_aspect = target_width / target_height
-
-            if clip_aspect > target_aspect:
-                # Video is wider, crop horizontally
-                new_width = int(clip.h * target_aspect)
-                x_center = clip.w / 2
-                clip = crop_clip(clip,
-                    x1=x_center - new_width / 2,
-                    x2=x_center + new_width / 2
-                )
-            elif clip_aspect < target_aspect:
-                # Video is taller, crop vertically
-                new_height = int(clip.w / target_aspect)
-                y_center = clip.h / 2
-                clip = crop_clip(clip,
-                    y1=y_center - new_height / 2,
-                    y2=y_center + new_height / 2
-                )
-
-            # Resize to exact target dimensions
-            clip = resize_clip(clip, (target_width, target_height))
+            # Simple resize without complex cropping for better compatibility
+            try:
+                clip = resize_clip(clip, (target_width, target_height))
+                print(f"[compose_reel] Resized to {target_width}x{target_height}")
+            except Exception as resize_err:
+                print(f"[compose_reel] Resize failed, using original: {resize_err}")
+                # Use original clip without resizing if resize fails
 
             clips.append(clip)
             total_duration += clip.duration
+            print(f"[compose_reel] Added clip, total duration: {total_duration}")
 
             # Stop if we have enough footage
             if total_duration >= audio_duration + 2:  # 2 second buffer
                 break
 
         except Exception as e:
-            print(f"Error processing video {video_path}: {e}")
+            print(f"[compose_reel] Error processing video {video_path}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     if not clips:
-        raise Exception("No valid video clips to compose")
+        print(f"[compose_reel] FAILED - no clips loaded from {len(video_paths)} video paths")
+        raise Exception(f"No valid video clips to compose. Tried {len(video_paths)} videos.")
 
     # Concatenate all clips
     video = concatenate_videoclips(clips, method="compose")
