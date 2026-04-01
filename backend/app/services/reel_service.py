@@ -75,7 +75,7 @@ def generate_reel_script(
     niche: str = "",
 ) -> dict:
     """
-    Generate a short script for the reel using Google Gemini AI.
+    Generate a short script for the reel using Grok AI (xAI) or fallback to Gemini.
     Returns script text and hashtags.
     """
     # Estimate word count based on speaking rate (~150 words/minute)
@@ -106,32 +106,69 @@ HASHTAGS:
 [Your hashtags here]
 """
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
+    # Try Grok AI first (xAI)
+    if settings.XAI_API_KEY:
+        try:
+            response = httpx.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-3-latest",
+                    "messages": [
+                        {"role": "system", "content": "You are a social media content expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result["choices"][0]["message"]["content"]
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+            return _parse_script_response(text)
 
-    try:
-        response = httpx.post(api_url, json=payload, timeout=30.0)
-        response.raise_for_status()
-        result = response.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            print(f"Grok AI failed, falling back to Gemini: {e}")
 
-        script = ""
-        hashtags = ""
+    # Fallback to Google Gemini
+    if settings.GOOGLE_GEMINI_API_KEY:
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
 
-        if "SCRIPT:" in text and "HASHTAGS:" in text:
-            parts = text.split("HASHTAGS:")
-            script = parts[0].replace("SCRIPT:", "").strip()
-            hashtags = parts[1].strip()
-        else:
-            script = text.strip()
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
 
-        return {"script": script, "hashtags": hashtags}
+        try:
+            response = httpx.post(api_url, json=payload, timeout=30.0)
+            response.raise_for_status()
+            result = response.json()
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-    except Exception as e:
-        raise Exception(f"Failed to generate script: {str(e)}")
+            return _parse_script_response(text)
+
+        except Exception as e:
+            raise Exception(f"Failed to generate script with Gemini: {str(e)}")
+
+    raise Exception("No AI API key configured. Set XAI_API_KEY or GOOGLE_GEMINI_API_KEY.")
+
+
+def _parse_script_response(text: str) -> dict:
+    """Parse the AI response to extract script and hashtags."""
+    script = ""
+    hashtags = ""
+
+    if "SCRIPT:" in text and "HASHTAGS:" in text:
+        parts = text.split("HASHTAGS:")
+        script = parts[0].replace("SCRIPT:", "").strip()
+        hashtags = parts[1].strip()
+    else:
+        script = text.strip()
+
+    return {"script": script, "hashtags": hashtags}
 
 
 async def generate_voiceover(script: str, voice: str, output_path: str) -> str:
