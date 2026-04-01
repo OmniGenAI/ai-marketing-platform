@@ -94,7 +94,7 @@ export default function ReelsPage() {
   const [reels, setReels] = useState<Reel[]>([]);
   const [loadingReels, setLoadingReels] = useState(true);
   const [selectedReel, setSelectedReel] = useState<Reel | null>(null);
-  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishingReelId, setPublishingReelId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Fetch available voices
@@ -192,17 +192,19 @@ export default function ReelsPage() {
   };
 
   const handlePublish = async (reel: Reel) => {
-    setIsPublishing(true);
+    setPublishingReelId(reel.id);
     try {
       const response = await api.post<Reel>(`/api/reels/${reel.id}/publish`);
       setReels(prev => prev.map(r => r.id === reel.id ? response.data : r));
-      setSelectedReel(response.data);
+      if (selectedReel?.id === reel.id) {
+        setSelectedReel(response.data);
+      }
       toast.success("Reel published to Instagram!");
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to publish reel");
     } finally {
-      setIsPublishing(false);
+      setPublishingReelId(null);
     }
   };
 
@@ -514,10 +516,10 @@ export default function ReelsPage() {
                       {selectedReel.status === "ready" && (
                         <Button
                           onClick={() => handlePublish(selectedReel)}
-                          disabled={isPublishing}
+                          disabled={publishingReelId === selectedReel.id}
                           className="flex-1 gap-2"
                         >
-                          {isPublishing ? (
+                          {publishingReelId === selectedReel.id ? (
                             <>
                               <RefreshCw className="h-4 w-4 animate-spin" />
                               Publishing...
@@ -612,6 +614,31 @@ export default function ReelsPage() {
                               {reel.duration_target}s
                             </span>
                           </div>
+
+                          {/* Publish button for ready reels */}
+                          {reel.status === "ready" && (
+                            <Button
+                              size="sm"
+                              className="w-full gap-2 mt-2"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePublish(reel);
+                              }}
+                              disabled={publishingReelId === reel.id}
+                            >
+                              {publishingReelId === reel.id ? (
+                                <>
+                                  <RefreshCw className="h-3 w-3 animate-spin" />
+                                  Publishing...
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="h-3 w-3" />
+                                  Publish to Instagram
+                                </>
+                              )}
+                            </Button>
+                          )}
                         </div>
                       </CardContent>
                     </Card>
