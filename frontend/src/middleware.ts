@@ -13,6 +13,14 @@ const protectedPaths = [
 
 const authPaths = ["/login", "/register"];
 
+const isProduction = process.env.NODE_ENV === "production";
+
+const defaultCookieOptions: CookieOptions = {
+  secure: isProduction,
+  sameSite: "lax",
+  path: "/",
+};
+
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
@@ -34,7 +42,7 @@ export async function middleware(request: NextRequest) {
             request,
           });
           cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
+            supabaseResponse.cookies.set(name, value, { ...defaultCookieOptions, ...options })
           );
         },
       },
