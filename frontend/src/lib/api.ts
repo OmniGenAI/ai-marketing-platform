@@ -37,8 +37,18 @@ api.interceptors.request.use(
         return config;
       }
 
-      // Get the Supabase session token (no timeout - reads from local storage)
       const supabase = createClient();
+
+      // Validate session with server using getUser() - this ensures the session is actually valid
+      const { data: { user }, error } = await supabase.auth.getUser();
+
+      if (error || !user) {
+        // No valid session - clear cache and proceed without auth
+        cachedSession = null;
+        return config;
+      }
+
+      // Session is valid, get the access token
       const { data: { session } } = await supabase.auth.getSession();
 
       if (session?.access_token) {
@@ -53,6 +63,7 @@ api.interceptors.request.use(
       return config;
     } catch (error) {
       console.error("[API] Request interceptor error:", error);
+      cachedSession = null;
       // Still allow request to proceed without auth token
       return config;
     }

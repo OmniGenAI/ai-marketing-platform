@@ -16,19 +16,29 @@ export function useAuth() {
 
   const fetchUser = useCallback(async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      setSession(session);
-      setSupabaseUser(session?.user ?? null);
+      // Use getUser() to validate session with server (not getSession which only reads localStorage)
+      const { data: { user: supabaseUserData }, error } = await supabase.auth.getUser();
 
-      if (session?.user) {
-        // Fetch user profile from our backend
-        const response = await api.get<User>("/api/auth/me");
-        setUser(response.data);
-      } else {
+      if (error || !supabaseUserData) {
+        setSession(null);
+        setSupabaseUser(null);
         setUser(null);
+        return;
       }
+
+      setSupabaseUser(supabaseUserData);
+
+      // Get the session for access token (safe to use after getUser validates)
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      setSession(currentSession);
+
+      // Fetch user profile from our backend
+      const response = await api.get<User>("/api/auth/me");
+      setUser(response.data);
     } catch {
       setUser(null);
+      setSession(null);
+      setSupabaseUser(null);
     } finally {
       setLoading(false);
     }
