@@ -84,9 +84,61 @@ def seed_default_plans():
         db.close()
 
 
+def ensure_tables_exist():
+    """Ensure all tables exist in the database."""
+    from sqlalchemy import text
+
+    if not SessionLocal:
+        print("⚠️ Database not configured, skipping table check")
+        return
+
+    db = SessionLocal()
+    try:
+        # Check if reels table exists
+        result = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'reels')"))
+        exists = result.scalar()
+
+        if not exists:
+            print("📦 Creating reels table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS reels (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL REFERENCES users(id),
+                    topic VARCHAR(500) NOT NULL,
+                    tone VARCHAR(50) NOT NULL DEFAULT 'professional',
+                    voice VARCHAR(100) NOT NULL DEFAULT 'en-US-JennyNeural',
+                    duration_target INTEGER NOT NULL DEFAULT 30,
+                    script TEXT,
+                    hashtags TEXT,
+                    audio_url TEXT,
+                    video_url TEXT,
+                    thumbnail_url TEXT,
+                    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    platform VARCHAR(50) NOT NULL DEFAULT 'instagram',
+                    published_at TIMESTAMP WITH TIME ZONE,
+                    instagram_media_id VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_reels_user_id ON reels(user_id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_reels_status ON reels(status)"))
+            db.commit()
+            print("✅ Reels table created successfully")
+        else:
+            print("✅ Reels table already exists")
+    except Exception as e:
+        print(f"❌ Error checking/creating tables: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    ensure_tables_exist()
     seed_default_plans()
     yield
     # Shutdown (nothing to do)
