@@ -23,12 +23,9 @@ export function useAuth() {
     }
 
     try {
-      console.log("[Auth] Fetching backend user...");
       const response = await api.get<User>("/api/auth/me");
-      console.log("[Auth] Backend user:", response.data?.email);
       setUser(response.data);
-    } catch (error: any) {
-      console.error("[Auth] Backend error:", error?.response?.status, error?.message);
+    } catch {
       setUser(null);
     } finally {
       setLoading(false);
@@ -36,13 +33,9 @@ export function useAuth() {
   };
 
   useEffect(() => {
-    console.log("[Auth] Initializing...");
-
     // Listen for auth state changes - this is the primary source
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, newSession) => {
-        console.log("[Auth] State change:", event, "User:", newSession?.user?.email);
-
         // Update global token for API calls
         setAccessToken(newSession?.access_token ?? null);
 

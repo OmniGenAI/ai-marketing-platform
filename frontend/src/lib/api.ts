@@ -1,11 +1,8 @@
 import axios from "axios";
 import { createClient } from "@/lib/supabase/client";
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-console.log("[API] Base URL:", apiUrl);
-
 const api = axios.create({
-  baseURL: apiUrl,
+  baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
   timeout: 60000,
 });
 
@@ -15,7 +12,6 @@ let currentAccessToken: string | null = null;
 // Function to update token (called from auth hook)
 export function setAccessToken(token: string | null) {
   currentAccessToken = token;
-  console.log("[API] Token updated:", token ? "yes" : "no");
 }
 
 // Request interceptor - add auth token
@@ -41,8 +37,8 @@ api.interceptors.request.use(
         currentAccessToken = session.access_token;
         config.headers.Authorization = `Bearer ${session.access_token}`;
       }
-    } catch (error) {
-      console.warn("[API] Could not get session token");
+    } catch {
+      // Session fetch timed out or failed
     }
 
     return config;
