@@ -18,17 +18,20 @@ api.interceptors.request.use(
   async (config) => {
     try {
       const supabase = createClient();
-      const { data: { session }, error } = await supabase.auth.getSession();
 
-      if (error) {
-        console.error("[API] Session error:", error.message);
-      }
+      // First check if user exists (validates with server)
+      const { data: { user } } = await supabase.auth.getUser();
 
-      if (session?.access_token) {
-        config.headers.Authorization = `Bearer ${session.access_token}`;
-        console.log("[API] Token attached to request");
+      if (user) {
+        // User is valid, get the session token
+        const { data: { session } } = await supabase.auth.getSession();
+
+        if (session?.access_token) {
+          config.headers.Authorization = `Bearer ${session.access_token}`;
+          console.log("[API] Token attached to request");
+        }
       } else {
-        console.warn("[API] No session token available");
+        console.warn("[API] No authenticated user");
       }
     } catch (error) {
       console.error("[API] Failed to get session:", error);

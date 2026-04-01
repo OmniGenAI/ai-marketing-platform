@@ -17,28 +17,39 @@ export function useAuth() {
   const fetchUser = useCallback(async () => {
     try {
       console.log("[Auth] Fetching session...");
-      const { data: { session }, error } = await supabase.auth.getSession();
+      console.log("[Auth] Cookies:", document.cookie);
 
-      if (error) {
-        console.error("[Auth] Session error:", error.message);
+      // Try getUser first (makes server call, more reliable)
+      const { data: { user: supabaseUserData }, error: userError } = await supabase.auth.getUser();
+
+      if (userError) {
+        console.error("[Auth] getUser error:", userError.message);
       }
 
-      console.log("[Auth] Session exists:", !!session);
-      setSession(session);
-      setSupabaseUser(session?.user ?? null);
+      console.log("[Auth] User from getUser:", !!supabaseUserData);
 
-      if (session?.user) {
+      if (supabaseUserData) {
+        setSupabaseUser(supabaseUserData);
+
+        // Get session for token
+        const { data: { session: currentSession } } = await supabase.auth.getSession();
+        setSession(currentSession);
+
         console.log("[Auth] Fetching user from backend...");
         const response = await api.get<User>("/api/auth/me");
         console.log("[Auth] User fetched:", response.data?.email);
         setUser(response.data);
       } else {
-        console.log("[Auth] No session, clearing user");
+        console.log("[Auth] No user, clearing state");
+        setSession(null);
+        setSupabaseUser(null);
         setUser(null);
       }
     } catch (err) {
       console.error("[Auth] Error:", err);
       setUser(null);
+      setSession(null);
+      setSupabaseUser(null);
     } finally {
       setLoading(false);
     }
