@@ -293,14 +293,16 @@ async def add_audio_to_video(video_path: str, audio_path: str, output_path: str)
     Add audio track to a video file.
     Used for combining AI-generated video with voiceover.
     """
-    from moviepy import VideoFileClip, AudioFileClip
+    try:
+        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+    except ImportError:
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 
     video = VideoFileClip(video_path)
     audio = AudioFileClip(audio_path)
 
     # If audio is longer than video, loop the video
     if audio.duration > video.duration:
-        from moviepy import concatenate_videoclips
         loops_needed = int(audio.duration / video.duration) + 1
         video = concatenate_videoclips([video] * loops_needed, method="compose")
 
@@ -428,7 +430,10 @@ def compose_reel(
     Returns path to the final video.
     """
     # Import moviepy here to avoid startup issues if ffmpeg is missing
-    from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+    try:
+        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+    except ImportError:
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 
     # Load audio to get actual duration
     audio = AudioFileClip(audio_path)
@@ -603,7 +608,10 @@ async def generate_thumbnail(video_path: str, output_path: str, time: float = 1.
     Returns path to thumbnail image.
     """
     # Import moviepy here to avoid startup issues if ffmpeg is missing
-    from moviepy import VideoFileClip
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        from moviepy.editor import VideoFileClip
 
     clip = VideoFileClip(video_path)
     # Get frame at specified time (or middle if time exceeds duration)

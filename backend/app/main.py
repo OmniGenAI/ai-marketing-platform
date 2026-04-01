@@ -150,12 +150,16 @@ def debug_imports():
     except Exception as e:
         results["edge_tts"] = f"error: {str(e)}"
 
-    # Check moviepy
+    # Check moviepy (try both import styles)
     try:
         from moviepy import VideoFileClip
-        results["moviepy"] = "ok"
-    except Exception as e:
-        results["moviepy"] = f"error: {str(e)}"
+        results["moviepy"] = "ok (v2)"
+    except ImportError:
+        try:
+            from moviepy.editor import VideoFileClip
+            results["moviepy"] = "ok (v1)"
+        except Exception as e:
+            results["moviepy"] = f"error: {str(e)}"
 
     # Check PIL
     try:
