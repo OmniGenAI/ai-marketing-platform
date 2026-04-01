@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Grok AI (xAI)
     XAI_API_KEY: str = ""
 
+    # Groq AI (super fast, free tier available)
+    GROQ_API_KEY: str = ""
+
     # Pexels API (free stock videos)
     PEXELS_API_KEY: str = ""
 

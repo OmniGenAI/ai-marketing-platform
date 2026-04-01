@@ -106,7 +106,35 @@ HASHTAGS:
 [Your hashtags here]
 """
 
-    # Try Grok AI first (xAI)
+    # Try Groq first (fastest, free tier available)
+    if settings.GROQ_API_KEY:
+        try:
+            response = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a social media content expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result["choices"][0]["message"]["content"]
+
+            return _parse_script_response(text)
+
+        except Exception as e:
+            print(f"Groq failed, trying next provider: {e}")
+
+    # Try Grok AI (xAI)
     if settings.XAI_API_KEY:
         try:
             response = httpx.post(
