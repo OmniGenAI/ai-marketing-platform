@@ -16,25 +16,49 @@ export function useAuth() {
 
   const fetchUser = useCallback(async () => {
     try {
-      // Use getUser() to validate session with server (not getSession which only reads localStorage)
-      const { data: { user: supabaseUserData }, error } = await supabase.auth.getUser();
+      // First check if we have a session at all (fast, from storage)
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
 
-      if (error || !supabaseUserData) {
+      if (!currentSession) {
+        // No session in storage, user is not logged in
         setSession(null);
         setSupabaseUser(null);
         setUser(null);
         return;
       }
 
-      setSupabaseUser(supabaseUserData);
-
-      // Get the session for access token (safe to use after getUser validates)
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
       setSession(currentSession);
+      setSupabaseUser(currentSession.user);
 
-      // Fetch user profile from our backend
-      const response = await api.get<User>("/api/auth/me");
-      setUser(response.data);
+      // Try to fetch user profile from our backend
+      // The backend will validate the token with Supabase
+      try {
+        const response = await api.get<User>("/api/auth/me");
+        setUser(response.data);
+      } catch (apiError) {
+        // If backend fails, try to refresh the session
+        const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession();
+
+        if (refreshError || !refreshData.session) {
+          // Refresh failed, clear everything
+          setSession(null);
+          setSupabaseUser(null);
+          setUser(null);
+          return;
+        }
+
+        // Retry with refreshed session
+        setSession(refreshData.session);
+        setSupabaseUser(refreshData.session.user);
+
+        try {
+          const response = await api.get<User>("/api/auth/me");
+          setUser(response.data);
+        } catch {
+          // Still failing, clear auth state
+          setUser(null);
+        }
+      }
     } catch {
       setUser(null);
       setSession(null);

@@ -39,23 +39,29 @@ api.interceptors.request.use(
 
       const supabase = createClient();
 
-      // Validate session with server using getUser() - this ensures the session is actually valid
-      const { data: { user }, error } = await supabase.auth.getUser();
-
-      if (error || !user) {
-        // No valid session - clear cache and proceed without auth
-        cachedSession = null;
-        return config;
-      }
-
-      // Session is valid, get the access token
+      // Get session from storage - this is fast and doesn't make a network call
+      // The backend will validate the token; if invalid, we'll get 401 and refresh
       const { data: { session } } = await supabase.auth.getSession();
 
       if (session?.access_token) {
-        // Cache for 5 minutes
+        // Check if token is expired
+        const tokenExpiry = session.expires_at ? session.expires_at * 1000 : now + 3600000;
+        const isExpiringSoon = tokenExpiry - now < 60000; // Less than 1 minute left
+
+        if (isExpiringSoon) {
+          // Token is expiring soon, refresh it
+          const newToken = await refreshToken();
+          if (newToken) {
+            config.headers.Authorization = `Bearer ${newToken}`;
+            return config;
+          }
+        }
+
+        // Cache for 5 minutes or until token expiry (whichever is shorter)
+        const cacheExpiry = Math.min(now + 5 * 60 * 1000, tokenExpiry - 60000);
         cachedSession = {
           token: session.access_token,
-          expiry: now + 5 * 60 * 1000,
+          expiry: cacheExpiry,
         };
         config.headers.Authorization = `Bearer ${session.access_token}`;
       }
