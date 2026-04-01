@@ -1,6 +1,9 @@
 """
 Reel generation service.
-Uses Edge TTS for voiceover, fal.ai/Pika for AI videos or Pexels for stock videos.
+Uses Edge TTS for voiceover. Video sources (in priority order):
+  1. Google Gemini Veo 3 with native audio (requires GOOGLE_GEMINI_API_KEY)
+  2. fal.ai / Pika silent video + Edge TTS voiceover (requires FAL_API_KEY)
+  3. Pexels stock videos + Edge TTS voiceover (fallback, requires PEXELS_API_KEY)
 """
 import asyncio
 import httpx
@@ -25,6 +28,172 @@ def _get_edge_tts():
         except ImportError as e:
             raise ImportError(f"edge_tts is required for voiceover generation: {e}")
     return _edge_tts
+
+
+async def generate_ai_video_gemini(
+    prompt: str,
+    output_path: str,
+    duration: int = 8,
+    aspect_ratio: str = "9:16",
+    model: str = "veo-3.0-generate-001",
+    generate_audio: bool = True,
+) -> bool:
+    """
+    Generate AI video using Google Gemini Veo model.
+    Saves the video directly to output_path.
+    Returns True on success, False on failure.
+    """
+    if not settings.GOOGLE_GEMINI_API_KEY:
+        return False
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
+        # Veo 3 supports 6-8 second clips (API rejects values below 6)
+        clip_duration = 8 if duration >= 8 else max(6, min(8, duration))
+
+        def _run_generation() -> bytes | None:
+            operation = client.models.generate_videos(
+                model=model,
+                prompt=prompt,
+                config=types.GenerateVideosConfig(
+                    aspect_ratio=aspect_ratio,
+                    duration_seconds=clip_duration,
+                    number_of_videos=1,
+                ),
+            )
+            # Poll until complete (max 5 minutes)
+            for _ in range(30):
+                if operation.done:
+                    break
+                time.sleep(10)
+                operation = client.operations.get(operation)
+
+            if not operation.done:
+                print("[Gemini Veo] Timed out waiting for video generation")
+                return None
+
+            generated = operation.response.generated_videos
+            if not generated:
+                print("[Gemini Veo] No videos in response")
+                return None
+
+            return client.files.download(file=generated[0].video)
+
+        loop = asyncio.get_event_loop()
+        video_bytes = await loop.run_in_executor(None, _run_generation)
+
+        if not video_bytes:
+            return False
+
+        with open(output_path, "wb") as f:
+            f.write(video_bytes)
+
+        print(f"[Gemini Veo] Video saved to {output_path}")
+        return True
+
+    except Exception as e:
+        print(f"[Gemini Veo] Error: {e}")
+        return False
+
+
+def split_script_into_sentences(script: str) -> list[str]:
+    """
+    Split a script into individual sentences for per-scene video generation.
+    Filters out fragments that are too short to produce a meaningful visual.
+    """
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', script.strip())
+    return [s.strip() for s in sentences if len(s.strip()) > 15]
+
+
+def build_scene_prompt(sentence: str, topic: str, tone: str) -> str:
+    """Build a Veo 3 prompt for a single sentence/scene with native audio narration."""
+    return (
+        f"Cinematic, photorealistic vertical social media video scene. "
+        f"The narrator speaks exactly these words: \"{sentence}\" "
+        f"Visual context and overall topic: {topic}. "
+        f"Atmosphere and mood: {tone}. "
+        f"High quality, smooth dynamic camera motion, professional lighting, highly detailed. "
+        f"No text overlays, no subtitles, no watermarks, perfectly clear audio."
+    )
+
+
+async def generate_multi_scene_video_gemini(
+    sentences: list[str],
+    topic: str,
+    tone: str,
+    temp_dir: str,
+    output_path: str,
+    generate_audio: bool = True,
+) -> bool:
+    """
+    Generate one Veo 3 clip per sentence, then concatenate them into a single video.
+    Clips are generated with limited concurrency (2 at a time) to avoid rate limits.
+    Returns True on success, False on failure.
+    """
+    if not settings.GOOGLE_GEMINI_API_KEY or not sentences:
+        return False
+
+    semaphore = asyncio.Semaphore(2)
+
+    async def _generate_scene(i: int, sentence: str) -> str | None:
+        async with semaphore:
+            clip_path = os.path.join(temp_dir, f"scene_{i:02d}.mp4")
+            prompt = build_scene_prompt(sentence, topic, tone)
+            print(f"[Gemini Veo] Scene {i + 1}/{len(sentences)}: {sentence[:70]}...")
+            success = await generate_ai_video_gemini(
+                prompt=prompt,
+                output_path=clip_path,
+                duration=6,
+                aspect_ratio="9:16",
+                generate_audio=generate_audio,
+            )
+            return clip_path if success else None
+
+    tasks = [_generate_scene(i, s) for i, s in enumerate(sentences)]
+    clip_paths = [p for p in await asyncio.gather(*tasks) if p is not None]
+
+    if not clip_paths:
+        print("[Gemini Veo] No scenes generated successfully")
+        return False
+
+    if len(clip_paths) == 1:
+        import shutil
+        shutil.copy(clip_paths[0], output_path)
+        print(f"[Gemini Veo] Single scene saved to {output_path}")
+        return True
+
+    def _concatenate(paths: list[str], out: str) -> None:
+        from moviepy import VideoFileClip, concatenate_videoclips
+        clips = [VideoFileClip(p) for p in paths]
+        final = concatenate_videoclips(clips, method="compose")
+        final.write_videofile(
+            out,
+            fps=30,
+            codec="libx264",
+            audio_codec="aac",
+            preset="fast",
+            threads=4,
+            logger=None,
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-crf", "23",
+            ],
+        )
+        for c in clips:
+            c.close()
+        final.close()
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _concatenate, clip_paths, output_path)
+    print(f"[Gemini Veo] {len(clip_paths)} scenes concatenated -> {output_path}")
+    return True
 
 
 async def generate_ai_video_fal(
@@ -699,14 +868,16 @@ async def process_reel_generation(
                 reel.status = "generating_audio"
                 db_session.commit()
 
-        # Step 2: Generate voiceover
-        print(f"[Reel {reel_id}] Generating voiceover...")
+        # Step 2: Generate voiceover (only needed if Gemini native audio won't be used)
+        # We pre-check: if GOOGLE_GEMINI_API_KEY is set we'll use Veo 3 native audio,
+        # so skip Edge TTS generation entirely in that case.
         audio_path = os.path.join(temp_dir, "voiceover.mp3")
-        await generate_voiceover(result["script"], voice, audio_path)
-
-        # Upload audio
-        audio_url = await upload_reel_to_supabase(audio_path, user_id, "audio")
-        result["audio_url"] = audio_url
+        audio_url = None
+        if not settings.GOOGLE_GEMINI_API_KEY:
+            print(f"[Reel {reel_id}] Generating voiceover...")
+            await generate_voiceover(result["script"], voice, audio_path)
+            audio_url = await upload_reel_to_supabase(audio_path, user_id, "audio")
+            result["audio_url"] = audio_url
 
         if db_session:
             reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
@@ -717,10 +888,45 @@ async def process_reel_generation(
 
         # Step 3: Generate or fetch videos
         use_ai_video = False
-        ai_video_url = None
+        ai_video_path = os.path.join(temp_dir, "ai_video.mp4")
+        videos = []
 
-        # Try AI video generation first (fal.ai/Pika)
-        if settings.FAL_API_KEY:
+        # Visual prompt derived from the actual script so the video matches the narration
+        script_preview = result["script"][:300].strip()
+        video_prompt = (
+            f"Cinematic vertical social media reel video that visually depicts: {script_preview}. "
+            f"Topic: {topic}. Tone: {tone}. "
+            f"Smooth motion, engaging visuals, no text overlays, no subtitles."
+        )
+
+        # --- Option 1: Gemini Veo 3 — per-sentence multi-scene with native audio ---
+        native_audio_embedded = False
+        if settings.GOOGLE_GEMINI_API_KEY:
+            print(f"[Reel {reel_id}] Generating per-scene AI video with Gemini Veo 3 (native audio)...")
+            if db_session:
+                reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+                if reel:
+                    reel.status = "generating_ai_video"
+                    db_session.commit()
+
+            sentences = split_script_into_sentences(result["script"])
+            print(f"[Reel {reel_id}] Script split into {len(sentences)} scene(s)")
+
+            success = await generate_multi_scene_video_gemini(
+                sentences=sentences,
+                topic=topic,
+                tone=tone,
+                temp_dir=temp_dir,
+                output_path=ai_video_path,
+                generate_audio=False,
+            )
+            if success:
+                use_ai_video = True
+                native_audio_embedded = True
+                print(f"[Reel {reel_id}] Gemini Veo 3 multi-scene video with native audio generated successfully!")
+
+        # --- Option 2: fal.ai / Pika (secondary AI generator) ---
+        if not use_ai_video and settings.FAL_API_KEY:
             print(f"[Reel {reel_id}] Generating AI video with fal.ai/Pika...")
             if db_session:
                 reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
@@ -728,20 +934,18 @@ async def process_reel_generation(
                     reel.status = "generating_ai_video"
                     db_session.commit()
 
-            # Create a visual prompt from topic
-            video_prompt = f"Cinematic vertical video for social media reel about: {topic}. {tone} mood, engaging visuals, smooth motion."
-
             ai_video_url = await generate_ai_video_fal(
                 prompt=video_prompt,
                 duration=min(duration_target, 5),
                 aspect_ratio="9:16",
             )
-
             if ai_video_url:
+                print(f"[Reel {reel_id}] fal.ai video generated, downloading...")
+                await download_video(ai_video_url, ai_video_path)
                 use_ai_video = True
-                print(f"[Reel {reel_id}] AI video generated successfully!")
+                print(f"[Reel {reel_id}] fal.ai video ready!")
 
-        # Fallback to stock videos if AI generation failed or not configured
+        # --- Option 3: Pexels stock videos (fallback) ---
         if not use_ai_video:
             print(f"[Reel {reel_id}] Fetching stock videos from Pexels...")
             if db_session:
@@ -750,16 +954,10 @@ async def process_reel_generation(
                     reel.status = "fetching_videos"
                     db_session.commit()
 
-            # Extract key terms from topic for search
-            search_query = topic.split()[:3]  # First 3 words
-            search_query = " ".join(search_query)
-
+            search_query = " ".join(topic.split()[:3])
             videos = await fetch_pexels_videos(search_query, count=5)
-
             if not videos:
-                # Try with just the first word
                 videos = await fetch_pexels_videos(topic.split()[0], count=5)
-
             if not videos:
                 raise Exception("Could not find suitable stock videos")
 
@@ -772,14 +970,38 @@ async def process_reel_generation(
         # Step 4 & 5: Process video based on source
         output_path = os.path.join(temp_dir, "final_reel.mp4")
 
-        if use_ai_video and ai_video_url:
-            # Download AI-generated video and add audio
-            print(f"[Reel {reel_id}] Downloading AI video and adding audio...")
-            ai_video_path = os.path.join(temp_dir, "ai_video.mp4")
-            await download_video(ai_video_url, ai_video_path)
+        if use_ai_video:
+            if native_audio_embedded:
+                # Re-encode Veo 3 output to compress and ensure Instagram compatibility
+                print(f"[Reel {reel_id}] Re-encoding Veo 3 video for upload...")
 
-            # Add audio to AI video
-            await add_audio_to_video(ai_video_path, audio_path, output_path)
+                def _reencode(src: str, dst: str) -> None:
+                    from moviepy import VideoFileClip
+                    clip = VideoFileClip(src)
+                    clip.write_videofile(
+                        dst,
+                        fps=30,
+                        codec="libx264",
+                        audio_codec="aac",
+                        preset="fast",
+                        threads=4,
+                        logger=None,
+                        ffmpeg_params=[
+                            "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart",
+                            "-profile:v", "baseline",
+                            "-level", "3.0",
+                            "-crf", "26",
+                        ],
+                    )
+                    clip.close()
+
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _reencode, ai_video_path, output_path)
+            else:
+                # fal.ai silent video — mix in Edge TTS voiceover
+                print(f"[Reel {reel_id}] Adding Edge TTS voiceover to AI video...")
+                await add_audio_to_video(ai_video_path, audio_path, output_path)
 
         else:
             # Traditional flow: download stock videos and compose

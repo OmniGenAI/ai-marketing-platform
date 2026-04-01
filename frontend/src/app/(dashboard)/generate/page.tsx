@@ -33,15 +33,13 @@ import {
   AlertTriangle,
   Image as ImageIcon,
   Send,
-  ImageOff,
   Wand2,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useSubscription } from "@/hooks/use-subscription";
-import { BusinessImages } from "@/components/business-images";
-import type { BusinessImage, GenerateResponse } from "@/types";
+import type { GenerateResponse } from "@/types";
 
-type ImageOption = "none" | "business" | "ai" | "upload";
+type ImageOption = "ai" | "upload";
 
 export default function GeneratePage() {
   const router = useRouter();
@@ -58,8 +56,7 @@ export default function GeneratePage() {
   const [tone, setTone] = useState("professional");
   const [topic, setTopic] = useState("");
   const [topicError, setTopicError] = useState("");
-  const [imageOption, setImageOption] = useState<ImageOption>("none");
-  const [selectedImage, setSelectedImage] = useState<BusinessImage | null>(null);
+  const [imageOption, setImageOption] = useState<ImageOption>("upload");
   const [generatedContent, setGeneratedContent] = useState("");
   const [generatedHashtags, setGeneratedHashtags] = useState("");
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
@@ -68,6 +65,7 @@ export default function GeneratePage() {
   const [isPublishing, setIsPublishing] = useState(false);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   // Get available tones based on plan
   const getAvailableTones = () => {
@@ -99,11 +97,7 @@ export default function GeneratePage() {
     return true;
   };
 
-  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    // Validate file type
+  const uploadFile = async (file: File) => {
     const imageTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
     const videoTypes = ["video/mp4", "video/quicktime"];
     const allowedTypes = [...imageTypes, ...videoTypes];
@@ -114,7 +108,6 @@ export default function GeneratePage() {
       return;
     }
 
-    // Validate file size (50MB for videos, 15MB for images)
     const maxSize = isVideo ? 50 * 1024 * 1024 : 15 * 1024 * 1024;
     const maxSizeMB = isVideo ? 50 : 15;
     if (file.size > maxSize) {
@@ -126,9 +119,7 @@ export default function GeneratePage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-
       const response = await api.post<{ url: string }>("/api/upload/image", formData);
-
       setUploadedImageUrl(response.data.url);
       toast.success("Image uploaded successfully!");
     } catch (error: unknown) {
@@ -137,6 +128,31 @@ export default function GeneratePage() {
     } finally {
       setIsUploading(false);
     }
+  };
+
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) uploadFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) uploadFile(file);
   };
 
   const handleGenerate = async () => {
@@ -159,7 +175,6 @@ export default function GeneratePage() {
         tone,
         topic,
         image_option: imageOption,
-        business_image_id: imageOption === "business" ? selectedImage?.id : null,
         uploaded_image_url: imageOption === "upload" ? uploadedImageUrl : null,
       };
       console.log("[Generate] Payload:", payload);
@@ -267,9 +282,6 @@ export default function GeneratePage() {
   };
 
   const getDisplayImageUrl = () => {
-    if (imageOption === "business" && selectedImage) {
-      return selectedImage.url;
-    }
     if (imageOption === "ai" && generatedImageUrl) {
       return generatedImageUrl;
     }
@@ -415,39 +427,13 @@ export default function GeneratePage() {
 
               <div className="space-y-3">
                 <Label>Image Option</Label>
-                <div className="grid grid-cols-4 gap-2">
-                  <Button
-                    type="button"
-                    variant={imageOption === "none" ? "default" : "outline"}
-                    className="h-auto py-3 flex flex-col gap-1"
-                    onClick={() => {
-                      setImageOption("none");
-                      setSelectedImage(null);
-                      setUploadedImageUrl(null);
-                    }}
-                  >
-                    <ImageOff className="h-5 w-5" />
-                    <span className="text-xs">No Image</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={imageOption === "business" ? "default" : "outline"}
-                    className="h-auto py-3 flex flex-col gap-1"
-                    onClick={() => {
-                      setImageOption("business");
-                      setUploadedImageUrl(null);
-                    }}
-                  >
-                    <ImageIcon className="h-5 w-5" />
-                    <span className="text-xs">Business Image</span>
-                  </Button>
+                <div className="grid grid-cols-2 gap-2">
                   <Button
                     type="button"
                     variant={imageOption === "upload" ? "default" : "outline"}
                     className="h-auto py-3 flex flex-col gap-1"
                     onClick={() => {
                       setImageOption("upload");
-                      setSelectedImage(null);
                     }}
                   >
                     <ImageIcon className="h-5 w-5" />
@@ -459,7 +445,6 @@ export default function GeneratePage() {
                     className="h-auto py-3 flex flex-col gap-1"
                     onClick={() => {
                       setImageOption("ai");
-                      setSelectedImage(null);
                       setUploadedImageUrl(null);
                     }}
                   >
@@ -469,71 +454,73 @@ export default function GeneratePage() {
                 </div>
               </div>
 
-              {imageOption === "business" && (
-                <div className="space-y-2">
-                  <Label>Select Image</Label>
-                  <div className="border rounded-lg p-4 max-h-64 overflow-y-auto">
-                    <BusinessImages
-                      selectedImageId={selectedImage?.id}
-                      onSelectImage={setSelectedImage}
-                      selectionMode
-                    />
-                  </div>
-                </div>
-              )}
-
               {imageOption === "upload" && (
                 <div className="space-y-2">
                   <Label>Upload Image</Label>
-                  <div className="border-2 border-dashed rounded-lg p-6 text-center">
-                    {uploadedImageUrl ? (
-                      <div className="space-y-3">
-                        <div className="relative w-full h-48 rounded-lg overflow-hidden">
-                          <img
-                            src={uploadedImageUrl}
-                            alt="Uploaded"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setUploadedImageUrl(null);
-                            document.getElementById("image-upload")?.click();
-                          }}
-                        >
-                          Change Image
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <ImageIcon className="h-12 w-12 mx-auto text-muted-foreground" />
-                        <div>
-                          <p className="text-sm text-muted-foreground">
-                            Click to upload or drag and drop
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-1">
-                            PNG, JPG, GIF, WebP or MP4 (max 50MB)
-                          </p>
-                        </div>
-                        <Input
-                          id="image-upload"
-                          type="file"
-                          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp,video/mp4,video/quicktime"
-                          onChange={handleImageUpload}
-                          disabled={isUploading}
-                          className="cursor-pointer"
+                  {uploadedImageUrl ? (
+                    <div className="space-y-3">
+                      <div className="relative w-full h-48 rounded-lg overflow-hidden border">
+                        <img
+                          src={uploadedImageUrl}
+                          alt="Uploaded"
+                          className="w-full h-full object-cover"
                         />
-                        {isUploading && (
-                          <p className="text-sm text-muted-foreground">
-                            Uploading...
-                          </p>
-                        )}
                       </div>
-                    )}
-                  </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUploadedImageUrl(null)}
+                      >
+                        Remove &amp; Replace
+                      </Button>
+                    </div>
+                  ) : (
+                    <div
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                      onClick={() => !isUploading && document.getElementById("image-upload")?.click()}
+                      className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+                        isDragging
+                          ? "border-primary bg-primary/5"
+                          : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30"
+                      } ${isUploading ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+                    >
+                      {isUploading ? (
+                        <div className="flex flex-col items-center gap-3">
+                          <RefreshCw className="h-10 w-10 text-primary animate-spin" />
+                          <p className="text-sm font-medium">Uploading...</p>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-3">
+                          <div className={`p-3 rounded-full transition-colors ${
+                            isDragging ? "bg-primary/10" : "bg-muted"
+                          }`}>
+                            <ImageIcon className={`h-8 w-8 transition-colors ${
+                              isDragging ? "text-primary" : "text-muted-foreground"
+                            }`} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">
+                              {isDragging ? "Drop to upload" : "Click to upload or drag and drop"}
+                            </p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              PNG, JPG, GIF, WebP or MP4 (max 50MB)
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      <input
+                        id="image-upload"
+                        type="file"
+                        accept="image/jpeg,image/jpg,image/png,image/gif,image/webp,video/mp4,video/quicktime"
+                        onChange={handleImageUpload}
+                        disabled={isUploading}
+                        className="hidden"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
