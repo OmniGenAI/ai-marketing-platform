@@ -136,3 +136,40 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/api/debug/imports")
+def debug_imports():
+    """Debug endpoint to check if all modules import correctly."""
+    results = {}
+
+    # Check edge_tts
+    try:
+        import edge_tts
+        results["edge_tts"] = "ok"
+    except Exception as e:
+        results["edge_tts"] = f"error: {str(e)}"
+
+    # Check moviepy
+    try:
+        from moviepy import VideoFileClip
+        results["moviepy"] = "ok"
+    except Exception as e:
+        results["moviepy"] = f"error: {str(e)}"
+
+    # Check PIL
+    try:
+        from PIL import Image
+        results["PIL"] = "ok"
+    except Exception as e:
+        results["PIL"] = f"error: {str(e)}"
+
+    # Check ffmpeg
+    import subprocess
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+        results["ffmpeg"] = "ok" if result.returncode == 0 else f"error: {result.stderr}"
+    except Exception as e:
+        results["ffmpeg"] = f"error: {str(e)}"
+
+    return results

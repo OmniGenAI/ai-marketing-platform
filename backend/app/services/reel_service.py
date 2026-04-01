@@ -11,9 +11,20 @@ import time
 import uuid
 from typing import Optional
 
-import edge_tts
-
 from app.config import settings
+
+# Lazy import edge_tts to prevent crashes if not available
+_edge_tts = None
+
+def _get_edge_tts():
+    global _edge_tts
+    if _edge_tts is None:
+        try:
+            import edge_tts
+            _edge_tts = edge_tts
+        except ImportError as e:
+            raise ImportError(f"edge_tts is required for voiceover generation: {e}")
+    return _edge_tts
 
 
 async def generate_ai_video_fal(
@@ -328,6 +339,7 @@ async def generate_voiceover(script: str, voice: str, output_path: str) -> str:
     Generate voiceover audio using Edge TTS.
     Returns the path to the generated audio file.
     """
+    edge_tts = _get_edge_tts()
     communicate = edge_tts.Communicate(script, voice)
     await communicate.save(output_path)
     return output_path
