@@ -16,37 +16,52 @@ export function useAuth() {
 
   const fetchUser = useCallback(async () => {
     try {
-      console.log("[Auth] Fetching session...");
-      console.log("[Auth] Cookies:", document.cookie);
+      console.log("[Auth] Starting auth check...");
 
-      // Try getUser first (makes server call, more reliable)
-      const { data: { user: supabaseUserData }, error: userError } = await supabase.auth.getUser();
+      // Get session directly (faster, reads from cookies)
+      const { data: { session: currentSession }, error: sessionError } = await supabase.auth.getSession();
 
-      if (userError) {
-        console.error("[Auth] getUser error:", userError.message);
+      if (sessionError) {
+        console.error("[Auth] Session error:", sessionError.message);
+        setLoading(false);
+        return;
       }
 
-      console.log("[Auth] User from getUser:", !!supabaseUserData);
+      console.log("[Auth] Session exists:", !!currentSession);
+      console.log("[Auth] Session user:", currentSession?.user?.email);
 
-      if (supabaseUserData) {
-        setSupabaseUser(supabaseUserData);
-
-        // Get session for token
-        const { data: { session: currentSession } } = await supabase.auth.getSession();
+      if (currentSession?.user) {
         setSession(currentSession);
+        setSupabaseUser(currentSession.user);
 
-        console.log("[Auth] Fetching user from backend...");
-        const response = await api.get<User>("/api/auth/me");
-        console.log("[Auth] User fetched:", response.data?.email);
-        setUser(response.data);
+        // Fetch user from backend
+        try {
+          console.log("[Auth] Fetching from backend...");
+          const response = await api.get<User>("/api/auth/me");
+          console.log("[Auth] Backend response:", response.data?.email);
+          setUser(response.data);
+        } catch (backendError: any) {
+          console.error("[Auth] Backend error:", backendError?.response?.status, backendError?.message);
+          // Try refreshing session
+          const { data: refreshData } = await supabase.auth.refreshSession();
+          if (refreshData.session) {
+            setSession(refreshData.session);
+            try {
+              const response = await api.get<User>("/api/auth/me");
+              setUser(response.data);
+            } catch {
+              setUser(null);
+            }
+          }
+        }
       } else {
-        console.log("[Auth] No user, clearing state");
+        console.log("[Auth] No session found");
         setSession(null);
         setSupabaseUser(null);
         setUser(null);
       }
-    } catch (err) {
-      console.error("[Auth] Error:", err);
+    } catch (err: any) {
+      console.error("[Auth] Fatal error:", err?.message);
       setUser(null);
       setSession(null);
       setSupabaseUser(null);
@@ -58,13 +73,13 @@ export function useAuth() {
   useEffect(() => {
     fetchUser();
 
-    // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        setSession(session);
-        setSupabaseUser(session?.user ?? null);
+      async (event, newSession) => {
+        console.log("[Auth] State change:", event);
+        setSession(newSession);
+        setSupabaseUser(newSession?.user ?? null);
 
-        if (session?.user) {
+        if (newSession?.user) {
           try {
             const response = await api.get<User>("/api/auth/me");
             setUser(response.data);
@@ -72,10 +87,6 @@ export function useAuth() {
             setUser(null);
           }
         } else {
-          setUser(null);
-        }
-
-        if (event === "SIGNED_OUT") {
           setUser(null);
         }
       }
@@ -92,10 +103,7 @@ export function useAuth() {
       password,
     });
 
-    if (error) {
-      throw error;
-    }
-
+    if (error) throw error;
     return data;
   };
 
@@ -103,18 +111,10 @@ export function useAuth() {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        data: {
-          name,
-          full_name: name,
-        },
-      },
+      options: { data: { name, full_name: name } },
     });
 
-    if (error) {
-      throw error;
-    }
-
+    if (error) throw error;
     return data;
   };
 
@@ -126,14 +126,5 @@ export function useAuth() {
     window.location.href = "/login";
   };
 
-  return {
-    user,
-    supabaseUser,
-    session,
-    loading,
-    login,
-    register,
-    logout,
-    fetchUser,
-  };
+  return { user, supabaseUser, session, loading, login, register, logout, fetchUser };
 }
