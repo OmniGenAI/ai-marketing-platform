@@ -3,128 +3,80 @@ import { createClient } from "@/lib/supabase/client";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  timeout: 60000, // 60 second timeout
+  timeout: 60000,
 });
 
-// Track if we're currently refreshing to prevent multiple refresh attempts
-let isRefreshing = false;
-let refreshPromise: Promise<string | null> | null = null;
+// Store current access token globally
+let currentAccessToken: string | null = null;
 
-// Cache session to avoid repeated Supabase calls
-let cachedSession: { token: string; expiry: number } | null = null;
-
-async function refreshToken(): Promise<string | null> {
-  const supabase = createClient();
-  const { data, error } = await supabase.auth.refreshSession();
-  if (error || !data.session) {
-    return null;
-  }
-  // Update cache with refreshed token
-  cachedSession = {
-    token: data.session.access_token,
-    expiry: Date.now() + 5 * 60 * 1000,
-  };
-  return data.session.access_token;
+// Function to update token (called from auth hook)
+export function setAccessToken(token: string | null) {
+  currentAccessToken = token;
 }
 
+// Request interceptor - add auth token
 api.interceptors.request.use(
   async (config) => {
-    try {
-      // Check if we have a valid cached token
-      const now = Date.now();
-      if (cachedSession && cachedSession.expiry > now) {
-        config.headers.Authorization = `Bearer ${cachedSession.token}`;
-        return config;
-      }
-
-      const supabase = createClient();
-
-      // Get session from storage - this is fast and doesn't make a network call
-      // The backend will validate the token; if invalid, we'll get 401 and refresh
-      const { data: { session } } = await supabase.auth.getSession();
-
-      if (session?.access_token) {
-        // Check if token is expired
-        const tokenExpiry = session.expires_at ? session.expires_at * 1000 : now + 3600000;
-        const isExpiringSoon = tokenExpiry - now < 60000; // Less than 1 minute left
-
-        if (isExpiringSoon) {
-          // Token is expiring soon, refresh it
-          const newToken = await refreshToken();
-          if (newToken) {
-            config.headers.Authorization = `Bearer ${newToken}`;
-            return config;
-          }
-        }
-
-        // Cache for 5 minutes or until token expiry (whichever is shorter)
-        const cacheExpiry = Math.min(now + 5 * 60 * 1000, tokenExpiry - 60000);
-        cachedSession = {
-          token: session.access_token,
-          expiry: cacheExpiry,
-        };
-        config.headers.Authorization = `Bearer ${session.access_token}`;
-      }
-
-      return config;
-    } catch (error) {
-      console.error("[API] Request interceptor error:", error);
-      cachedSession = null;
-      // Still allow request to proceed without auth token
+    // Use stored token first
+    if (currentAccessToken) {
+      config.headers.Authorization = `Bearer ${currentAccessToken}`;
       return config;
     }
+
+    // Fallback: try to get from Supabase (with timeout)
+    try {
+      const supabase = createClient();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), 2000)
+      );
+      const sessionPromise = supabase.auth.getSession();
+
+      const { data: { session } } = await Promise.race([sessionPromise, timeoutPromise]) as any;
+
+      if (session?.access_token) {
+        currentAccessToken = session.access_token;
+        config.headers.Authorization = `Bearer ${session.access_token}`;
+      }
+    } catch {
+      // Session fetch timed out or failed
+    }
+
+    return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
+// Response interceptor - handle 401
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
-    // If 401 and we haven't tried refreshing yet
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
-      // If not already refreshing, start refresh
-      if (!isRefreshing) {
-        isRefreshing = true;
-        refreshPromise = refreshToken();
-      }
-
       try {
-        const newToken = await refreshPromise;
-        isRefreshing = false;
-        refreshPromise = null;
+        const supabase = createClient();
+        const { data } = await supabase.auth.refreshSession();
 
-        if (newToken) {
-          // Clear old cache and update with new token
-          cachedSession = {
-            token: newToken,
-            expiry: Date.now() + 5 * 60 * 1000,
-          };
-          // Retry the original request with new token
-          originalRequest.headers.Authorization = `Bearer ${newToken}`;
+        if (data.session) {
+          currentAccessToken = data.session.access_token;
+          originalRequest.headers.Authorization = `Bearer ${data.session.access_token}`;
           return api(originalRequest);
         }
       } catch {
-        isRefreshing = false;
-        refreshPromise = null;
+        // Refresh failed
       }
 
-      // Clear cache on auth failure
-      cachedSession = null;
-
-      // If refresh failed, sign out and redirect
-      const supabase = createClient();
-      await supabase.auth.signOut();
-
+      // Redirect to login
       if (typeof window !== "undefined") {
+        currentAccessToken = null;
+        const supabase = createClient();
+        await supabase.auth.signOut();
         window.location.href = "/login";
       }
     }
+
     return Promise.reject(error);
   }
 );

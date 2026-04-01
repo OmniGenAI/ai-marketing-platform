@@ -7,6 +7,7 @@ const protectedPaths = [
   "/business-config",
   "/generate",
   "/posts",
+  "/reels",
   "/subscription",
   "/settings",
 ];
@@ -79,6 +80,7 @@ export const config = {
     "/business-config/:path*",
     "/generate/:path*",
     "/posts/:path*",
+    "/reels/:path*",
     "/subscription/:path*",
     "/settings/:path*",
     "/login",

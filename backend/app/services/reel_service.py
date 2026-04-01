@@ -1,18 +1,96 @@
 """
 Reel generation service.
-Uses Edge TTS for voiceover, Pexels for stock videos, and MoviePy for composition.
+Uses Edge TTS for voiceover, fal.ai/Pika for AI videos or Pexels for stock videos.
 """
 import asyncio
 import httpx
 import json
 import os
 import tempfile
+import time
 import uuid
 from typing import Optional
 
 import edge_tts
 
 from app.config import settings
+
+
+async def generate_ai_video_fal(
+    prompt: str,
+    duration: int = 5,
+    aspect_ratio: str = "9:16",
+) -> str | None:
+    """
+    Generate AI video using fal.ai's Pika API.
+    Returns the video URL or None if failed.
+    """
+    if not settings.FAL_API_KEY:
+        return None
+
+    try:
+        # Submit the video generation request
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Start the generation
+            response = await client.post(
+                "https://queue.fal.run/fal-ai/pika/v2/text-to-video",
+                headers={
+                    "Authorization": f"Key {settings.FAL_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "prompt": prompt,
+                    "aspect_ratio": aspect_ratio,
+                    "duration": min(duration, 5),  # Pika max 5 seconds per clip
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            # Get the request ID for polling
+            request_id = result.get("request_id")
+            if not request_id:
+                print(f"[fal.ai] No request_id in response: {result}")
+                return None
+
+            # Poll for completion
+            status_url = f"https://queue.fal.run/fal-ai/pika/v2/text-to-video/requests/{request_id}/status"
+
+            for _ in range(60):  # Max 60 attempts (2 minutes)
+                await asyncio.sleep(2)
+
+                status_response = await client.get(
+                    status_url,
+                    headers={"Authorization": f"Key {settings.FAL_API_KEY}"},
+                )
+                status_data = status_response.json()
+                status = status_data.get("status")
+
+                if status == "COMPLETED":
+                    # Get the result
+                    result_url = f"https://queue.fal.run/fal-ai/pika/v2/text-to-video/requests/{request_id}"
+                    result_response = await client.get(
+                        result_url,
+                        headers={"Authorization": f"Key {settings.FAL_API_KEY}"},
+                    )
+                    result_data = result_response.json()
+                    video_url = result_data.get("video", {}).get("url")
+                    if video_url:
+                        print(f"[fal.ai] Video generated: {video_url}")
+                        return video_url
+                    break
+
+                elif status == "FAILED":
+                    error = status_data.get("error", "Unknown error")
+                    print(f"[fal.ai] Generation failed: {error}")
+                    return None
+
+            print("[fal.ai] Generation timed out")
+            return None
+
+    except Exception as e:
+        print(f"[fal.ai] Error: {e}")
+        return None
 
 
 # Available TTS voices
@@ -75,7 +153,7 @@ def generate_reel_script(
     niche: str = "",
 ) -> dict:
     """
-    Generate a short script for the reel using Google Gemini AI.
+    Generate a short script for the reel using Grok AI (xAI) or fallback to Gemini.
     Returns script text and hashtags.
     """
     # Estimate word count based on speaking rate (~150 words/minute)
@@ -106,32 +184,143 @@ HASHTAGS:
 [Your hashtags here]
 """
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
+    # Try Groq first (fastest, free tier available)
+    if settings.GROQ_API_KEY:
+        try:
+            response = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a social media content expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result["choices"][0]["message"]["content"]
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+            return _parse_script_response(text)
 
-    try:
-        response = httpx.post(api_url, json=payload, timeout=30.0)
-        response.raise_for_status()
-        result = response.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            print(f"Groq failed, trying next provider: {e}")
 
-        script = ""
-        hashtags = ""
+    # Try Grok AI (xAI)
+    if settings.XAI_API_KEY:
+        try:
+            response = httpx.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-3-latest",
+                    "messages": [
+                        {"role": "system", "content": "You are a social media content expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result["choices"][0]["message"]["content"]
 
-        if "SCRIPT:" in text and "HASHTAGS:" in text:
-            parts = text.split("HASHTAGS:")
-            script = parts[0].replace("SCRIPT:", "").strip()
-            hashtags = parts[1].strip()
-        else:
-            script = text.strip()
+            return _parse_script_response(text)
 
-        return {"script": script, "hashtags": hashtags}
+        except Exception as e:
+            print(f"Grok AI failed, falling back to Gemini: {e}")
 
-    except Exception as e:
-        raise Exception(f"Failed to generate script: {str(e)}")
+    # Fallback to Google Gemini
+    if settings.GOOGLE_GEMINI_API_KEY:
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+
+        try:
+            response = httpx.post(api_url, json=payload, timeout=30.0)
+            response.raise_for_status()
+            result = response.json()
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+            return _parse_script_response(text)
+
+        except Exception as e:
+            raise Exception(f"Failed to generate script with Gemini: {str(e)}")
+
+    raise Exception("No AI API key configured. Set XAI_API_KEY or GOOGLE_GEMINI_API_KEY.")
+
+
+def _parse_script_response(text: str) -> dict:
+    """Parse the AI response to extract script and hashtags."""
+    script = ""
+    hashtags = ""
+
+    if "SCRIPT:" in text and "HASHTAGS:" in text:
+        parts = text.split("HASHTAGS:")
+        script = parts[0].replace("SCRIPT:", "").strip()
+        hashtags = parts[1].strip()
+    else:
+        script = text.strip()
+
+    return {"script": script, "hashtags": hashtags}
+
+
+async def add_audio_to_video(video_path: str, audio_path: str, output_path: str) -> str:
+    """
+    Add audio track to a video file.
+    Used for combining AI-generated video with voiceover.
+    """
+    from moviepy import VideoFileClip, AudioFileClip
+
+    video = VideoFileClip(video_path)
+    audio = AudioFileClip(audio_path)
+
+    # If audio is longer than video, loop the video
+    if audio.duration > video.duration:
+        from moviepy import concatenate_videoclips
+        loops_needed = int(audio.duration / video.duration) + 1
+        video = concatenate_videoclips([video] * loops_needed, method="compose")
+
+    # Trim video to audio length
+    video = video.subclipped(0, min(audio.duration + 0.5, video.duration))
+
+    # Add audio
+    video = video.with_audio(audio)
+
+    # Write output
+    video.write_videofile(
+        output_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        preset="fast",
+        threads=4,
+        logger=None,
+        ffmpeg_params=[
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-profile:v", "baseline",
+            "-level", "3.0",
+            "-crf", "23",
+        ],
+    )
+
+    video.close()
+    audio.close()
+
+    return output_path
 
 
 async def generate_voiceover(script: str, voice: str, output_path: str) -> str:
@@ -484,62 +673,107 @@ async def process_reel_generation(
                 reel.status = "fetching_videos"
                 db_session.commit()
 
-        # Step 3: Fetch stock videos
-        print(f"[Reel {reel_id}] Fetching stock videos...")
-        # Extract key terms from topic for search
-        search_query = topic.split()[:3]  # First 3 words
-        search_query = " ".join(search_query)
+        # Step 3: Generate or fetch videos
+        use_ai_video = False
+        ai_video_url = None
 
-        videos = await fetch_pexels_videos(search_query, count=5)
+        # Try AI video generation first (fal.ai/Pika)
+        if settings.FAL_API_KEY:
+            print(f"[Reel {reel_id}] Generating AI video with fal.ai/Pika...")
+            if db_session:
+                reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+                if reel:
+                    reel.status = "generating_ai_video"
+                    db_session.commit()
 
-        if not videos:
-            # Try with just the first word
-            videos = await fetch_pexels_videos(topic.split()[0], count=5)
+            # Create a visual prompt from topic
+            video_prompt = f"Cinematic vertical video for social media reel about: {topic}. {tone} mood, engaging visuals, smooth motion."
 
-        if not videos:
-            raise Exception("Could not find suitable stock videos")
+            ai_video_url = await generate_ai_video_fal(
+                prompt=video_prompt,
+                duration=min(duration_target, 5),
+                aspect_ratio="9:16",
+            )
+
+            if ai_video_url:
+                use_ai_video = True
+                print(f"[Reel {reel_id}] AI video generated successfully!")
+
+        # Fallback to stock videos if AI generation failed or not configured
+        if not use_ai_video:
+            print(f"[Reel {reel_id}] Fetching stock videos from Pexels...")
+            if db_session:
+                reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+                if reel:
+                    reel.status = "fetching_videos"
+                    db_session.commit()
+
+            # Extract key terms from topic for search
+            search_query = topic.split()[:3]  # First 3 words
+            search_query = " ".join(search_query)
+
+            videos = await fetch_pexels_videos(search_query, count=5)
+
+            if not videos:
+                # Try with just the first word
+                videos = await fetch_pexels_videos(topic.split()[0], count=5)
+
+            if not videos:
+                raise Exception("Could not find suitable stock videos")
 
         if db_session:
             reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
             if reel:
-                reel.status = "downloading_videos"
+                reel.status = "downloading_videos" if not use_ai_video else "processing_video"
                 db_session.commit()
 
-        # Step 4: Download videos in parallel
-        print(f"[Reel {reel_id}] Downloading {len(videos[:3])} videos in parallel...")
-
-        async def download_with_path(i: int, video: dict) -> str | None:
-            video_path = os.path.join(temp_dir, f"clip_{i}.mp4")
-            try:
-                await download_video(video["url"], video_path)
-                return video_path
-            except Exception as e:
-                print(f"Failed to download video {i}: {e}")
-                return None
-
-        # Download all videos concurrently
-        download_tasks = [download_with_path(i, v) for i, v in enumerate(videos[:3])]
-        results = await asyncio.gather(*download_tasks)
-        video_paths = [p for p in results if p is not None]
-
-        if not video_paths:
-            raise Exception("Could not download any videos")
-
-        if db_session:
-            reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
-            if reel:
-                reel.status = "composing_video"
-                db_session.commit()
-
-        # Step 5: Compose final video
-        print(f"[Reel {reel_id}] Composing final video...")
+        # Step 4 & 5: Process video based on source
         output_path = os.path.join(temp_dir, "final_reel.mp4")
-        compose_reel(
-            video_paths=video_paths,
-            audio_path=audio_path,
-            output_path=output_path,
-            target_duration=duration_target,
-        )
+
+        if use_ai_video and ai_video_url:
+            # Download AI-generated video and add audio
+            print(f"[Reel {reel_id}] Downloading AI video and adding audio...")
+            ai_video_path = os.path.join(temp_dir, "ai_video.mp4")
+            await download_video(ai_video_url, ai_video_path)
+
+            # Add audio to AI video
+            await add_audio_to_video(ai_video_path, audio_path, output_path)
+
+        else:
+            # Traditional flow: download stock videos and compose
+            print(f"[Reel {reel_id}] Downloading {len(videos[:3])} videos in parallel...")
+
+            async def download_with_path(i: int, video: dict) -> str | None:
+                video_path = os.path.join(temp_dir, f"clip_{i}.mp4")
+                try:
+                    await download_video(video["url"], video_path)
+                    return video_path
+                except Exception as e:
+                    print(f"Failed to download video {i}: {e}")
+                    return None
+
+            # Download all videos concurrently
+            download_tasks = [download_with_path(i, v) for i, v in enumerate(videos[:3])]
+            results = await asyncio.gather(*download_tasks)
+            video_paths = [p for p in results if p is not None]
+
+            if not video_paths:
+                raise Exception("Could not download any videos")
+
+            if db_session:
+                reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+                if reel:
+                    reel.status = "composing_video"
+                    db_session.commit()
+
+            # Compose final video
+            print(f"[Reel {reel_id}] Composing final video...")
+            compose_reel(
+                video_paths=video_paths,
+                audio_path=audio_path,
+                output_path=output_path,
+                target_duration=duration_target,
+            )
 
         # Upload final video
         video_url = await upload_reel_to_supabase(output_path, user_id, "video")

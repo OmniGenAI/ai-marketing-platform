@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
-import api from "@/lib/api";
+import api, { setAccessToken } from "@/lib/api";
 import type { User } from "@/types";
 import type { User as SupabaseUser, Session } from "@supabase/supabase-js";
 
@@ -14,51 +14,17 @@ export function useAuth() {
 
   const supabase = createClient();
 
-  const fetchUser = useCallback(async () => {
+  // Fetch backend user when we have a session
+  const fetchBackendUser = async (currentSession: Session | null) => {
+    if (!currentSession?.user) {
+      setUser(null);
+      setLoading(false);
+      return;
+    }
+
     try {
-      // First check if we have a session at all (fast, from storage)
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-
-      if (!currentSession) {
-        // No session in storage, user is not logged in
-        setSession(null);
-        setSupabaseUser(null);
-        setUser(null);
-        return;
-      }
-
-      setSession(currentSession);
-      setSupabaseUser(currentSession.user);
-
-      // Try to fetch user profile from our backend
-      // The backend will validate the token with Supabase
-      try {
-        const response = await api.get<User>("/api/auth/me");
-        setUser(response.data);
-      } catch (apiError) {
-        // If backend fails, try to refresh the session
-        const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession();
-
-        if (refreshError || !refreshData.session) {
-          // Refresh failed, clear everything
-          setSession(null);
-          setSupabaseUser(null);
-          setUser(null);
-          return;
-        }
-
-        // Retry with refreshed session
-        setSession(refreshData.session);
-        setSupabaseUser(refreshData.session.user);
-
-        try {
-          const response = await api.get<User>("/api/auth/me");
-          setUser(response.data);
-        } catch {
-          // Still failing, clear auth state
-          setUser(null);
-        }
-      }
+      const response = await api.get<User>("/api/auth/me");
+      setUser(response.data);
     } catch {
       setUser(null);
       setSession(null);
@@ -66,30 +32,24 @@ export function useAuth() {
     } finally {
       setLoading(false);
     }
-  }, [supabase.auth]);
+  };
 
   useEffect(() => {
-    fetchUser();
-
-    // Listen for auth state changes
+    // Listen for auth state changes - this is the primary source
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        setSession(session);
-        setSupabaseUser(session?.user ?? null);
+      async (event, newSession) => {
+        // Update global token for API calls
+        setAccessToken(newSession?.access_token ?? null);
 
-        if (session?.user) {
-          try {
-            const response = await api.get<User>("/api/auth/me");
-            setUser(response.data);
-          } catch {
-            setUser(null);
-          }
-        } else {
-          setUser(null);
-        }
+        setSession(newSession);
+        setSupabaseUser(newSession?.user ?? null);
 
-        if (event === "SIGNED_OUT") {
+        // Fetch backend user on sign in or initial
+        if (event === "SIGNED_IN" || event === "INITIAL_SESSION" || event === "TOKEN_REFRESHED") {
+          await fetchBackendUser(newSession);
+        } else if (event === "SIGNED_OUT") {
           setUser(null);
+          setLoading(false);
         }
       }
     );
@@ -97,18 +57,11 @@ export function useAuth() {
     return () => {
       subscription.unsubscribe();
     };
-  }, [fetchUser, supabase.auth]);
+  }, [supabase.auth]);
 
   const login = async (email: string, password: string) => {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      throw error;
-    }
-
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
     return data;
   };
 
@@ -116,18 +69,9 @@ export function useAuth() {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        data: {
-          name,
-          full_name: name,
-        },
-      },
+      options: { data: { name, full_name: name } },
     });
-
-    if (error) {
-      throw error;
-    }
-
+    if (error) throw error;
     return data;
   };
 
@@ -139,14 +83,9 @@ export function useAuth() {
     window.location.href = "/login";
   };
 
-  return {
-    user,
-    supabaseUser,
-    session,
-    loading,
-    login,
-    register,
-    logout,
-    fetchUser,
+  const fetchUser = async () => {
+    await fetchBackendUser(session);
   };
+
+  return { user, supabaseUser, session, loading, login, register, logout, fetchUser };
 }
