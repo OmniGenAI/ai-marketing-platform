@@ -84,9 +84,61 @@ def seed_default_plans():
         db.close()
 
 
+def ensure_tables_exist():
+    """Ensure all tables exist in the database."""
+    from sqlalchemy import text
+
+    if not SessionLocal:
+        print("⚠️ Database not configured, skipping table check")
+        return
+
+    db = SessionLocal()
+    try:
+        # Check if reels table exists
+        result = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'reels')"))
+        exists = result.scalar()
+
+        if not exists:
+            print("📦 Creating reels table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS reels (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL REFERENCES users(id),
+                    topic VARCHAR(500) NOT NULL,
+                    tone VARCHAR(50) NOT NULL DEFAULT 'professional',
+                    voice VARCHAR(100) NOT NULL DEFAULT 'en-US-JennyNeural',
+                    duration_target INTEGER NOT NULL DEFAULT 30,
+                    script TEXT,
+                    hashtags TEXT,
+                    audio_url TEXT,
+                    video_url TEXT,
+                    thumbnail_url TEXT,
+                    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    platform VARCHAR(50) NOT NULL DEFAULT 'instagram',
+                    published_at TIMESTAMP WITH TIME ZONE,
+                    instagram_media_id VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_reels_user_id ON reels(user_id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_reels_status ON reels(status)"))
+            db.commit()
+            print("✅ Reels table created successfully")
+        else:
+            print("✅ Reels table already exists")
+    except Exception as e:
+        print(f"❌ Error checking/creating tables: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    ensure_tables_exist()
     seed_default_plans()
     yield
     # Shutdown (nothing to do)
@@ -98,31 +150,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration
-cors_origins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://frontend-seven-ruby-55.vercel.app",
-    "https://ai-marketing-platform.vercel.app",
-    "https://ai-marketing-platform-nine.vercel.app",
-]
-
-# Add FRONTEND_URL from settings
-if settings.FRONTEND_URL and settings.FRONTEND_URL not in cors_origins:
-    cors_origins.append(settings.FRONTEND_URL)
-
-# Add any additional origins from environment
-if settings.ADDITIONAL_CORS_ORIGINS:
-    for origin in settings.ADDITIONAL_CORS_ORIGINS.split(","):
-        origin = origin.strip()
-        if origin and origin not in cors_origins:
-            cors_origins.append(origin)
-
-print(f"[CORS] Allowed origins: {cors_origins}")
+# CORS configuration - use regex to allow all Vercel deployments
+print("[CORS] Allowing localhost and all *.vercel.app domains")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],

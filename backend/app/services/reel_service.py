@@ -11,9 +11,20 @@ import time
 import uuid
 from typing import Optional
 
-import edge_tts
-
 from app.config import settings
+
+# Lazy import edge_tts to prevent crashes if not available
+_edge_tts = None
+
+def _get_edge_tts():
+    global _edge_tts
+    if _edge_tts is None:
+        try:
+            import edge_tts
+            _edge_tts = edge_tts
+        except ImportError as e:
+            raise ImportError(f"edge_tts is required for voiceover generation: {e}")
+    return _edge_tts
 
 
 async def generate_ai_video_fal(
@@ -282,22 +293,28 @@ async def add_audio_to_video(video_path: str, audio_path: str, output_path: str)
     Add audio track to a video file.
     Used for combining AI-generated video with voiceover.
     """
-    from moviepy import VideoFileClip, AudioFileClip
+    try:
+        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = True
+    except ImportError:
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = False
 
     video = VideoFileClip(video_path)
     audio = AudioFileClip(audio_path)
 
     # If audio is longer than video, loop the video
     if audio.duration > video.duration:
-        from moviepy import concatenate_videoclips
         loops_needed = int(audio.duration / video.duration) + 1
         video = concatenate_videoclips([video] * loops_needed, method="compose")
 
     # Trim video to audio length
-    video = video.subclipped(0, min(audio.duration + 0.5, video.duration))
-
-    # Add audio
-    video = video.with_audio(audio)
+    if MOVIEPY_V2:
+        video = video.subclipped(0, min(audio.duration + 0.5, video.duration))
+        video = video.with_audio(audio)
+    else:
+        video = video.subclip(0, min(audio.duration + 0.5, video.duration))
+        video = video.set_audio(audio)
 
     # Write output
     video.write_videofile(
@@ -328,6 +345,7 @@ async def generate_voiceover(script: str, voice: str, output_path: str) -> str:
     Generate voiceover audio using Edge TTS.
     Returns the path to the generated audio file.
     """
+    edge_tts = _get_edge_tts()
     communicate = edge_tts.Communicate(script, voice)
     await communicate.save(output_path)
     return output_path
@@ -394,12 +412,16 @@ async def fetch_pexels_videos(
 
 async def download_video(url: str, output_path: str) -> str:
     """Download video from URL to local path using streaming."""
+    print(f"[download_video] Downloading: {url[:100]}...")
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
+            total_size = 0
             with open(output_path, "wb") as f:
                 async for chunk in response.aiter_bytes(chunk_size=8192):
                     f.write(chunk)
+                    total_size += len(chunk)
+    print(f"[download_video] Downloaded {total_size} bytes to {output_path}")
     return output_path
 
 
@@ -416,7 +438,32 @@ def compose_reel(
     Returns path to the final video.
     """
     # Import moviepy here to avoid startup issues if ffmpeg is missing
-    from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+    try:
+        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = True
+    except ImportError:
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        MOVIEPY_V2 = False
+
+    # Helper functions for v1/v2 compatibility
+    def crop_clip(clip, x1=None, y1=None, x2=None, y2=None):
+        if MOVIEPY_V2:
+            return clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
+        else:
+            return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+
+    def resize_clip(clip, size):
+        if MOVIEPY_V2:
+            return clip.resized(size)
+        else:
+            # moviepy v1 uses resize with newsize parameter
+            return clip.resize(newsize=size)
+
+    def subclip_video(clip, start, end):
+        if MOVIEPY_V2:
+            return clip.subclipped(start, end)
+        else:
+            return clip.subclip(start, end)
 
     # Load audio to get actual duration
     audio = AudioFileClip(audio_path)
@@ -428,46 +475,35 @@ def compose_reel(
 
     for video_path in video_paths:
         try:
+            print(f"[compose_reel] Loading video: {video_path}")
             clip = VideoFileClip(video_path)
+            print(f"[compose_reel] Loaded clip: {clip.w}x{clip.h}, duration={clip.duration}")
 
-            # Resize to target dimensions (9:16 aspect ratio)
-            # Center crop if needed
-            clip_aspect = clip.w / clip.h
-            target_aspect = target_width / target_height
-
-            if clip_aspect > target_aspect:
-                # Video is wider, crop horizontally
-                new_width = int(clip.h * target_aspect)
-                x_center = clip.w / 2
-                clip = clip.cropped(
-                    x1=x_center - new_width / 2,
-                    x2=x_center + new_width / 2
-                )
-            elif clip_aspect < target_aspect:
-                # Video is taller, crop vertically
-                new_height = int(clip.w / target_aspect)
-                y_center = clip.h / 2
-                clip = clip.cropped(
-                    y1=y_center - new_height / 2,
-                    y2=y_center + new_height / 2
-                )
-
-            # Resize to exact target dimensions
-            clip = clip.resized((target_width, target_height))
+            # Simple resize without complex cropping for better compatibility
+            try:
+                clip = resize_clip(clip, (target_width, target_height))
+                print(f"[compose_reel] Resized to {target_width}x{target_height}")
+            except Exception as resize_err:
+                print(f"[compose_reel] Resize failed, using original: {resize_err}")
+                # Use original clip without resizing if resize fails
 
             clips.append(clip)
             total_duration += clip.duration
+            print(f"[compose_reel] Added clip, total duration: {total_duration}")
 
             # Stop if we have enough footage
             if total_duration >= audio_duration + 2:  # 2 second buffer
                 break
 
         except Exception as e:
-            print(f"Error processing video {video_path}: {e}")
+            print(f"[compose_reel] Error processing video {video_path}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     if not clips:
-        raise Exception("No valid video clips to compose")
+        print(f"[compose_reel] FAILED - no clips loaded from {len(video_paths)} video paths")
+        raise Exception(f"No valid video clips to compose. Tried {len(video_paths)} videos.")
 
     # Concatenate all clips
     video = concatenate_videoclips(clips, method="compose")
@@ -479,10 +515,13 @@ def compose_reel(
         video = concatenate_videoclips([video] * loops_needed, method="compose")
 
     # Trim to audio duration (plus small fade out buffer)
-    video = video.subclipped(0, min(audio_duration + 0.5, video.duration))
+    video = subclip_video(video, 0, min(audio_duration + 0.5, video.duration))
 
-    # Add audio
-    video = video.with_audio(audio)
+    # Add audio (v1: set_audio, v2: with_audio)
+    if MOVIEPY_V2:
+        video = video.with_audio(audio)
+    else:
+        video = video.set_audio(audio)
 
     # Write final video with Instagram-compatible settings
     video.write_videofile(
@@ -591,7 +630,10 @@ async def generate_thumbnail(video_path: str, output_path: str, time: float = 1.
     Returns path to thumbnail image.
     """
     # Import moviepy here to avoid startup issues if ffmpeg is missing
-    from moviepy import VideoFileClip
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        from moviepy.editor import VideoFileClip
 
     clip = VideoFileClip(video_path)
     # Get frame at specified time (or middle if time exceeds duration)
