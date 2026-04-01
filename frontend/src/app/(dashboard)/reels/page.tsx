@@ -116,34 +116,58 @@ export default function ReelsPage() {
     try {
       const response = await api.get<Reel[]>("/api/reels");
       setReels(response.data);
-
-      // Update selected reel if it exists
-      if (selectedReel) {
-        const updated = response.data.find(r => r.id === selectedReel.id);
-        if (updated) setSelectedReel(updated);
-      }
+      // Update selected reel without adding it as a dependency
+      setSelectedReel(prev => {
+        if (!prev) return prev;
+        return response.data.find(r => r.id === prev.id) ?? prev;
+      });
     } catch {
       toast.error("Failed to load reels");
     } finally {
       setLoadingReels(false);
     }
-  }, [selectedReel]);
+  }, []);
 
   useEffect(() => {
     fetchReels();
   }, []);
 
-  // Poll for updates when reels are processing
+  // Poll for updates only while at least one reel is still processing
   useEffect(() => {
-    const processingReels = reels.filter(
-      r => !["ready", "published", "failed", "publish_failed"].includes(r.status)
-    );
+    const TERMINAL = ["ready", "published", "failed", "publish_failed"];
+    const POLL_WINDOW_MS = 30 * 60 * 1000; // only poll reels created within last 30 minutes
+    const now = Date.now();
 
-    if (processingReels.length > 0) {
-      const interval = setInterval(fetchReels, 3000);
-      return () => clearInterval(interval);
-    }
-  }, [reels, fetchReels]);
+    const hasRecentlyProcessing = reels.some(r => {
+      if (TERMINAL.includes(r.status)) return false;
+      const age = now - new Date(r.created_at).getTime();
+      return age < POLL_WINDOW_MS;
+    });
+
+    if (!hasRecentlyProcessing) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await api.get<Reel[]>("/api/reels");
+        const fetched = response.data;
+        setReels(fetched);
+        setSelectedReel(prev => {
+          if (!prev) return prev;
+          return fetched.find(r => r.id === prev.id) ?? prev;
+        });
+        const stillProcessing = fetched.some(r => {
+          if (TERMINAL.includes(r.status)) return false;
+          const age = Date.now() - new Date(r.created_at).getTime();
+          return age < POLL_WINDOW_MS;
+        });
+        if (!stillProcessing) clearInterval(interval);
+      } catch {
+        clearInterval(interval);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [reels]);
 
   const validateTopic = (): boolean => {
     if (!topic.trim()) {

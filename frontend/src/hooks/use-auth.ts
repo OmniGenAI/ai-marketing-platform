@@ -27,6 +27,8 @@ export function useAuth() {
       setUser(response.data);
     } catch {
       setUser(null);
+      setSession(null);
+      setSupabaseUser(null);
     } finally {
       setLoading(false);
     }
