@@ -16,18 +16,28 @@ export function useAuth() {
 
   const fetchUser = useCallback(async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      console.log("[Auth] Fetching session...");
+      const { data: { session }, error } = await supabase.auth.getSession();
+
+      if (error) {
+        console.error("[Auth] Session error:", error.message);
+      }
+
+      console.log("[Auth] Session exists:", !!session);
       setSession(session);
       setSupabaseUser(session?.user ?? null);
 
       if (session?.user) {
-        // Fetch user profile from our backend
+        console.log("[Auth] Fetching user from backend...");
         const response = await api.get<User>("/api/auth/me");
+        console.log("[Auth] User fetched:", response.data?.email);
         setUser(response.data);
       } else {
+        console.log("[Auth] No session, clearing user");
         setUser(null);
       }
-    } catch {
+    } catch (err) {
+      console.error("[Auth] Error:", err);
       setUser(null);
     } finally {
       setLoading(false);

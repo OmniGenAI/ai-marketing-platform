@@ -1,8 +1,15 @@
 import axios from "axios";
 import { createClient } from "@/lib/supabase/client";
 
+const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+// Log API URL on startup (only in browser)
+if (typeof window !== "undefined") {
+  console.log("[API] Base URL:", apiUrl);
+}
+
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
+  baseURL: apiUrl,
   timeout: 60000,
 });
 
@@ -11,10 +18,17 @@ api.interceptors.request.use(
   async (config) => {
     try {
       const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session }, error } = await supabase.auth.getSession();
+
+      if (error) {
+        console.error("[API] Session error:", error.message);
+      }
 
       if (session?.access_token) {
         config.headers.Authorization = `Bearer ${session.access_token}`;
+        console.log("[API] Token attached to request");
+      } else {
+        console.warn("[API] No session token available");
       }
     } catch (error) {
       console.error("[API] Failed to get session:", error);
