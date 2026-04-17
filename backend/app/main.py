@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo
 
 
 def seed_default_plans():
@@ -178,6 +178,7 @@ app.include_router(social_accounts_dev.router)  # Development only - remove in p
 app.include_router(business_images.router)
 app.include_router(upload.router)
 app.include_router(reels.router)
+app.include_router(seo.router)
 
 
 @app.get("/")

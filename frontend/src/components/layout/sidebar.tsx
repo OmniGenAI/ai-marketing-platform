@@ -11,6 +11,8 @@ import {
   CreditCard,
   Building2,
   Film,
+  Search,
+  PenLine,
 } from "lucide-react";
 
 const navItems = [
@@ -33,6 +35,16 @@ const navItems = [
     title: "Create Reel",
     href: "/reels",
     icon: Film,
+  },
+  {
+    title: "SEO Brief",
+    href: "/generate/seo",
+    icon: Search,
+  },
+  {
+    title: "SEO Editor",
+    href: "/seo-editor",
+    icon: PenLine,
   },
   {
     title: "My Posts",
