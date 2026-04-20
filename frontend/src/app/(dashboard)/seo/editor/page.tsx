@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { analyzeContent, type SEOAnalysisResult } from "@/lib/seo-analysis";
 import { cn } from "@/lib/utils";
 import { RichEditor } from "@/components/ui/rich-editor";
 import api from "@/lib/api";
+import { toast } from "sonner";
+import Link from "next/dist/client/link";
 
 const MIN_WORDS_FOR_TIPS = 100;
 
@@ -129,6 +132,7 @@ const PRIORITY_LABEL: Record<string, string> = {
 };
 
 export default function SEOEditorPage() {
+    const searchParams = useSearchParams();
     const [content, setContent] = useState("");      // HTML (editor value)
     const [plainText, setPlainText] = useState("");  // plain text for tips API
     const [targetWords, setTargetWords] = useState("1500");
@@ -144,6 +148,33 @@ export default function SEOEditorPage() {
     const [metaDesc, setMetaDesc] = useState("");
     const [focusKeyword, setFocusKeyword] = useState("");
     const [relatedKeywords, setRelatedKeywords] = useState("");
+    const [isLoadingDraft, setIsLoadingDraft] = useState(() => {
+        // initialise true only when a ?draft= param is present
+        if (typeof window !== "undefined") {
+            return new URLSearchParams(window.location.search).has("draft");
+        }
+        return false;
+    });
+
+    // Load draft from saved ID if ?draft= param is present
+    useEffect(() => {
+        const draftId = searchParams.get("draft");
+        if (!draftId) return;
+        setIsLoadingDraft(true);
+        api.get<{ data: { content?: string; metaTitle?: string; metaDesc?: string; focusKeyword?: string; relatedKeywords?: string } }>(`/api/seo/saves/${draftId}`)
+            .then((res) => {
+                const d = res.data.data;
+                if (d.content) setContent(d.content);
+                if (d.metaTitle) setMetaTitle(d.metaTitle);
+                if (d.metaDesc) setMetaDesc(d.metaDesc);
+                if (d.focusKeyword) setFocusKeyword(d.focusKeyword);
+                if (d.relatedKeywords) setRelatedKeywords(d.relatedKeywords);
+                setSaveId(draftId);
+            })
+            .catch(() => toast.error("Failed to load saved draft"))
+            .finally(() => setIsLoadingDraft(false));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const runScore = useCallback(
         (
@@ -215,6 +246,66 @@ export default function SEOEditorPage() {
 
     const wordCount = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
     const overallLabel = !score ? "–" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveId, setSaveId] = useState<string | null>(null);
+
+    const saveDraft = useCallback(async () => {
+        if (!content.trim()) { toast.error("Nothing to save — editor is empty"); return; }
+        setIsSaving(true);
+        const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
+        const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null };
+        try {
+            if (saveId) {
+                await api.put(`/api/seo/saves/${saveId}`, { type: "draft", title, data });
+            } else {
+                const res = await api.post<{ id: string }>("/api/seo/saves", { type: "draft", title, data });
+                setSaveId(res.data.id);
+            }
+            toast.success("Draft saved");
+        } catch {
+            toast.error("Failed to save draft");
+        } finally {
+            setIsSaving(false);
+        }
+    }, [content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score, saveId]);
+
+    if (isLoadingDraft) {
+        return (
+            <div className="flex h-[calc(100vh-6rem)] gap-6 overflow-hidden animate-pulse">
+                {/* Left skeleton */}
+                <div className="flex flex-1 flex-col gap-4 min-w-0 pr-6">
+                    <div className="flex items-start justify-between gap-4">
+                        <div className="space-y-2">
+                            <div className="h-3 w-24 rounded bg-muted" />
+                            <div className="h-7 w-48 rounded bg-muted" />
+                            <div className="h-3 w-72 rounded bg-muted" />
+                        </div>
+                        <div className="h-8 w-24 rounded-md bg-muted shrink-0" />
+                    </div>
+                    <div className="flex-1 rounded-xl border bg-muted/30" />
+                </div>
+                {/* Right sidebar skeleton */}
+                <div className="w-96 shrink-0 flex flex-col gap-4 border-l pl-4 pt-4">
+                    <div className="h-8 w-full rounded bg-muted" />
+                    <div className="flex flex-col items-center gap-3 pt-6">
+                        <div className="h-28 w-28 rounded-full bg-muted" />
+                        <div className="h-3 w-32 rounded bg-muted" />
+                    </div>
+                    <div className="space-y-3 px-2 pt-4">
+                        {[1,2,3,4,5,6,7].map((n) => (
+                            <div key={n} className="space-y-1">
+                                <div className="flex justify-between">
+                                    <div className="h-2.5 w-32 rounded bg-muted" />
+                                    <div className="h-2.5 w-8 rounded bg-muted" />
+                                </div>
+                                <div className="h-1.5 w-full rounded-full bg-muted" />
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="flex h-[calc(100vh-6rem)] overflow-hidden">
@@ -222,11 +313,33 @@ export default function SEOEditorPage() {
             {/* ── LEFT: Editor panel ── */}
             <div className="flex flex-1 flex-col min-w-0 pr-6 gap-4">
                 {/* Header row — this is actually the scores ring, editor header is in the left panel */}
-                <div>
-                    <h1 className="text-2xl font-bold tracking-tight">Live SEO Editor</h1>
-                    <p className="mt-0.5 text-sm text-muted-foreground">
-                        Paste or write your content. SEO score updates as you type.
-                    </p>
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <div className="flex items-center gap-1.5 text-sm text-muted-foreground shrink-0">
+                            <Link href="/seo" className="inline-flex items-center gap-1 hover:text-foreground transition-colors">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></svg>
+                                SEO
+                            </Link>
+                            <span>/</span>
+                            <span className="text-foreground font-medium">Editor</span>
+                        </div>
+                        <h1 className="text-2xl font-bold tracking-tight">Live SEO Editor</h1>
+                        <p className="mt-0.5 text-sm text-muted-foreground">
+                            Paste or write your content. SEO score updates as you type.
+                        </p>
+                    </div>
+                    <button
+                        onClick={saveDraft}
+                        disabled={isSaving || !content.trim()}
+                        className={cn(
+                            "shrink-0 rounded-md px-4 py-2 text-xs font-semibold transition-colors",
+                            isSaving || !content.trim()
+                                ? "bg-muted text-muted-foreground cursor-not-allowed"
+                                : "bg-foreground text-background hover:opacity-90"
+                        )}
+                    >
+                        {isSaving ? "Saving…" : "Save Draft"}
+                    </button>
                 </div>
 
                 {/* Rich editor fills remaining height */}

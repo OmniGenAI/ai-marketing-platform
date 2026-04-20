@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # Google Gemini AI
     GOOGLE_GEMINI_API_KEY: str = ""
 
+    # Serper.dev (Google Search API for competitor discovery)
+    SERPER_API_KEY: str = ""
+
     # Grok AI (xAI)
     XAI_API_KEY: str = ""
 

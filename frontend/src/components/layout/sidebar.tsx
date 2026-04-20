@@ -12,7 +12,6 @@ import {
   Building2,
   Film,
   Search,
-  PenLine,
 } from "lucide-react";
 
 const navItems = [
@@ -37,14 +36,9 @@ const navItems = [
     icon: Film,
   },
   {
-    title: "SEO Brief",
-    href: "/generate/seo",
+    title: "SEO",
+    href: "/seo",
     icon: Search,
-  },
-  {
-    title: "SEO Editor",
-    href: "/seo-editor",
-    icon: PenLine,
   },
   {
     title: "My Posts",
@@ -75,7 +69,7 @@ export function Sidebar() {
       </div>
       <nav className="flex flex-col gap-1 p-4">
         {navItems.map((item) => {
-          const isActive = pathname === item.href;
+          const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
             <Link
               key={item.href}

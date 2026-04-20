@@ -32,10 +32,14 @@ import {
   TrendingUp,
   Target,
   ArrowRight,
+  ArrowLeft,
   ExternalLink,
   ScrollText,
-  ClipboardList,
+  Brain,
+  AlertTriangle,
+  List,
 } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 
 interface MetaSuggestion {
@@ -88,12 +92,22 @@ interface DraftScore {
   };
 }
 
+interface SerpResult {
+  title: string;
+  link: string;
+  snippet: string;
+}
+
 interface SEOBriefResponse {
   topic: string;
+  search_intent: string;
   primary_keyword: string;
   secondary_keywords: string[];
+  nlp_terms: string[];
   keyword_data: KeywordVolume[];
+  serp_results: SerpResult[];
   competitor_insights: CompetitorInsight[];
+  content_gaps: string[];
   h2_outline: H2Section[];
   meta_suggestions: MetaSuggestion[];
   schema_markup: Record<string, unknown>;
@@ -110,37 +124,47 @@ const WORD_COUNT_OPTIONS = [
   { value: "3000", label: "3,000 — In-depth" },
 ];
 
-const CONTENT_TYPE_OPTIONS = [
-  { value: "blog_post", label: "Blog Post" },
-  { value: "how_to_guide", label: "How-To Guide" },
-  { value: "listicle", label: "Listicle" },
-  { value: "product_page", label: "Product Page" },
-  { value: "landing_page", label: "Landing Page" },
-  { value: "news_article", label: "News Article" },
+const COUNTRY_OPTIONS = [
+  { value: "", label: "Global" },
+  { value: "us", label: "United States" },
+  { value: "in", label: "India" },
+  { value: "gb", label: "United Kingdom" },
+  { value: "ca", label: "Canada" },
+  { value: "au", label: "Australia" },
+  { value: "de", label: "Germany" },
+  { value: "fr", label: "France" },
+  { value: "br", label: "Brazil" },
+  { value: "jp", label: "Japan" },
+  { value: "sg", label: "Singapore" },
+  { value: "ae", label: "UAE" },
+  { value: "pk", label: "Pakistan" },
+  { value: "sa", label: "Saudi Arabia" },
 ];
 
 const LOADING_STEPS = [
-  "Researching keywords…",
-  "Estimating search volumes…",
-  "Discovering competitor pages…",
-  "Scraping and verifying competitors…",
-  "Scoring competitor readability…",
-  "Generating meta tags…",
-  "Building schema markup…",
-  "AI-enriching H2 outline…",
-  "Building SERP preview…",
-  "Compiling recommendations…",
+  "Searching Google via Serper…",
+  "Fetching SERP results…",
+  "Launching Playwright browser…",
+  "Scraping competitor pages…",
+  "Cleaning HTML with BeautifulSoup…",
+  "Extracting headings & content…",
+  "Aggregating competitor data…",
+  "Analysing with Gemini AI…",
+  "Generating outline & keywords…",
+  "Building SEO brief…",
 ];
 
-type TabId = "outline" | "keywords" | "volumes" | "meta" | "competitors" | "schema" | "recommendations" | "draft";
+type TabId = "outline" | "keywords" | "volumes" | "serp" | "meta" | "competitors" | "gaps" | "schema" | "recommendations" | "draft";
 
 function buildTabs(hasDraft: boolean): { id: TabId; label: string; icon: React.ElementType }[] {
   const base: { id: TabId; label: string; icon: React.ElementType }[] = [
     { id: "outline", label: "Outline", icon: FileText },
     { id: "keywords", label: "Keywords", icon: Hash },
     { id: "volumes", label: "Volumes", icon: BarChart2 },
+    { id: "serp", label: "SERP", icon: List },
     { id: "meta", label: "Meta Tags", icon: Tag },
     { id: "competitors", label: "Competitors", icon: Globe },
+    { id: "gaps", label: "Gaps", icon: AlertTriangle },
     { id: "schema", label: "Schema", icon: Code2 },
     { id: "recommendations", label: "Tips", icon: Lightbulb },
   ];
@@ -157,8 +181,8 @@ function DiffBadge({ difficulty }: { difficulty: string }) {
     difficulty === "Easy"
       ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/30"
       : difficulty === "Hard"
-      ? "bg-red-500/10 text-red-500 border-red-500/30"
-      : "bg-amber-500/10 text-amber-500 border-amber-500/30";
+        ? "bg-red-500/10 text-red-500 border-red-500/30"
+        : "bg-amber-500/10 text-amber-500 border-amber-500/30";
   return (
     <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold", style)}>
       {difficulty}
@@ -293,12 +317,9 @@ function LoadingState() {
 
 export default function SEOBriefPage() {
   const [topic, setTopic] = useState("");
-  const [contentType, setContentType] = useState("blog_post");
   const [wordCount, setWordCount] = useState("1500");
-  const [draftOpen, setDraftOpen] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [competitorsOpen, setCompetitorsOpen] = useState(false);
-  const [competitorUrls, setCompetitorUrls] = useState("");
+  const [country, setCountry] = useState("");
+
   const [isLoading, setIsLoading] = useState(false);
   const [brief, setBrief] = useState<SEOBriefResponse | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("outline");
@@ -309,16 +330,22 @@ export default function SEOBriefPage() {
     setIsLoading(true);
     setBrief(null);
     try {
-      const urls = competitorUrls.split("\n").map((u) => u.trim()).filter(Boolean);
       const res = await api.post<SEOBriefResponse>("/api/seo/brief", {
         topic: topic.trim(),
         target_word_count: parseInt(wordCount) || 1500,
-        competitor_urls: urls,
-        content_draft: draft.trim(),
-      });
+        country,
+        competitor_urls: [],
+        content_draft: "",
+      }, { timeout: 180_000 }); // 3 min — scraping + AI takes time
       setBrief(res.data);
       setActiveTab(res.data.draft_score ? "draft" : "outline");
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+      // Auto-save the brief
+      api.post("/api/seo/saves", {
+        type: "brief",
+        title: topic.trim(),
+        data: { score: res.data.draft_score?.overall ?? null },
+      }).catch(() => {/* non-critical */ });
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
       toast.error(e.response?.data?.detail || "Failed to generate SEO brief");
@@ -334,7 +361,17 @@ export default function SEOBriefPage() {
 
   return (
     <div className="min-h-full bg-background">
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+        <Link href="/seo" className="inline-flex items-center gap-1 hover:text-foreground transition-colors">
+          <ArrowLeft className="h-3.5 w-3.5" />
+          SEO
+        </Link>
+        <span>/</span>
+        <span className="text-foreground font-medium">Brief</span>
+      </div>
       <div className="mx-auto max-w-5xl px-4 py-8 space-y-8">
+
 
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-card">
@@ -368,17 +405,6 @@ export default function SEOBriefPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label className="text-sm font-medium">Content Type</Label>
-                <Select value={contentType} onValueChange={setContentType}>
-                  <SelectTrigger className="h-10 text-sm"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {CONTENT_TYPE_OPTIONS.map((o) => (
-                      <SelectItem key={o.value} value={o.value} className="text-sm">{o.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
                 <Label className="text-sm font-medium">Target Word Count</Label>
                 <Select value={wordCount} onValueChange={setWordCount}>
                   <SelectTrigger className="h-10 text-sm"><SelectValue /></SelectTrigger>
@@ -389,59 +415,18 @@ export default function SEOBriefPage() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Country</Label>
+                <Select value={country || "global"} onValueChange={(v) => setCountry(v === "global" ? "" : v)}>
+                  <SelectTrigger className="h-10 text-sm"><SelectValue placeholder="Global" /></SelectTrigger>
+                  <SelectContent>
+                    {COUNTRY_OPTIONS.map((o) => (
+                      <SelectItem key={o.value || "global"} value={o.value || "global"} className="text-sm">{o.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-          </div>
-
-          <div>
-            <button
-              className="w-full flex items-center justify-between px-6 py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
-              onClick={() => setDraftOpen((v) => !v)}
-            >
-              <span className="flex items-center gap-2 font-medium">
-                <ClipboardList className="h-4 w-4" />
-                Add existing draft
-                <Badge variant="outline" className="text-xs">Optional</Badge>
-              </span>
-              <ChevronDown className={cn("h-4 w-4 transition-transform", draftOpen && "rotate-180")} />
-            </button>
-            {draftOpen && (
-              <div className="px-6 pb-4 pt-2 bg-muted/20">
-                <p className="text-xs text-muted-foreground mb-2">Paste existing content to score its readability and keyword density.</p>
-                <textarea
-                  rows={5}
-                  placeholder="Paste your draft here..."
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
-                />
-              </div>
-            )}
-          </div>
-
-          <div>
-            <button
-              className="w-full flex items-center justify-between px-6 py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
-              onClick={() => setCompetitorsOpen((v) => !v)}
-            >
-              <span className="flex items-center gap-2 font-medium">
-                <Globe className="h-4 w-4" />
-                Add competitor URLs
-                <Badge variant="outline" className="text-xs">Optional</Badge>
-              </span>
-              <ChevronDown className={cn("h-4 w-4 transition-transform", competitorsOpen && "rotate-180")} />
-            </button>
-            {competitorsOpen && (
-              <div className="px-6 pb-4 pt-2 bg-muted/20">
-                <p className="text-xs text-muted-foreground mb-2">One URL per line. We will scrape them and surface their word count, readability, and top keywords.</p>
-                <textarea
-                  rows={3}
-                  placeholder={"https://competitor1.com/article\nhttps://competitor2.com/post"}
-                  value={competitorUrls}
-                  onChange={(e) => setCompetitorUrls(e.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none font-mono"
-                />
-              </div>
-            )}
           </div>
 
           <div className="px-6 py-4">
@@ -466,6 +451,14 @@ export default function SEOBriefPage() {
             <div className="rounded-xl border bg-card shadow-sm p-5">
               <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5">
                 <div className="flex-1 space-y-3 min-w-0">
+                  {/* Search Intent badge */}
+                  {brief.search_intent && (
+                    <div className="flex items-center gap-2 mb-1">
+                      <Brain className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Intent</span>
+                      <Badge variant="secondary" className="text-xs capitalize">{brief.search_intent}</Badge>
+                    </div>
+                  )}
                   <div>
                     <p className="text-xs text-muted-foreground uppercase tracking-widest mb-2 font-medium">Primary Keyword</p>
                     <KwChip kw={brief.primary_keyword} primary />
@@ -478,6 +471,19 @@ export default function SEOBriefPage() {
                       {brief.secondary_keywords.map((kw) => <KwChip key={kw} kw={kw} />)}
                     </div>
                   </div>
+                  {/* NLP Terms */}
+                  {brief.nlp_terms && brief.nlp_terms.length > 0 && (
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-widest mb-2 font-medium">
+                        NLP / Semantic Terms
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {brief.nlp_terms.map((term) => (
+                          <Badge key={term} variant="outline" className="text-xs font-normal">{term}</Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="flex sm:flex-col gap-4 sm:gap-3 shrink-0 text-center sm:text-right">
                   <div>
@@ -489,8 +495,12 @@ export default function SEOBriefPage() {
                     <p className="text-xs text-muted-foreground">keywords</p>
                   </div>
                   <div>
-                    <p className="text-2xl font-bold">{brief.meta_suggestions.length}</p>
-                    <p className="text-xs text-muted-foreground">meta variants</p>
+                    <p className="text-2xl font-bold">{brief.serp_results?.length || 0}</p>
+                    <p className="text-xs text-muted-foreground">SERP results</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-bold">{brief.content_gaps?.length || 0}</p>
+                    <p className="text-xs text-muted-foreground">content gaps</p>
                   </div>
                 </div>
               </div>
@@ -657,12 +667,7 @@ export default function SEOBriefPage() {
                         <p className="text-xs text-muted-foreground max-w-xs mx-auto">
                           AI searched for competitors but none responded. Add specific URLs above for manual analysis.
                         </p>
-                        <button
-                          onClick={() => { setCompetitorsOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                          className="mt-2 inline-flex items-center gap-1.5 text-xs text-foreground underline underline-offset-2"
-                        >
-                          Add URLs manually <ArrowRight className="h-3 w-3" />
-                        </button>
+
                       </div>
                     ) : (
                       <div className="space-y-3">
@@ -690,6 +695,71 @@ export default function SEOBriefPage() {
                             </div>
                           </div>
                         ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "serp" && (
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-semibold text-sm">Google SERP Results</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {brief.serp_results?.length || 0} organic results fetched via Serper.dev
+                      </p>
+                    </div>
+                    {brief.serp_results && brief.serp_results.length > 0 ? (
+                      <div className="space-y-2">
+                        {brief.serp_results.map((s, i) => (
+                          <div key={i} className="rounded-lg border p-4 hover:bg-muted/20 transition-colors space-y-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-start gap-3 min-w-0">
+                                <span className="shrink-0 flex h-6 w-6 items-center justify-center rounded bg-muted text-xs font-bold text-muted-foreground">{i + 1}</span>
+                                <div className="min-w-0">
+                                  <p className="text-sm font-medium leading-snug truncate">{s.title}</p>
+                                  <p className="text-xs text-emerald-600 truncate mt-0.5">{s.link}</p>
+                                  <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{s.snippet}</p>
+                                </div>
+                              </div>
+                              <a href={s.link} target="_blank" rel="noopener noreferrer" className="shrink-0 text-muted-foreground hover:text-foreground transition-colors">
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-dashed p-8 text-center space-y-2">
+                        <List className="h-8 w-8 text-muted-foreground mx-auto" />
+                        <p className="text-sm font-medium">No SERP results</p>
+                        <p className="text-xs text-muted-foreground">Serper API key may not be configured.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "gaps" && (
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-semibold text-sm">Content Gaps</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Topics that competitors missed or covered poorly — your opportunity to stand out.
+                      </p>
+                    </div>
+                    {brief.content_gaps && brief.content_gaps.length > 0 ? (
+                      <ul className="space-y-2">
+                        {brief.content_gaps.map((gap, i) => (
+                          <li key={i} className="flex items-start gap-3 rounded-lg border p-4 hover:bg-muted/20 transition-colors">
+                            <span className="shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-amber-500/15 text-amber-600 text-xs font-bold">!</span>
+                            <p className="text-sm leading-relaxed">{gap}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="rounded-lg border border-dashed p-8 text-center space-y-2">
+                        <AlertTriangle className="h-8 w-8 text-muted-foreground mx-auto" />
+                        <p className="text-sm font-medium">No gaps detected</p>
+                        <p className="text-xs text-muted-foreground">Competitors seem to cover the topic comprehensively.</p>
                       </div>
                     )}
                   </div>
@@ -808,8 +878,8 @@ export default function SEOBriefPage() {
                           {ds.overall >= 70
                             ? "Your draft is well-optimised for this brief."
                             : ds.overall >= 45
-                            ? "Your draft needs some SEO improvements before publishing."
-                            : "Significant gaps — use the brief to rewrite key sections."}
+                              ? "Your draft needs some SEO improvements before publishing."
+                              : "Significant gaps — use the brief to rewrite key sections."}
                         </p>
                       </div>
 

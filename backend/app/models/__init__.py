@@ -7,6 +7,7 @@ from app.models.post import Post
 from app.models.social_account import SocialAccount
 from app.models.business_image import BusinessImage
 from app.models.reel import Reel
+from app.models.seo_save import SeoSave
 
 __all__ = [
     "User",
@@ -19,4 +20,5 @@ __all__ = [
     "SocialAccount",
     "BusinessImage",
     "Reel",
+    "SeoSave",
 ]

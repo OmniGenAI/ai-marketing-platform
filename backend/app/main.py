@@ -1,6 +1,11 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Show INFO-level logs from our app (Gemini, Serper, Playwright, etc.)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.getLogger("app").setLevel(logging.INFO)
 
 from app.config import settings
 from app.database import SessionLocal
@@ -128,6 +133,27 @@ def ensure_tables_exist():
             print("✅ Reels table created successfully")
         else:
             print("✅ Reels table already exists")
+
+        # seo_saves table
+        result2 = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'seo_saves')"))
+        if not result2.scalar():
+            print("📦 Creating seo_saves table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS seo_saves (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL REFERENCES users(id),
+                    type VARCHAR(20) NOT NULL DEFAULT 'brief',
+                    title VARCHAR(500) NOT NULL DEFAULT '',
+                    data TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_seo_saves_user_id ON seo_saves(user_id)"))
+            db.commit()
+            print("✅ seo_saves table created successfully")
+        else:
+            print("✅ seo_saves table already exists")
     except Exception as e:
         print(f"❌ Error checking/creating tables: {e}")
         db.rollback()

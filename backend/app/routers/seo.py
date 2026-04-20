@@ -6,11 +6,22 @@ import time
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.database import SessionLocal
 from app.dependencies import get_current_user
+from app.models.seo_save import SeoSave
 from app.models.user import User
-from app.services.scraper import scrape_website
+from app.services.scraper import scrape_article_content, scrape_articles_batch
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 from app.services.seo_tools import (
     analyse_content_structure,
     analyse_keyword_density,
@@ -41,8 +52,10 @@ class SEOBriefRequest(BaseModel):
     topic: str
     target_url: str = ""
     target_word_count: int = 1500
+    country: str = ""          # e.g. "in" for India, "us" for US (ISO 3166-1 alpha-2)
+    device: str = ""           # "desktop" | "mobile" — optional Serper param
     competitor_urls: list[str] = []
-    content_draft: str = ""  # optional existing draft to score against the brief
+    content_draft: str = ""    # optional existing draft to score against the brief
 
 
 class MetaSuggestion(BaseModel):
@@ -80,12 +93,22 @@ class DraftScore(BaseModel):
     structure: dict
 
 
+class SerpResult(BaseModel):
+    title: str
+    link: str
+    snippet: str
+
+
 class SEOBriefResponse(BaseModel):
     topic: str
+    search_intent: str = ""               # informational / commercial / transactional / navigational
     primary_keyword: str
     secondary_keywords: list[str]
+    nlp_terms: list[str] = []             # semantic / NLP terms for topic coverage
     keyword_data: list[KeywordVolume]
+    serp_results: list[SerpResult] = []   # raw SERP titles/snippets from Serper
     competitor_insights: list[CompetitorInsight]
+    content_gaps: list[str] = []          # what competitors missed
     h2_outline: list[H2Section]
     meta_suggestions: list[MetaSuggestion]
     schema_markup: dict
@@ -137,7 +160,7 @@ class SEOScoreResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Gemini helper
+# LLM helpers — Gemini (primary) → Groq (fallback)
 # ---------------------------------------------------------------------------
 
 _GEMINI_URL = (
@@ -145,11 +168,17 @@ _GEMINI_URL = (
     "gemini-2.5-flash:generateContent?key={key}"
 )
 
+_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL = "openai/gpt-oss-120b"
 
-def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
-    """Raw Gemini call with exponential backoff on 429 rate limits."""
+
+def _gemini_call_raw(prompt: str, max_retries: int = 3) -> str | None:
+    """Raw Gemini call with exponential backoff on 429/5xx transient errors."""
     if not settings.GOOGLE_GEMINI_API_KEY:
+        logger.warning("[LLM] Gemini API key not set — skipping")
         return None
+    logger.info("[LLM] 🔵 Calling Gemini (prompt %d chars)...", len(prompt))
+    t0 = time.time()
     for attempt in range(max_retries):
         try:
             resp = httpx.post(
@@ -157,73 +186,130 @@ def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=25.0,
             )
-            if resp.status_code == 429:
-                wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                logger.warning("Gemini rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = 2 ** (attempt + 1)
+                logger.warning(
+                    "[LLM] Gemini %d, retrying in %ds (attempt %d/%d)",
+                    resp.status_code, wait, attempt + 1, max_retries,
+                )
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except httpx.HTTPStatusError:
-            raise
-        except Exception as exc:
-            logger.warning("Gemini call failed: %s", exc)
+            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            logger.info("[LLM] ✅ Gemini responded in %.1fs (%d chars)", time.time() - t0, len(text))
+            return text
+        except httpx.HTTPStatusError as exc:
+            logger.warning("[LLM] ❌ Gemini HTTP error %s: %s", exc.response.status_code, exc)
             return None
-    logger.warning("Gemini call exhausted retries after %d attempts", max_retries)
+        except Exception as exc:
+            logger.warning("[LLM] ❌ Gemini call failed: %s", exc)
+            return None
+    logger.warning("[LLM] ❌ Gemini exhausted retries after %d attempts (%.1fs)", max_retries, time.time() - t0)
     return None
 
 
-def _gemini_web_search(prompt: str, max_retries: int = 3) -> tuple[str | None, list[str]]:
-    """
-    Gemini call with Google Search grounding + exponential backoff on 429.
-    Returns (response_text, grounding_urls) where grounding_urls are
-    real URLs from live Google Search results.
-    """
-    if not settings.GOOGLE_GEMINI_API_KEY:
-        return None, []
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
-    }
+def _groq_call(prompt: str, max_retries: int = 2) -> str | None:
+    """Groq fallback call — used when Gemini is down."""
+    if not settings.GROQ_API_KEY:
+        logger.warning("[LLM] Groq API key not set — skipping fallback")
+        return None
+    logger.info("[LLM] 🟡 Calling Groq/%s (prompt %d chars)...", _GROQ_MODEL, len(prompt))
+    t0 = time.time()
     for attempt in range(max_retries):
         try:
             resp = httpx.post(
-                _GEMINI_URL.format(key=settings.GOOGLE_GEMINI_API_KEY),
-                json=payload,
+                _GROQ_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": _GROQ_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert SEO strategist. Always respond with valid JSON only, no markdown fences."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.4,
+                },
                 timeout=30.0,
             )
-            if resp.status_code == 429:
-                wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                logger.warning("Gemini web search rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = 2 ** (attempt + 1)
+                logger.warning(
+                    "[LLM] Groq %d, retrying in %ds (attempt %d/%d)",
+                    resp.status_code, wait, attempt + 1, max_retries,
+                )
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            data = resp.json()
-            candidate = data["candidates"][0]
-            text = candidate["content"]["parts"][0]["text"]
-
-            urls: list[str] = []
-            grounding_meta = candidate.get("groundingMetadata", {})
-            for chunk in grounding_meta.get("groundingChunks", []):
-                uri = chunk.get("web", {}).get("uri", "")
-                if uri.startswith("http"):
-                    urls.append(uri)
-            for support in grounding_meta.get("groundingSupports", []):
-                for idx in support.get("groundingChunkIndices", []):
-                    try:
-                        uri = grounding_meta["groundingChunks"][idx].get("web", {}).get("uri", "")
-                        if uri.startswith("http") and uri not in urls:
-                            urls.append(uri)
-                    except (IndexError, KeyError):
-                        pass
-            return text, urls
-        except httpx.HTTPStatusError:
-            raise
+            text = resp.json()["choices"][0]["message"]["content"]
+            logger.info("[LLM] ✅ Groq responded in %.1fs (%d chars)", time.time() - t0, len(text))
+            return text
+        except httpx.HTTPStatusError as exc:
+            logger.warning("[LLM] ❌ Groq HTTP error %s: %s", exc.response.status_code, exc)
+            return None
         except Exception as exc:
-            logger.warning("Gemini web search call failed: %s", exc)
-            return None, []
-    logger.warning("Gemini web search exhausted retries")
-    return None, []
+            logger.warning("[LLM] ❌ Groq call failed: %s", exc)
+            return None
+    logger.warning("[LLM] ❌ Groq exhausted retries after %d attempts (%.1fs)", max_retries, time.time() - t0)
+    return None
+
+
+def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
+    """Try Gemini first, fall back to Groq if Gemini fails."""
+    result = _gemini_call_raw(prompt, max_retries=max_retries)
+    if result:
+        return result
+    logger.info("[LLM] ⚠️  Gemini unavailable — falling back to Groq")
+    return _groq_call(prompt)
+
+
+# ---------------------------------------------------------------------------
+# Serper.dev — Google Search API
+# ---------------------------------------------------------------------------
+
+_SERPER_URL = "https://google.serper.dev/search"
+
+
+def _serper_organic(query: str, num: int = 10, country: str = "", device: str = "") -> list[dict]:
+    """
+    Query Serper.dev and return full organic results.
+    Each item: {title, link, snippet}.
+    """
+    if not settings.SERPER_API_KEY:
+        logger.warning("SERPER_API_KEY not set — SERP discovery disabled")
+        return []
+    body: dict = {"q": query, "num": num}
+    if country:
+        body["gl"] = country          # e.g. "in", "us"
+    if device:
+        body["device"] = device       # "desktop" | "mobile"
+    try:
+        resp = httpx.post(
+            _SERPER_URL,
+            headers={
+                "X-API-KEY": settings.SERPER_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        organic = data.get("organic", [])
+        results = []
+        for r in organic:
+            if r.get("link"):
+                results.append({
+                    "title": r.get("title", ""),
+                    "link": r["link"],
+                    "snippet": r.get("snippet", ""),
+                })
+        logger.info("Serper returned %d organic results for '%s'", len(results), query)
+        return results
+    except Exception as exc:
+        logger.warning("Serper search failed for '%s': %s", query, exc)
+        return []
 
 
 def _strip_fences(raw: str) -> str:
@@ -235,90 +321,198 @@ def _strip_fences(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# [4+6] Combined: extract keywords AND discover competitor URLs in ONE call
+# Page scraping — Playwright + BeautifulSoup (extract headings + clean text)
 # ---------------------------------------------------------------------------
 
-def _step4_and_6_combined(topic: str) -> tuple[dict, list[str]]:
+def _scrape_pages(urls: list[str], limit: int = 5) -> list[dict]:
     """
-    Single Gemini web search call that simultaneously:
-      - Extracts the primary keyword, secondary keywords, search intent, recommendations
-      - Discovers real competitor URLs via Google Search grounding
+    Scrape up to `limit` URLs using ONE shared Playwright browser.
+    Enriches each result with readability score + top keywords.
+    """
+    target_urls = urls[:limit]
+    raw_pages = scrape_articles_batch(target_urls, page_timeout=12_000)
 
-    Returns (kw_data dict, competitor_urls list).
-    One API call instead of two — avoids rate limit issues.
+    pages = []
+    for scraped in raw_pages:
+        content_text = scraped.get("main_content", "")
+        if not content_text.strip():
+            continue
+        readability = score_readability(content_text)
+        if readability.get("word_count", 0) < 50:
+            continue
+        top_kws = [k["keyword"] for k in extract_keywords_from_text(content_text, top_n=8)]
+        pages.append({
+            "url": scraped["url"],
+            "title": scraped.get("title") or scraped["url"],
+            "headings": scraped.get("headings", []),
+            "content_summary": content_text[:1500],
+            "word_count": readability.get("word_count", 0),
+            "readability_score": readability.get("flesch_score", 0.0),
+            "top_keywords": top_kws,
+        })
+
+    logger.info("Scraped %d / %d pages successfully", len(pages), len(target_urls))
+    return pages
+
+
+# ---------------------------------------------------------------------------
+# Aggregation — cluster headings + compute stats from scraped pages
+# ---------------------------------------------------------------------------
+
+def _aggregate_scraped_data(scraped_pages: list[dict]) -> dict:
     """
-    prompt = (
-        f'Search Google for top articles ranking for: "{topic}"\n\n'
-        f'Also act as an SEO keyword researcher for the topic: "{topic}"\n\n'
-        'Return ONLY this JSON (no markdown, no explanation):\n'
-        '{\n'
-        '  "primary_keyword": "best 2-4 word keyword phrase",\n'
-        '  "secondary_keywords": ["5 related 2-4 word phrases"],\n'
-        '  "search_intent": "informational | transactional | navigational | commercial",\n'
-        '  "recommendations": ["3 specific SEO tips as plain strings"]\n'
-        '}'
+    Combine scraped competitor pages into a single data bundle
+    ready to send to Gemini (clean text, not raw HTML).
+    """
+    all_headings: list[str] = []
+    all_keywords: list[str] = []
+    word_counts: list[int] = []
+    summaries: list[str] = []
+
+    for page in scraped_pages:
+        for h in page.get("headings", []):
+            text = h.get("text", "") if isinstance(h, dict) else str(h)
+            if text:
+                all_headings.append(text)
+        all_keywords.extend(page.get("top_keywords", []))
+        word_counts.append(page.get("word_count", 0))
+        summaries.append(
+            f"Title: {page['title']}\n"
+            f"URL: {page['url']}\n"
+            f"Word count: {page['word_count']}\n"
+            f"Top keywords: {', '.join(page.get('top_keywords', [])[:5])}\n"
+            f"Summary: {page.get('content_summary', '')[:600]}"
+        )
+
+    # Deduplicate headings (case-insensitive)
+    seen = set()
+    unique_headings = []
+    for h in all_headings:
+        key = h.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique_headings.append(h)
+
+    # Keyword frequency
+    kw_freq: dict[str, int] = {}
+    for kw in all_keywords:
+        kw_freq[kw.lower()] = kw_freq.get(kw.lower(), 0) + 1
+    common_keywords = sorted(kw_freq, key=kw_freq.get, reverse=True)[:15]  # type: ignore[arg-type]
+
+    avg_word_count = int(sum(word_counts) / len(word_counts)) if word_counts else 0
+
+    return {
+        "headings": unique_headings[:40],       # cap for token budget
+        "common_keywords": common_keywords,
+        "avg_word_count": avg_word_count,
+        "page_count": len(scraped_pages),
+        "summaries": summaries[:8],              # top 8 pages max
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gemini — single comprehensive analysis from aggregated SERP data
+# ---------------------------------------------------------------------------
+
+def _gemini_analyse_serp(
+    topic: str,
+    serp_snippets: list[dict],
+    aggregated: dict,
+    target_word_count: int,
+) -> dict:
+    """
+    Send clean, aggregated SERP data (NOT raw HTML) to Gemini.
+    Returns a dict with: search_intent, primary_keyword, secondary_keywords,
+    nlp_terms, h2_outline, content_gaps, meta_suggestions, recommendations.
+    """
+    # Build the competitor summary block
+    competitor_block = "\n---\n".join(aggregated.get("summaries", []))
+    headings_block = "\n".join(f"- {h}" for h in aggregated.get("headings", []))
+    serp_block = "\n".join(
+        f"{i+1}. {s['title']}  ({s['link']})\n   {s['snippet']}"
+        for i, s in enumerate(serp_snippets[:10])
     )
-    text, grounding_urls = _gemini_web_search(prompt)
 
-    # Parse keyword data from the response text
-    kw_data = {}
-    if text:
-        try:
-            kw_data = json.loads(_strip_fences(text))
-        except Exception:
-            pass
+    prompt = f"""You are a world-class SEO strategist. Analyse the following real Google SERP data and competitor content for the topic: "{topic}"
 
-    if not kw_data.get("primary_keyword"):
-        words = topic.lower().split()
-        primary = " ".join(words[:3]) if len(words) >= 3 else topic.lower()
-        kw_data = {
-            "primary_keyword": primary,
-            "secondary_keywords": [
-                f"{primary} tips", f"{primary} guide", f"how to {primary}",
-                f"best {primary} strategies", f"{primary} for beginners",
-            ],
-            "search_intent": "informational",
-            "recommendations": [
-                f"Target '{primary}' in your H1 and first 100 words.",
-                "Aim for 1,500+ words to outperform top-ranking articles.",
-                "Add FAQ schema to capture featured snippets.",
-            ],
-        }
+=== SERP RESULTS (from Google) ===
+{serp_block}
 
-    return kw_data, grounding_urls[:5]
+=== COMPETITOR HEADINGS (extracted from top pages) ===
+{headings_block}
 
+=== COMMON KEYWORDS across competitors ===
+{', '.join(aggregated.get('common_keywords', []))}
 
-# ---------------------------------------------------------------------------
-# [4] Extract keywords via Gemini (standalone — used as fallback)
-# ---------------------------------------------------------------------------
+=== COMPETITOR PAGE SUMMARIES ===
+{competitor_block}
 
-def _step4_extract_keywords(topic: str) -> dict:
-    prompt = f"""You are an expert SEO keyword researcher.
-Topic: "{topic}"
+=== STATS ===
+- Pages analysed: {aggregated.get('page_count', 0)}
+- Average competitor word count: {aggregated.get('avg_word_count', 0)}
+- Target word count: {target_word_count}
 
-Return ONLY a JSON object (no markdown, no explanation):
+Based on this REAL data, return ONLY a JSON object (no markdown fences, no explanation):
 {{
-  "primary_keyword": "the single best SEO keyword phrase (2-4 words)",
-  "secondary_keywords": ["5 related keyword phrases each 2-4 words targeting same intent"],
-  "search_intent": "informational | transactional | navigational | commercial",
-  "recommendations": ["3 specific SEO tips for this topic as plain strings"]
-}}"""
-    raw = _gemini_call(prompt)
+  "search_intent": "informational | commercial | transactional | navigational",
+  "primary_keyword": "best 2-4 word keyword phrase for this topic",
+  "secondary_keywords": ["5-8 related keyword phrases each 2-4 words"],
+  "nlp_terms": ["8-12 semantic/NLP terms that help search engines understand the topic"],
+  "h2_outline": [
+    {{"heading": "H2 heading text", "notes": "brief writer's note for this section"}}
+  ],
+  "content_gaps": ["3-5 topics that competitors missed or covered poorly"],
+  "meta_suggestions": [
+    {{
+      "title": "SEO title tag ≤60 chars",
+      "description": "Meta description ≤155 chars"
+    }}
+  ],
+  "recommendations": ["5-7 specific actionable SEO tips based on the data"]
+}}
+
+Rules:
+- Derive everything from the REAL SERP data above, not from general knowledge
+- Include the primary keyword naturally in at least 2 outline headings
+- Scale outline sections to hit ~{target_word_count // 300} sections minimum
+- Meta suggestions: provide 3 variants
+- Do NOT copy competitor headings verbatim — improve them
+- Content gaps should be genuinely missing from competitors
+"""
+    logger.info("[ANALYSE] 🧠 Sending aggregated data to LLM for analysis...")
+    t0 = time.time()
+    raw = _gemini_call(prompt, max_retries=3)
     if raw:
         try:
-            return json.loads(_strip_fences(raw))
-        except Exception:
-            pass
-    # Fallback
+            parsed = json.loads(_strip_fences(raw))
+            if isinstance(parsed, dict):
+                logger.info(
+                    "[ANALYSE] ✅ LLM analysis complete in %.1fs — intent=%s, %d keywords, %d outline sections, %d gaps",
+                    time.time() - t0,
+                    parsed.get('search_intent', '?'),
+                    len(parsed.get('secondary_keywords', [])),
+                    len(parsed.get('h2_outline', [])),
+                    len(parsed.get('content_gaps', [])),
+                )
+                return parsed
+        except Exception as exc:
+            logger.warning("[ANALYSE] ❌ LLM JSON parse failed: %s", exc)
+
+    logger.warning("[ANALYSE] ⚠️  LLM analysis failed — using fallback structure")
+    # Fallback — return minimal structure
     words = topic.lower().split()
     primary = " ".join(words[:3]) if len(words) >= 3 else topic.lower()
     return {
+        "search_intent": "informational",
         "primary_keyword": primary,
         "secondary_keywords": [
             f"{primary} tips", f"{primary} guide", f"how to {primary}",
             f"best {primary} strategies", f"{primary} for beginners",
         ],
-        "search_intent": "informational",
+        "nlp_terms": [],
+        "h2_outline": build_seo_outline(topic, [primary], target_word_count),
+        "content_gaps": [],
+        "meta_suggestions": [],
         "recommendations": [
             f"Target '{primary}' in your H1 and first 100 words.",
             "Aim for 1,500+ words to outperform top-ranking articles.",
@@ -328,7 +522,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
 
 # ---------------------------------------------------------------------------
-# [5] DataForSEO — mock (no paid API required)
+# Keyword volume mock (no paid API)
 # ---------------------------------------------------------------------------
 
 _VOLUME_TIERS = [
@@ -338,7 +532,7 @@ _VOLUME_TIERS = [
 ]
 
 
-def _step5_dataforseo_mock(keywords: list[str]) -> list[dict]:
+def _keyword_volumes_mock(keywords: list[str]) -> list[dict]:
     """Return estimated keyword volume/difficulty without a paid API."""
     result = []
     for kw in keywords:
@@ -352,168 +546,7 @@ def _step5_dataforseo_mock(keywords: list[str]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# [6] Scrape competitors + [7] Score their readability
-# ---------------------------------------------------------------------------
-
-def _scrape_url_to_insight(url: str) -> dict | None:
-    """Scrape a single URL and return an insight dict, or None on failure."""
-    try:
-        scraped = scrape_website(url)
-        content_text = scraped.get("main_content", "")
-        readability = score_readability(content_text)
-        top_kws = [k["keyword"] for k in extract_keywords_from_text(content_text, top_n=5)]
-        return {
-            "url": url,
-            "title": scraped.get("title") or url,
-            "word_count": readability.get("word_count", 0),
-            "readability_score": readability.get("flesch_score", 0.0),
-            "top_keywords": top_kws,
-        }
-    except Exception as exc:
-        logger.warning("Competitor scrape failed for %s: %s", url, exc)
-        return None
-
-
-def _step6_scrape_competitors(competitor_urls: list[str]) -> list[dict]:
-    """
-    Scrape up to 3 provided URLs.
-    Gracefully skips any that fail.
-    """
-    insights = []
-    for url in competitor_urls[:3]:
-        result = _scrape_url_to_insight(url)
-        if result:
-            insights.append(result)
-    return insights
-
-
-def _step6_discover_competitor_urls(topic: str, primary_keyword: str) -> list[str]:
-    """
-    Use Gemini with Google Search grounding to find real URLs that rank
-    for this keyword. Grounding URLs come from live Google Search results —
-    not from Gemini's memory — so they are guaranteed to be real pages.
-    Falls back to an empty list if web search is unavailable.
-    """
-    prompt = (
-        f'Search Google for: "{primary_keyword}"\n'
-        f"Find the top 5 articles that rank for this keyword about '{topic}'. "
-        "List the URLs of those articles."
-    )
-    _text, urls = _gemini_web_search(prompt)
-
-    if urls:
-        logger.info("Web search grounding returned %d URLs for '%s'", len(urls), primary_keyword)
-        return urls[:5]
-
-    # Grounding gave no URLs (e.g. API plan doesn't support it) — fall back
-    # to a knowledge-based search but log that it's a fallback
-    logger.warning(
-        "Web search grounding returned no URLs for '%s' — "
-        "falling back to knowledge-based search",
-        primary_keyword,
-    )
-    fallback_prompt = (
-        f'What are 5 real article URLs that currently rank on Google for "{primary_keyword}"? '
-        f'Return ONLY a JSON array of URL strings, no markdown:\n["https://...", ...]'
-    )
-    raw = _gemini_call(fallback_prompt)
-    if not raw:
-        return []
-    try:
-        result = json.loads(_strip_fences(raw))
-        if isinstance(result, list):
-            return [u for u in result if isinstance(u, str) and u.startswith("http")][:5]
-    except Exception as exc:
-        logger.warning("Fallback competitor URL parse failed: %s", exc)
-    return []
-
-
-def _step6_auto_competitors(topic: str, primary_keyword: str) -> list[dict]:
-    """
-    Full auto-discovery pipeline:
-    1. Ask Gemini for candidate URLs
-    2. Scrape each one — discard any that fail
-    3. Return up to 3 verified insights
-    """
-    candidate_urls = _step6_discover_competitor_urls(topic, primary_keyword)
-    if not candidate_urls:
-        return []
-
-    insights = []
-    for url in candidate_urls:
-        if len(insights) >= 3:
-            break
-        result = _scrape_url_to_insight(url)
-        if result and result["word_count"] > 0:  # only keep pages with real content
-            insights.append(result)
-
-    logger.info(
-        "Auto competitor discovery: %d candidates → %d verified",
-        len(candidate_urls), len(insights)
-    )
-    return insights
-
-
-# ---------------------------------------------------------------------------
-# [10] AI-enrich H2 outline via Gemini
-# ---------------------------------------------------------------------------
-
-def _step10_ai_enrich_outline(
-    topic: str,
-    primary_keyword: str,
-    secondary_keywords: list[str],
-    competitor_insights: list[dict],
-    word_count: int,
-) -> list[dict]:
-    """
-    Ask Gemini to generate an SEO-optimised H2 outline, enriched with
-    competitor context when available. Falls back to template outline.
-    """
-    competitor_context = ""
-    if competitor_insights:
-        lines = []
-        for c in competitor_insights:
-            lines.append(
-                f"- {c['title']} ({c['word_count']} words, "
-                f"top keywords: {', '.join(c['top_keywords'][:3])})"
-            )
-        competitor_context = "Competitor articles found:\n" + "\n".join(lines)
-
-    prompt = f"""You are an expert SEO content strategist.
-
-Topic: "{topic}"
-Primary keyword: "{primary_keyword}"
-Secondary keywords: {secondary_keywords}
-Target word count: {word_count}
-{competitor_context}
-
-Generate an SEO-optimised H2 outline. Return ONLY a JSON array (no markdown):
-[
-  {{"heading": "H2 heading text", "notes": "brief writer's note for this section"}},
-  ...
-]
-
-Rules:
-- Include the primary keyword naturally in at least 2 headings
-- Scale sections to hit the target word count (~{word_count // 300} sections minimum)
-- Cover: intro concept, how it works, strategies, mistakes, quick-start, FAQs
-- Do NOT repeat headings from competitor articles verbatim
-"""
-    raw = _gemini_call(prompt)
-    if raw:
-        try:
-            sections = json.loads(_strip_fences(raw))
-            if isinstance(sections, list) and sections:
-                return sections
-        except Exception:
-            pass
-    # Fallback to template
-    from app.services.seo_tools import build_seo_outline
-    return build_seo_outline(topic, [primary_keyword] + secondary_keywords, word_count)
-
-
-# ---------------------------------------------------------------------------
-# POST /api/seo/brief  — full 14-step flow
+# POST /api/seo/brief  — Serper → Playwright+BS4 → Aggregate → Gemini
 # ---------------------------------------------------------------------------
 
 @router.post("/brief", response_model=SEOBriefResponse)
@@ -524,72 +557,150 @@ def generate_seo_brief(
     if not data.topic.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
 
-    # [4+6] Combined single Gemini call: keywords + competitor URL discovery
-    # This halves the number of API calls vs doing them separately.
-    if not data.competitor_urls:
-        kw_data, discovered_urls = _step4_and_6_combined(data.topic)
-    else:
-        kw_data = _step4_extract_keywords(data.topic)
-        discovered_urls = []
+    brief_start = time.time()
+    logger.info("="*60)
+    logger.info("[BRIEF] 🚀 Starting SEO brief for: '%s'", data.topic)
+    logger.info("[BRIEF]    country=%s  word_count=%d  competitor_urls=%d  has_draft=%s",
+                data.country or 'global', data.target_word_count,
+                len(data.competitor_urls), bool(data.content_draft.strip()))
+    logger.info("="*60)
 
-    primary_keyword: str = kw_data.get("primary_keyword", data.topic)
-    secondary_keywords: list[str] = kw_data.get("secondary_keywords", [])
-    recommendations: list[str] = kw_data.get("recommendations", [])
+    # ── Step 1: SERP fetch (Serper.dev) ──────────────────────────────────
+    logger.info("[STEP 1/11] 🔍 Fetching SERP from Serper.dev...")
+    t0 = time.time()
+    serp_results_raw = _serper_organic(
+        query=data.topic,
+        num=10,
+        country=data.country,
+        device=data.device,
+    )
+    serp_results = [SerpResult(**s) for s in serp_results_raw]
+    logger.info("[STEP 1/11] ✅ Serper returned %d results in %.1fs", len(serp_results), time.time() - t0)
+    for i, s in enumerate(serp_results_raw[:5]):
+        logger.info("[STEP 1/11]    %d. %s", i + 1, s.get('link', '?'))
+
+    # URLs to scrape: user-provided first, else from Serper SERP
+    urls_to_scrape = data.competitor_urls or [s["link"] for s in serp_results_raw]
+
+    # ── Step 2+3: Scrape pages (Playwright) + Clean (BS4) ───────────────
+    logger.info("[STEP 2/11] 🌐 Scraping %d URLs with Playwright + BS4...", min(len(urls_to_scrape), 5))
+    t0 = time.time()
+    scraped_pages = _scrape_pages(urls_to_scrape, limit=5)
+    logger.info("[STEP 2/11] ✅ Scraped %d pages in %.1fs", len(scraped_pages), time.time() - t0)
+    for p in scraped_pages:
+        logger.info("[STEP 2/11]    ✓ %s — %d words, %d headings", p['url'][:80], p['word_count'], len(p.get('headings', [])))
+
+    # Build competitor insights from scraped data
+    competitor_insights = [
+        CompetitorInsight(
+            url=p["url"],
+            title=p["title"],
+            word_count=p["word_count"],
+            readability_score=p["readability_score"],
+            top_keywords=p["top_keywords"][:5],
+        )
+        for p in scraped_pages
+    ]
+
+    # ── Step 4: Aggregate cleaned data ──────────────────────────────────
+    logger.info("[STEP 3/11] 📊 Aggregating scraped data...")
+    aggregated = _aggregate_scraped_data(scraped_pages)
+    logger.info("[STEP 3/11] ✅ Aggregated: %d unique headings, %d common keywords, avg %d words",
+                len(aggregated.get('headings', [])),
+                len(aggregated.get('common_keywords', [])),
+                aggregated.get('avg_word_count', 0))
+
+    # ── Step 5: Gemini analysis (single call with real SERP data) ───────
+    logger.info("[STEP 4/11] 🧠 Sending to LLM for comprehensive analysis...")
+    t0 = time.time()
+    analysis = _gemini_analyse_serp(
+        topic=data.topic,
+        serp_snippets=serp_results_raw,
+        aggregated=aggregated,
+        target_word_count=data.target_word_count,
+    )
+
+    logger.info("[STEP 4/11] ✅ LLM analysis done in %.1fs", time.time() - t0)
+
+    primary_keyword: str = analysis.get("primary_keyword", data.topic)
+    secondary_keywords: list[str] = analysis.get("secondary_keywords", [])
+    nlp_terms: list[str] = analysis.get("nlp_terms", [])
+    content_gaps: list[str] = analysis.get("content_gaps", [])
+    search_intent: str = analysis.get("search_intent", "")
+    recommendations: list[str] = analysis.get("recommendations", [])
     all_keywords = [primary_keyword] + secondary_keywords
+    logger.info("[STEP 4/11]    intent=%s  primary='%s'  secondary=%d  gaps=%d  nlp=%d",
+                search_intent, primary_keyword, len(secondary_keywords),
+                len(content_gaps), len(nlp_terms))
 
-    # [5] DataForSEO mock — keyword volume + difficulty
-    keyword_data = [KeywordVolume(**k) for k in _step5_dataforseo_mock(all_keywords)]
+    # H2 outline from Gemini analysis
+    outline_raw = analysis.get("h2_outline", [])
+    if not outline_raw:
+        logger.info("[STEP 5/11] ⚠️  No outline from LLM — using template fallback")
+        outline_raw = build_seo_outline(data.topic, all_keywords, data.target_word_count)
+    h2_outline = [H2Section(**s) for s in outline_raw]
+    logger.info("[STEP 5/11] ✅ Outline: %d H2 sections", len(h2_outline))
 
-    # [6] Scrape + verify competitors
-    # Use provided URLs, or URLs discovered by the combined call above
-    urls_to_scrape = data.competitor_urls or discovered_urls
-    if urls_to_scrape:
-        raw_insights = _step6_scrape_competitors(urls_to_scrape)
+    # ── Step 6: Keyword volumes (mock) ──────────────────────────────────
+    keyword_data = [KeywordVolume(**k) for k in _keyword_volumes_mock(all_keywords)]
+    logger.info("[STEP 6/11] ✅ Keyword volumes estimated for %d keywords", len(keyword_data))
+
+    # ── Step 7: Meta tags ───────────────────────────────────────────────
+    # Prefer Gemini-generated meta, fall back to local generator
+    gemini_meta = analysis.get("meta_suggestions", [])
+    if gemini_meta:
+        meta_suggestions = []
+        for m in gemini_meta:
+            t = m.get("title", "")
+            d = m.get("description", "")
+            meta_suggestions.append(MetaSuggestion(
+                title=t,
+                title_length=len(t),
+                title_ok=len(t) <= 60,
+                description=d,
+                description_length=len(d),
+                description_ok=len(d) <= 155,
+            ))
     else:
-        # Grounding returned no URLs — try dedicated auto-discovery as last resort
-        raw_insights = _step6_auto_competitors(data.topic, primary_keyword)
-    competitor_insights = [CompetitorInsight(**c) for c in raw_insights]
+        meta_raw = generate_meta_suggestions(data.topic, all_keywords)
+        meta_suggestions = [MetaSuggestion(**m) for m in meta_raw]
 
-    # [8] Generate meta tags
-    meta_raw = generate_meta_suggestions(data.topic, all_keywords)
-    meta_suggestions = [MetaSuggestion(**m) for m in meta_raw]
+    logger.info("[STEP 7/11] ✅ Meta tags: %d variants (source=%s)",
+                len(meta_suggestions), 'LLM' if gemini_meta else 'local')
 
-    # [9] Schema markup
-    first_meta = meta_raw[0]
+    # ── Step 8: Schema markup ───────────────────────────────────────────
+    first_title = meta_suggestions[0].title if meta_suggestions else data.topic
+    first_desc = meta_suggestions[0].description if meta_suggestions else ""
     schema = generate_schema_markup(
-        title=first_meta["title"],
-        description=first_meta["description"],
+        title=first_title,
+        description=first_desc,
         url=data.target_url,
     )
 
-    # [10] AI-enrich H2 outline
-    outline_raw = _step10_ai_enrich_outline(
-        topic=data.topic,
-        primary_keyword=primary_keyword,
-        secondary_keywords=secondary_keywords,
-        competitor_insights=raw_insights,
-        word_count=data.target_word_count,
-    )
-    h2_outline = [H2Section(**s) for s in outline_raw]
+    logger.info("[STEP 8/11] ✅ Schema markup generated")
 
-    # [11] SERP preview
-    serp = build_serp_preview(
-        title=first_meta["title"],
-        description=first_meta["description"],
+    # ── Step 9: SERP preview ────────────────────────────────────────────
+    serp_preview = build_serp_preview(
+        title=first_title,
+        description=first_desc,
         url=data.target_url or "https://yourwebsite.com",
     )
 
-    # [12] Build recommendations (already returned from Gemini in step 4)
-    # Append competitor-derived tip if insights available
+    logger.info("[STEP 9/11] ✅ SERP preview built")
+
+    # ── Step 10: Enrich recommendations with competitor stats ───────────
     if competitor_insights:
         avg_wc = int(sum(c.word_count for c in competitor_insights) / len(competitor_insights))
         recommendations.append(
             f"Competitors average {avg_wc} words — aim for at least {avg_wc + 200} words to outrank them."
         )
 
-    # [13] Score existing draft against the brief's primary keyword (if provided)
+    logger.info("[STEP 10/11] ✅ Recommendations: %d tips", len(recommendations))
+
+    # ── Step 11: Score existing draft (if provided) ─────────────────────
     draft_score: DraftScore | None = None
     if data.content_draft.strip():
+        logger.info("[STEP 11/11] 📝 Scoring user draft (%d chars)...", len(data.content_draft))
         rd = score_readability(data.content_draft)
         kd = analyse_keyword_density(data.content_draft, primary_keyword)
         st = analyse_content_structure(data.content_draft)
@@ -600,17 +711,34 @@ def generate_seo_brief(
             structure=st,
         )
 
-    # [14] Return full JSON → consumed by frontend tabs
+    if draft_score:
+        logger.info("[STEP 11/11] ✅ Draft score: %d/100", draft_score.overall)
+    else:
+        logger.info("[STEP 11/11] ⏭️  No draft provided — skipped")
+
+    total = time.time() - brief_start
+    logger.info("="*60)
+    logger.info("[BRIEF] 🏁 SEO brief complete in %.1fs", total)
+    logger.info("[BRIEF]    %d SERP results | %d competitors | %d sections | %d keywords | %d gaps",
+                len(serp_results), len(competitor_insights),
+                len(h2_outline), len(all_keywords), len(content_gaps))
+    logger.info("="*60)
+
+    # ── Return ──────────────────────────────────────────────────────────
     return SEOBriefResponse(
         topic=data.topic,
+        search_intent=search_intent,
         primary_keyword=primary_keyword,
         secondary_keywords=secondary_keywords,
+        nlp_terms=nlp_terms,
         keyword_data=keyword_data,
+        serp_results=serp_results,
         competitor_insights=competitor_insights,
+        content_gaps=content_gaps,
         h2_outline=h2_outline,
         meta_suggestions=meta_suggestions,
         schema_markup=schema,
-        serp_preview=serp,
+        serp_preview=serp_preview,
         recommendations=recommendations,
         draft_score=draft_score,
     )
@@ -823,3 +951,130 @@ Priority rules:
                 tip="Add a clear H1 heading at the top, then use H2s to break up each main section. This alone will significantly improve your score."))
 
     return SEOTipsResponse(tips=tips)
+
+
+# ---------------------------------------------------------------------------
+# SEO Saves — persist briefs and editor drafts per user
+# ---------------------------------------------------------------------------
+
+class SeoSaveRequest(BaseModel):
+    type: str           # "brief" | "draft"
+    title: str
+    data: dict
+
+
+class SeoSaveItem(BaseModel):
+    id: str
+    type: str
+    title: str
+    data: dict
+    created_at: str
+    updated_at: str
+
+
+@router.post("/saves", response_model=SeoSaveItem, status_code=status.HTTP_201_CREATED)
+def create_seo_save(
+    payload: SeoSaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.type not in ("brief", "draft"):
+        raise HTTPException(status_code=400, detail="type must be 'brief' or 'draft'")
+    save = SeoSave(
+        user_id=current_user.id,
+        type=payload.type,
+        title=payload.title.strip() or "Untitled",
+        data=json.dumps(payload.data),
+    )
+    db.add(save)
+    db.commit()
+    db.refresh(save)
+    return SeoSaveItem(
+        id=save.id,
+        type=save.type,
+        title=save.title,
+        data=json.loads(save.data),
+        created_at=save.created_at.isoformat(),
+        updated_at=save.updated_at.isoformat(),
+    )
+
+
+@router.get("/saves", response_model=list[SeoSaveItem])
+def list_seo_saves(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    saves = (
+        db.query(SeoSave)
+        .filter(SeoSave.user_id == current_user.id)
+        .order_by(SeoSave.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        SeoSaveItem(
+            id=s.id,
+            type=s.type,
+            title=s.title,
+            data=json.loads(s.data),
+            created_at=s.created_at.isoformat(),
+            updated_at=s.updated_at.isoformat(),
+        )
+        for s in saves
+    ]
+
+
+@router.get("/saves/{save_id}", response_model=SeoSaveItem)
+def get_seo_save(
+    save_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    save = db.query(SeoSave).filter(SeoSave.id == save_id, SeoSave.user_id == current_user.id).first()
+    if not save:
+        raise HTTPException(status_code=404, detail="Save not found")
+    return SeoSaveItem(
+        id=save.id,
+        type=save.type,
+        title=save.title,
+        data=json.loads(save.data),
+        created_at=save.created_at.isoformat(),
+        updated_at=save.updated_at.isoformat(),
+    )
+
+
+@router.put("/saves/{save_id}", response_model=SeoSaveItem)
+def update_seo_save(
+    save_id: str,
+    payload: SeoSaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    save = db.query(SeoSave).filter(SeoSave.id == save_id, SeoSave.user_id == current_user.id).first()
+    if not save:
+        raise HTTPException(status_code=404, detail="Save not found")
+    save.title = payload.title.strip() or save.title
+    save.data = json.dumps(payload.data)
+    db.commit()
+    db.refresh(save)
+    return SeoSaveItem(
+        id=save.id,
+        type=save.type,
+        title=save.title,
+        data=json.loads(save.data),
+        created_at=save.created_at.isoformat(),
+        updated_at=save.updated_at.isoformat(),
+    )
+
+
+@router.delete("/saves/{save_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_seo_save(
+    save_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    save = db.query(SeoSave).filter(SeoSave.id == save_id, SeoSave.user_id == current_user.id).first()
+    if not save:
+        raise HTTPException(status_code=404, detail="Save not found")
+    db.delete(save)
+    db.commit()

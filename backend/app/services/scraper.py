@@ -1,7 +1,11 @@
 import json
+import logging
+
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+
+logger = logging.getLogger(__name__)
 
 
 def scrape_website(url: str) -> dict:
@@ -158,3 +162,124 @@ def json_to_website_context(json_str: str) -> dict:
         return json.loads(json_str)
     except (json.JSONDecodeError, TypeError):
         return {}
+
+# ---------------------------------------------------------------------------
+# Playwright + BeautifulSoup article scraper (for SEO competitor analysis)
+# ---------------------------------------------------------------------------
+
+_PLAYWRIGHT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _extract_headings(soup: BeautifulSoup) -> list[dict]:
+    """Extract h1/h2/h3 headings from a BeautifulSoup tree."""
+    headings = []
+    for tag in soup.find_all(["h1", "h2", "h3"]):
+        text = tag.get_text(strip=True)
+        if text:
+            headings.append({"tag": tag.name, "text": text})
+    return headings
+
+
+def scrape_article_content(url: str) -> dict:
+    """
+    Scrape a single article URL with Playwright + BeautifulSoup.
+    For batch scraping prefer `scrape_articles_batch` (one browser, many pages).
+
+    Returns a dict with keys: url, title, headings, main_content.
+    """
+    results = scrape_articles_batch([url])
+    return results[0] if results else {"url": url, "title": "", "headings": [], "main_content": ""}
+
+
+def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[dict]:
+    """
+    Scrape multiple URLs with ONE Playwright browser instance.
+    Each URL gets a new tab (page) — avoids the cost of launching N browsers.
+    Falls back to httpx per-URL if Playwright is not installed.
+
+    Returns a list of dicts: {url, title, headings, main_content}.
+    """
+    # Normalize URLs
+    normalized: list[str] = []
+    for u in urls:
+        if not u.startswith(("http://", "https://")):
+            u = "https://" + u
+        normalized.append(u)
+
+    try:
+        from playwright.sync_api import (  # noqa: PLC0415
+            sync_playwright,
+            TimeoutError as PlaywrightTimeoutError,
+        )
+    except ImportError:
+        logger.warning("playwright not installed — falling back to httpx scraper")
+        results = []
+        for u in normalized:
+            fallback = scrape_website(u)
+            results.append({
+                "url": u,
+                "title": fallback.get("title", ""),
+                "headings": [],
+                "main_content": fallback.get("main_content", ""),
+            })
+        return results
+
+    import time as _time
+    results: list[dict] = []
+    try:
+        logger.info("[SCRAPER] 🚀 Launching Playwright Chromium (headless)...")
+        t_browser = _time.time()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=_PLAYWRIGHT_UA,
+                ignore_https_errors=True,
+            )
+            logger.info("[SCRAPER] ✅ Browser ready in %.1fs", _time.time() - t_browser)
+
+            for idx, url in enumerate(normalized):
+                entry: dict = {"url": url, "title": "", "headings": [], "main_content": ""}
+                logger.info("[SCRAPER] 📄 [%d/%d] Loading %s ...", idx + 1, len(normalized), url[:80])
+                t_page = _time.time()
+                try:
+                    page = ctx.new_page()
+                    # Block heavy assets
+                    page.route(
+                        "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3,css}",
+                        lambda route: route.abort(),
+                    )
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
+                    except PlaywrightTimeoutError:
+                        logger.warning("[SCRAPER]    ⏱️ Timeout on %s — using partial load", url[:60])
+
+                    html = page.content()
+                    page.close()
+
+                    soup = BeautifulSoup(html, "lxml")
+                    title_tag = soup.find("title")
+                    if title_tag:
+                        entry["title"] = title_tag.get_text(strip=True)
+                    entry["headings"] = _extract_headings(soup)
+                    entry["main_content"] = _extract_main_content(soup)[:3_000]
+                    content_len = len(entry["main_content"])
+                    logger.info("[SCRAPER]    ✅ Done in %.1fs — title='%s' headings=%d content=%d chars",
+                                _time.time() - t_page, entry["title"][:50], len(entry["headings"]), content_len)
+
+                except Exception as exc:
+                    logger.warning("[SCRAPER]    ❌ Failed in %.1fs: %s", _time.time() - t_page, exc)
+
+                results.append(entry)
+
+            browser.close()
+            logger.info("[SCRAPER] 🏁 Browser closed — %d pages scraped in %.1fs total",
+                        len(results), _time.time() - t_browser)
+
+    except Exception as exc:
+        logger.error("[SCRAPER] ❌ Playwright batch error: %s", exc)
+
+    return results
