@@ -553,6 +553,7 @@ def _keyword_volumes_mock(keywords: list[str]) -> list[dict]:
 def generate_seo_brief(
     data: SEOBriefRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     if not data.topic.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
@@ -724,8 +725,8 @@ def generate_seo_brief(
                 len(h2_outline), len(all_keywords), len(content_gaps))
     logger.info("="*60)
 
-    # ── Return ──────────────────────────────────────────────────────────
-    return SEOBriefResponse(
+    # ── Auto-save to database ────────────────────────────────────────────
+    result = SEOBriefResponse(
         topic=data.topic,
         search_intent=search_intent,
         primary_keyword=primary_keyword,
@@ -742,6 +743,21 @@ def generate_seo_brief(
         recommendations=recommendations,
         draft_score=draft_score,
     )
+    try:
+        save = SeoSave(
+            user_id=current_user.id,
+            type="brief",
+            title=data.topic.strip() or "Untitled",
+            data=json.dumps(result.model_dump()),
+        )
+        db.add(save)
+        db.commit()
+    except Exception as exc:  # non-critical — never block the response
+        logger.warning("[BRIEF] Auto-save failed: %s", exc)
+        db.rollback()
+
+    # ── Return ──────────────────────────────────────────────────────────
+    return result
 
 
 # ---------------------------------------------------------------------------

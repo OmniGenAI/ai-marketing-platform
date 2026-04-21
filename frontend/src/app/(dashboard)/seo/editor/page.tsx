@@ -245,7 +245,7 @@ function SEOEditorContent() {
     }, [content, focusKeyword, metaTitle, metaDesc, relatedKeywords, targetWords, runScore]);
 
     const wordCount = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
-    const overallLabel = !score ? "â€“" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
+    const overallLabel = !score ? "-" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
     const [isSaving, setIsSaving] = useState(false);
     const [saveId, setSaveId] = useState<string | null>(null);
 
@@ -323,7 +323,7 @@ function SEOEditorContent() {
                             <span>/</span>
                             <span className="text-foreground font-medium">Editor</span>
                         </div>
-                        <h1 className="text-2xl font-bold tracking-tight">Live SEO Editor</h1>
+                        <h1 className="text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">Live SEO Editor</h1>
                         <p className="mt-0.5 text-sm text-muted-foreground">
                             Paste or write your content. SEO score updates as you type.
                         </p>
@@ -335,7 +335,7 @@ function SEOEditorContent() {
                             "shrink-0 rounded-md px-4 py-2 text-xs font-semibold transition-colors",
                             isSaving || !content.trim()
                                 ? "bg-muted text-muted-foreground cursor-not-allowed"
-                                : "bg-foreground text-background hover:opacity-90"
+                                : "bg-emerald-500 text-white hover:bg-emerald-600"
                         )}
                     >
                         {isSaving ? "Savingâ€¦" : "Save Draft"}
@@ -464,7 +464,7 @@ function SEOEditorContent() {
                         ) : (
                             <div className="flex flex-col items-center gap-2">
                                 <div className="h-27 w-27 rounded-full border-8 border-muted/30 flex items-center justify-center">
-                                    <span className="text-2xl font-bold text-muted-foreground">â€“</span>
+                                    <span className="text-2xl font-bold text-muted-foreground">-</span>
                                 </div>
                                 <span className="text-xs text-muted-foreground">Overall Score</span>
                             </div>
@@ -516,10 +516,10 @@ function SEOEditorContent() {
                             <>
                                 <StatRow
                                     label="Density"
-                                    value={score ? `${score.keyword_density.density}%` : "â€“"}
+                                    value={score ? `${score.keyword_density.density}%` : "-"}
                                     highlight={score ? STATUS_COLORS[score.keyword_density.status] : undefined}
                                 />
-                                <StatRow label="Occurrences" value={score ? String(score.keyword_density.occurrences) : "â€“"} />
+                                <StatRow label="Occurrences" value={score ? String(score.keyword_density.occurrences) : "-"} />
                                 <p className="text-xs text-muted-foreground mt-2 mb-1.5">Placement</p>
                                 <PlacementRow label="In H1 heading" ok={score?.keyword_placement.in_h1 ?? false} />
                                 <PlacementRow label="In H2 heading" ok={score?.keyword_placement.in_h2 ?? false} />
@@ -533,15 +533,15 @@ function SEOEditorContent() {
                     {/* Readability */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Readability</p>
-                        <StatRow label="Flesch score" value={score ? String(score.readability.flesch_score) : "â€“"} highlight={score ? STATUS_COLORS[score.readability.status] : undefined} />
-                        <StatRow label="Grade level" value={score ? String(score.readability.grade_level) : "â€“"} />
-                        <StatRow label="Avg sentence" value={score ? `${score.readability.avg_words_per_sentence} words` : "â€“"} />
+                        <StatRow label="Flesch score" value={score ? String(score.readability.flesch_score) : "-"} highlight={score ? STATUS_COLORS[score.readability.status] : undefined} />
+                        <StatRow label="Grade level" value={score ? String(score.readability.grade_level) : "-"} />
+                        <StatRow label="Avg sentence" value={score ? `${score.readability.avg_words_per_sentence} words` : "-"} />
                     </div>
 
                     {/* Content Coverage (LSI) */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Content Coverage</p>
-                        <StatRow label="Unique terms" value={score ? String(score.lsi.unique_terms) : "â€“"} />
+                        <StatRow label="Unique terms" value={score ? String(score.lsi.unique_terms) : "-"} />
                         {score && score.lsi.top_terms.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-1">
                                 {score.lsi.top_terms.slice(0, 6).map((t) => (
@@ -585,8 +585,8 @@ function SEOEditorContent() {
                     {/* Links */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Links</p>
-                        <StatRow label="Internal links" value={score ? String(score.links.internal_count) : "â€“"} />
-                        <StatRow label="External links" value={score ? String(score.links.external_count) : "â€“"} />
+                        <StatRow label="Internal links" value={score ? String(score.links.internal_count) : "-"} />
+                        <StatRow label="External links" value={score ? String(score.links.external_count) : "-"} />
                     </div>
 
                     {/* Target word count */}

@@ -63,7 +63,7 @@ export default function SEOPage() {
     const [typeFilter, setTypeFilter] = useState<"all" | "brief" | "draft">("all");
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
-    const PAGE_SIZE = 6;
+    const PAGE_SIZE = 9;
 
     useEffect(() => {
         api.get<SeoSaveItem[]>("/api/seo/saves")
@@ -221,7 +221,7 @@ export default function SEOPage() {
                                         )}
                                     </span>
                                     <Link
-                                        href={item.type === "brief" ? "/seo/brief" : `/seo/editor?draft=${item.id}`}
+                                        href={item.type === "brief" ? `/seo/brief?id=${item.id}` : `/seo/editor?draft=${item.id}`}
                                         className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
                                     >
                                         <ExternalLink className="h-3 w-3" />
