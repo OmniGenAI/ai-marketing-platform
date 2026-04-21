@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -315,7 +315,7 @@ function LoadingState() {
   );
 }
 
-export default function SEOBriefPage() {
+function SEOBriefContent() {
   const searchParams = useSearchParams();
   const savedBriefId = searchParams.get("id");
 
@@ -1038,5 +1038,12 @@ export default function SEOBriefPage() {
         </div>{/* end grid */}
       </div>
     </div>
+  );
+}
+export default function SEOBriefPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-24"><div className="h-8 w-8 rounded-full border-4 border-t-violet-500 animate-spin" /></div>}>
+      <SEOBriefContent />
+    </Suspense>
   );
 }
