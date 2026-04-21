@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { analyzeContent, type SEOAnalysisResult } from "@/lib/seo-analysis";
 import { cn } from "@/lib/utils";
@@ -40,7 +40,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Score ring — large, used for Overall
+// Score ring â€” large, used for Overall
 // ---------------------------------------------------------------------------
 
 function ScoreRing({ value, label }: { value: number; label: string }) {
@@ -82,7 +82,7 @@ function StatRow({ label, value, highlight }: { label: string; value: string; hi
 }
 
 // ---------------------------------------------------------------------------
-// Score bar — used in 7-component breakdown
+// Score bar â€” used in 7-component breakdown
 // ---------------------------------------------------------------------------
 
 function ScoreBar({ label, score, weight }: { label: string; score: number; weight: string }) {
@@ -112,7 +112,7 @@ function PlacementRow({ label, ok }: { label: string; ok: boolean }) {
         <div className="flex items-center justify-between py-1">
             <span className="text-xs text-muted-foreground">{label}</span>
             <span className={cn("text-xs font-bold", ok ? "text-emerald-500" : "text-red-500")}>
-                {ok ? "✓" : "✗"}
+                {ok ? "âœ“" : "âœ—"}
             </span>
         </div>
     );
@@ -131,7 +131,7 @@ const PRIORITY_LABEL: Record<string, string> = {
     high: "text-red-500", medium: "text-amber-500", low: "text-emerald-500",
 };
 
-export default function SEOEditorPage() {
+function SEOEditorContent() {
     const searchParams = useSearchParams();
     const [content, setContent] = useState("");      // HTML (editor value)
     const [plainText, setPlainText] = useState("");  // plain text for tips API
@@ -235,7 +235,7 @@ export default function SEOEditorPage() {
         []
     );
 
-    // Score: debounce 400ms — fires on any content or meta change
+    // Score: debounce 400ms â€” fires on any content or meta change
     useEffect(() => {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
@@ -245,12 +245,12 @@ export default function SEOEditorPage() {
     }, [content, focusKeyword, metaTitle, metaDesc, relatedKeywords, targetWords, runScore]);
 
     const wordCount = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
-    const overallLabel = !score ? "–" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
+    const overallLabel = !score ? "â€“" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
     const [isSaving, setIsSaving] = useState(false);
     const [saveId, setSaveId] = useState<string | null>(null);
 
     const saveDraft = useCallback(async () => {
-        if (!content.trim()) { toast.error("Nothing to save — editor is empty"); return; }
+        if (!content.trim()) { toast.error("Nothing to save â€” editor is empty"); return; }
         setIsSaving(true);
         const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
         const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null };
@@ -310,9 +310,9 @@ export default function SEOEditorPage() {
     return (
         <div className="flex h-[calc(100vh-6rem)] overflow-hidden">
 
-            {/* ── LEFT: Editor panel ── */}
+            {/* â”€â”€ LEFT: Editor panel â”€â”€ */}
             <div className="flex flex-1 flex-col min-w-0 pr-6 gap-4">
-                {/* Header row — this is actually the scores ring, editor header is in the left panel */}
+                {/* Header row â€” this is actually the scores ring, editor header is in the left panel */}
                 <div className="flex items-start justify-between gap-4">
                     <div>
                         <div className="flex items-center gap-1.5 text-sm text-muted-foreground shrink-0">
@@ -338,7 +338,7 @@ export default function SEOEditorPage() {
                                 : "bg-foreground text-background hover:opacity-90"
                         )}
                     >
-                        {isSaving ? "Saving…" : "Save Draft"}
+                        {isSaving ? "Savingâ€¦" : "Save Draft"}
                     </button>
                 </div>
 
@@ -350,7 +350,7 @@ export default function SEOEditorPage() {
                             setContent(html);
                             setPlainText(text);
                         }}
-                        placeholder="Paste your blog post, article, or any content here…"
+                        placeholder="Paste your blog post, article, or any content hereâ€¦"
                         minHeight="100%"
                         className="flex-1 h-full"
                         meta={{
@@ -368,13 +368,13 @@ export default function SEOEditorPage() {
                     />
                     {isScoring && (
                         <div className="absolute bottom-3 right-3 pointer-events-none">
-                            <span className="text-xs text-muted-foreground animate-pulse">Scoring…</span>
+                            <span className="text-xs text-muted-foreground animate-pulse">Scoringâ€¦</span>
                         </div>
                     )}
                 </div>
             </div>
 
-            {/* ── RIGHT: Sidebar ── */}
+            {/* â”€â”€ RIGHT: Sidebar â”€â”€ */}
             <div className="w-96 shrink-0 flex flex-col gap-0 border-l bg-card ">
 
                 {/* Tab bar */}
@@ -395,7 +395,7 @@ export default function SEOEditorPage() {
                     ))}
                 </div>
 
-                {/* ── AI TIPS TAB ── */}
+                {/* â”€â”€ AI TIPS TAB â”€â”€ */}
                 {sidebarTab === "tips" && (
                     <div className="flex flex-col overflow-y-auto flex-1">
                         {/* Generate button */}
@@ -413,7 +413,7 @@ export default function SEOEditorPage() {
                                             : "bg-foreground text-background hover:opacity-90 active:scale-[0.98]"
                                 )}
                             >
-                                {isTipping ? "Analysing…" : wordCount < MIN_WORDS_FOR_TIPS ? `${MIN_WORDS_FOR_TIPS - wordCount} more words needed` : "✨ Generate AI Tips"}
+                                {isTipping ? "Analysingâ€¦" : wordCount < MIN_WORDS_FOR_TIPS ? `${MIN_WORDS_FOR_TIPS - wordCount} more words needed` : "âœ¨ Generate AI Tips"}
                             </button>
                             {score && wordCount >= 100 && tips.length > 0 && (
                                 <p className="text-[10px] text-muted-foreground text-center mt-1.5">Click to regenerate with latest content</p>
@@ -444,7 +444,7 @@ export default function SEOEditorPage() {
                                             )}
                                         >
                                             <span className={cn("font-semibold block mb-0.5", PRIORITY_LABEL[tip.priority])}>
-                                                {tip.category} · {tip.priority}
+                                                {tip.category} Â· {tip.priority}
                                             </span>
                                             {tip.tip}
                                         </li>
@@ -455,7 +455,7 @@ export default function SEOEditorPage() {
                     </div>
                 )}
 
-                {/* ── SCORE TAB ── */}
+                {/* â”€â”€ SCORE TAB â”€â”€ */}
                 {sidebarTab === "score" && <div className="flex flex-col overflow-y-auto flex-1">
                     {/* Overall score ring */}
                     <div className="flex flex-col items-center gap-3 px-6 pt-8 pb-6 border-b">
@@ -464,7 +464,7 @@ export default function SEOEditorPage() {
                         ) : (
                             <div className="flex flex-col items-center gap-2">
                                 <div className="h-27 w-27 rounded-full border-8 border-muted/30 flex items-center justify-center">
-                                    <span className="text-2xl font-bold text-muted-foreground">–</span>
+                                    <span className="text-2xl font-bold text-muted-foreground">â€“</span>
                                 </div>
                                 <span className="text-xs text-muted-foreground">Overall Score</span>
                             </div>
@@ -501,10 +501,10 @@ export default function SEOEditorPage() {
                             <>
                                 <PlacementRow label="Title present" ok={metaTitle.length > 0} />
                                 <PlacementRow label="Keyword in title" ok={score?.meta_detail.keyword_in_title ?? false} />
-                                <PlacementRow label="Title length ≤60" ok={score?.meta_detail.title_ok ?? false} />
+                                <PlacementRow label="Title length â‰¤60" ok={score?.meta_detail.title_ok ?? false} />
                                 <PlacementRow label="Description present" ok={metaDesc.length > 0} />
                                 <PlacementRow label="Keyword in description" ok={score?.meta_detail.keyword_in_description ?? false} />
-                                <PlacementRow label="Description length ≤155" ok={score?.meta_detail.description_ok ?? false} />
+                                <PlacementRow label="Description length â‰¤155" ok={score?.meta_detail.description_ok ?? false} />
                             </>
                         )}
                     </div>
@@ -516,10 +516,10 @@ export default function SEOEditorPage() {
                             <>
                                 <StatRow
                                     label="Density"
-                                    value={score ? `${score.keyword_density.density}%` : "–"}
+                                    value={score ? `${score.keyword_density.density}%` : "â€“"}
                                     highlight={score ? STATUS_COLORS[score.keyword_density.status] : undefined}
                                 />
-                                <StatRow label="Occurrences" value={score ? String(score.keyword_density.occurrences) : "–"} />
+                                <StatRow label="Occurrences" value={score ? String(score.keyword_density.occurrences) : "â€“"} />
                                 <p className="text-xs text-muted-foreground mt-2 mb-1.5">Placement</p>
                                 <PlacementRow label="In H1 heading" ok={score?.keyword_placement.in_h1 ?? false} />
                                 <PlacementRow label="In H2 heading" ok={score?.keyword_placement.in_h2 ?? false} />
@@ -533,15 +533,15 @@ export default function SEOEditorPage() {
                     {/* Readability */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Readability</p>
-                        <StatRow label="Flesch score" value={score ? String(score.readability.flesch_score) : "–"} highlight={score ? STATUS_COLORS[score.readability.status] : undefined} />
-                        <StatRow label="Grade level" value={score ? String(score.readability.grade_level) : "–"} />
-                        <StatRow label="Avg sentence" value={score ? `${score.readability.avg_words_per_sentence} words` : "–"} />
+                        <StatRow label="Flesch score" value={score ? String(score.readability.flesch_score) : "â€“"} highlight={score ? STATUS_COLORS[score.readability.status] : undefined} />
+                        <StatRow label="Grade level" value={score ? String(score.readability.grade_level) : "â€“"} />
+                        <StatRow label="Avg sentence" value={score ? `${score.readability.avg_words_per_sentence} words` : "â€“"} />
                     </div>
 
                     {/* Content Coverage (LSI) */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Content Coverage</p>
-                        <StatRow label="Unique terms" value={score ? String(score.lsi.unique_terms) : "–"} />
+                        <StatRow label="Unique terms" value={score ? String(score.lsi.unique_terms) : "â€“"} />
                         {score && score.lsi.top_terms.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-1">
                                 {score.lsi.top_terms.slice(0, 6).map((t) => (
@@ -572,21 +572,21 @@ export default function SEOEditorPage() {
                             <ul className="space-y-1.5">
                                 {score.structure.issues.map((issue, i) => (
                                     <li key={i} className="flex items-start gap-1.5 text-xs text-amber-500">
-                                        <span className="shrink-0 mt-0.5">⚠</span>{issue}
+                                        <span className="shrink-0 mt-0.5">âš </span>{issue}
                                     </li>
                                 ))}
                             </ul>
                         )}
                         {score && score.structure.issues.length === 0 && (
-                            <p className="text-xs text-emerald-500">✓ Structure looks good</p>
+                            <p className="text-xs text-emerald-500">âœ“ Structure looks good</p>
                         )}
                     </div>
 
                     {/* Links */}
                     <div className="px-5 py-4 border-b">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2">Links</p>
-                        <StatRow label="Internal links" value={score ? String(score.links.internal_count) : "–"} />
-                        <StatRow label="External links" value={score ? String(score.links.external_count) : "–"} />
+                        <StatRow label="Internal links" value={score ? String(score.links.internal_count) : "â€“"} />
+                        <StatRow label="External links" value={score ? String(score.links.external_count) : "â€“"} />
                     </div>
 
                     {/* Target word count */}
@@ -618,5 +618,13 @@ export default function SEOEditorPage() {
                 </div>}
             </div>
         </div>
+    );
+}
+
+export default function SEOEditorPage() {
+    return (
+        <Suspense fallback={<div className="flex items-center justify-center min-h-screen"><div className="animate-spin h-6 w-6 rounded-full border-2 border-foreground border-t-transparent" /></div>}>
+            <SEOEditorContent />
+        </Suspense>
     );
 }
