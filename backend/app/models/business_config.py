@@ -18,18 +18,13 @@ class BusinessConfig(Base):
     )
     business_name: Mapped[str] = mapped_column(String(255), default="")
     niche: Mapped[str] = mapped_column(String(255), default="")
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tone: Mapped[str] = mapped_column(String(100), default="professional")
     products: Mapped[str] = mapped_column(Text, default="")
     brand_voice: Mapped[str] = mapped_column(Text, default="")
-    hashtags: Mapped[str] = mapped_column(Text, default="")
     target_audience: Mapped[str] = mapped_column(Text, default="")
-    platform_preference: Mapped[str] = mapped_column(
-        String(100), default="both"
-    )
-    # Contact fields
-    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[str] = mapped_column(Text, default="")
+    competitors: Mapped[str | None] = mapped_column(Text, nullable=True)
     website: Mapped[str | None] = mapped_column(String(500), nullable=True)
     website_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

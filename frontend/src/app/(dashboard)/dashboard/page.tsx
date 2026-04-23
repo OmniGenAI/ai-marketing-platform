@@ -132,13 +132,13 @@ export default function DashboardPage() {
             <CardDescription>Get started with these actions</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <Link href="/generate">
+            <Link href="/generate/social">
               <Button className="w-full justify-start gap-2">
                 <Sparkles className="h-4 w-4" />
                 Generate New Post
               </Button>
             </Link>
-            <Link href="/business-config">
+            <Link href="/brand-kit">
               <Button variant="outline" className="w-full justify-start gap-2">
                 <Building2 className="h-4 w-4" />
                 Configure Business

@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { PenLine, Search, ArrowRight, Trash2, ExternalLink } from "lucide-react";
+import { FileText, ArrowRight, Trash2, ExternalLink, BookOpen } from "lucide-react";
+import { toast } from "sonner";
 import api from "@/lib/api";
 import {
     Pagination,
@@ -16,22 +17,22 @@ import {
 
 const tools = [
     {
-        href: "/seo/brief",
-        icon: Search,
-        title: "SEO Brief",
+        href: "/blog/generate",
+        icon: BookOpen,
+        title: "Blog Generator",
         description:
-            "Generate a full SEO brief — keyword research, competitor insights, H2 outline, meta tag suggestions, schema markup, and SERP preview for any topic.",
-        cta: "Generate Brief",
-        accent: "from-violet-500/10 to-violet-500/5 border-violet-500/20",
-        iconColor: "text-violet-500",
-        ctaColor: "bg-violet-500 hover:bg-violet-600",
+            "Generate a full SEO-optimised blog post from a topic or SEO brief — with H2 structure, keyword integration, meta tags, and schema markup ready to publish.",
+        cta: "Write Blog",
+        accent: "from-blue-500/10 to-blue-500/5 border-blue-500/20",
+        iconColor: "text-blue-500",
+        ctaColor: "bg-blue-500 hover:bg-blue-600",
     },
     {
         href: "/seo/editor",
-        icon: PenLine,
+        icon: FileText,
         title: "SEO Editor",
         description:
-            "Write or paste your content and get a live SEO score with a full breakdown — keyword density, readability, structure, meta tags, links, and AI-powered improvement tips.",
+            "Paste your generated blog into the live editor to score, refine, and optimise it before publishing. Real-time keyword density, readability, and structure checks.",
         cta: "Open Editor",
         accent: "from-emerald-500/10 to-emerald-500/5 border-emerald-500/20",
         iconColor: "text-emerald-500",
@@ -39,9 +40,9 @@ const tools = [
     },
 ];
 
-interface SeoSaveItem {
+interface BlogSaveItem {
     id: string;
-    type: "brief" | "draft";
+    type: string;
     title: string;
     data: Record<string, unknown>;
     created_at: string;
@@ -56,19 +57,18 @@ function timeAgo(iso: string) {
     return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export default function SEOPage() {
-    const [saves, setSaves] = useState<SeoSaveItem[]>([]);
+export default function BlogPage() {
+    const [saves, setSaves] = useState<BlogSaveItem[]>([]);
     const [loadingSaves, setLoadingSaves] = useState(true);
     const [confirmId, setConfirmId] = useState<string | null>(null);
-    const [typeFilter, setTypeFilter] = useState<"all" | "brief" | "draft">("all");
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
     const PAGE_SIZE = 9;
 
     useEffect(() => {
-        api.get<SeoSaveItem[]>("/api/seo/saves")
+        api.get<BlogSaveItem[]>("/api/blog/saves")
             .then((res) => setSaves(res.data))
-            .catch(() => {/* non-critical */ })
+            .catch(() => { /* non-critical */ })
             .finally(() => setLoadingSaves(false));
     }, []);
 
@@ -78,13 +78,19 @@ export default function SEOPage() {
         if (!confirmId) return;
         const id = confirmId;
         setConfirmId(null);
+        // Optimistic removal — snapshot so we can revert if the server rejects.
+        const snapshot = saves;
         setSaves((prev) => prev.filter((s) => s.id !== id));
-        await api.delete(`/api/seo/saves/${id}`).catch(() => {/* non-critical */ });
+        try {
+            await api.delete(`/api/blog/saves/${id}`);
+        } catch {
+            setSaves(snapshot);
+            toast.error("Failed to delete blog — please try again");
+        }
     };
 
     const sorted = [...saves]
         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-        .filter((s) => typeFilter === "all" || s.type === typeFilter)
         .filter((s) => !search.trim() || s.title.toLowerCase().includes(search.trim().toLowerCase()));
 
     const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
@@ -97,9 +103,9 @@ export default function SEOPage() {
         <div className="flex flex-col gap-10 mx-auto">
             {/* Header */}
             <div>
-                <h1 className="text-3xl font-bold tracking-tight">SEO Tools</h1>
+                <h1 className="text-3xl font-bold tracking-tight">Blog</h1>
                 <p className="mt-2 text-muted-foreground">
-                    Research, plan, and optimise your content for search engines.
+                    Generate SEO-optimised blog posts and refine them before publishing.
                 </p>
             </div>
 
@@ -137,11 +143,11 @@ export default function SEOPage() {
                 })}
             </div>
 
-            {/* Recent Saves */}
+            {/* Recent Blogs */}
             <div>
                 <div className="flex flex-col gap-3 mb-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-center gap-2">
-                        <h2 className="text-sm font-semibold">Recent Saves</h2>
+                        <h2 className="text-sm font-semibold">Recent Blogs</h2>
                         {!loadingSaves && saves.length > 0 && (
                             <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                                 {sorted.length}/{saves.length}
@@ -150,32 +156,15 @@ export default function SEOPage() {
                     </div>
 
                     {!loadingSaves && saves.length > 0 && (
-                        <div className="flex items-center gap-2">
-                            <div className="relative">
-                                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-                                <input
-                                    type="text"
-                                    placeholder="Search saves…"
-                                    value={search}
-                                    onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                                    className="h-8 w-44 rounded-md border bg-background pl-8 pr-3 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                                />
-                            </div>
-                            <div className="flex items-center gap-1 rounded-md border bg-muted/40 p-0.5">
-                                {(["all", "brief", "draft"] as const).map((t) => (
-                                    <button
-                                        key={t}
-                                        onClick={() => { setTypeFilter(t); setPage(1); }}
-                                        className={`rounded px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
-                                            typeFilter === t
-                                                ? "bg-background text-foreground shadow-sm"
-                                                : "text-muted-foreground hover:text-foreground"
-                                        }`}
-                                    >
-                                        {t === "all" ? "All" : t === "brief" ? "Brief" : "Draft"}
-                                    </button>
-                                ))}
-                            </div>
+                        <div className="relative">
+                            <FileText className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                            <input
+                                type="text"
+                                placeholder="Search blogs…"
+                                value={search}
+                                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                                className="h-8 w-44 rounded-md border bg-background pl-8 pr-3 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                            />
                         </div>
                     )}
                 </div>
@@ -187,7 +176,7 @@ export default function SEOPage() {
                         ))}
                     </div>
                 ) : sorted.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No saves yet — generate a brief or save an editor draft.</p>
+                    <p className="text-sm text-muted-foreground">No blogs yet — generate your first blog post.</p>
                 ) : (
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                         {paginated.map((item) => (
@@ -195,31 +184,22 @@ export default function SEOPage() {
                                 key={item.id}
                                 className="group relative flex flex-col gap-1.5 rounded-lg border bg-card p-4 hover:border-foreground/20 transition-colors"
                             >
-                                <span
-                                    className={`self-start rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                                        item.type === "brief"
-                                            ? "border-violet-500/30 bg-violet-500/10 text-violet-500"
-                                            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
-                                    }`}
-                                >
-                                    {item.type === "brief" ? "Brief" : "Draft"}
+                                <span className="self-start rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide border-blue-500/30 bg-blue-500/10 text-blue-500">
+                                    Blog
                                 </span>
 
                                 <p className="text-sm font-medium line-clamp-2 pr-6">{item.title}</p>
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="flex gap-2 items-center">
                                         <p className="text-xs text-muted-foreground">{timeAgo(item.created_at)}</p>
-                                        {item.data.score != null && (
-                                            <span className={`text-xs font-semibold ${
-                                                (item.data.score as number) >= 70 ? "text-emerald-500" :
-                                                (item.data.score as number) >= 45 ? "text-amber-500" : "text-red-500"
-                                            }`}>
-                                                {item.data.score as number}/100
+                                        {item.data.word_count != null && (
+                                            <span className="text-xs text-muted-foreground">
+                                                {item.data.word_count as number} words
                                             </span>
                                         )}
                                     </span>
                                     <Link
-                                        href={item.type === "brief" ? `/seo/brief?id=${item.id}` : `/seo/editor?draft=${item.id}`}
+                                        href={`/blog/generate?id=${item.id}`}
                                         className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
                                     >
                                         <ExternalLink className="h-3 w-3" />
@@ -298,7 +278,7 @@ export default function SEOPage() {
                         onClick={() => setConfirmId(null)}
                     />
                     <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-xl">
-                        <h3 className="text-base font-semibold mb-2">Delete save?</h3>
+                        <h3 className="text-base font-semibold mb-2">Delete blog?</h3>
                         <p className="text-sm text-muted-foreground mb-5">This action cannot be undone.</p>
                         <div className="flex justify-end gap-2">
                             <button

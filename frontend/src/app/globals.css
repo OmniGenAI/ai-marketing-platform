@@ -123,4 +123,28 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Rendered markdown container — used by the blog preview and any other
+     place we drop sanitized LLM HTML via dangerouslySetInnerHTML.
+     Scoped so it won't leak into Tiptap, shadcn/ui, etc. */
+  .blog-rendered h1 { @apply text-2xl font-bold mt-8 mb-3 leading-tight; }
+  .blog-rendered h2 { @apply text-xl font-bold mt-7 mb-3 leading-snug; }
+  .blog-rendered h3 { @apply text-lg font-semibold mt-5 mb-2; }
+  .blog-rendered h4 { @apply text-base font-semibold mt-4 mb-2; }
+  .blog-rendered p  { @apply mb-3 leading-relaxed; }
+  .blog-rendered ul { @apply list-disc pl-6 mb-3 space-y-1; }
+  .blog-rendered ol { @apply list-decimal pl-6 mb-3 space-y-1; }
+  .blog-rendered li { @apply leading-relaxed; }
+  .blog-rendered li > p { @apply mb-0; }
+  .blog-rendered code { @apply rounded bg-muted px-1.5 py-0.5 text-[0.9em] font-mono; }
+  .blog-rendered pre  { @apply rounded-md bg-muted p-3 my-3 overflow-x-auto text-xs; }
+  .blog-rendered pre code { @apply bg-transparent p-0 text-xs; }
+  .blog-rendered blockquote { @apply border-l-4 border-muted-foreground/30 pl-4 italic my-3 text-muted-foreground; }
+  .blog-rendered strong { @apply font-semibold text-foreground; }
+  .blog-rendered em { @apply italic; }
+  .blog-rendered a  { @apply underline underline-offset-2 text-primary hover:opacity-80; }
+  .blog-rendered hr { @apply my-6 border-border; }
+  .blog-rendered table { @apply w-full border-collapse my-3 text-sm; }
+  .blog-rendered th, .blog-rendered td { @apply border border-border px-3 py-1.5; }
+  .blog-rendered th { @apply bg-muted font-semibold text-left; }
 }

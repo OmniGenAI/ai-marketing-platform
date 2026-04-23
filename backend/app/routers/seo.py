@@ -48,6 +48,15 @@ router = APIRouter(prefix="/api/seo", tags=["seo"])
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+class BusinessContext(BaseModel):
+    business_name: str = ""
+    niche: str = ""
+    location: str = ""
+    target_audience: str = ""
+    products: str = ""
+    brand_voice: str = ""
+
+
 class SEOBriefRequest(BaseModel):
     topic: str
     target_url: str = ""
@@ -56,6 +65,7 @@ class SEOBriefRequest(BaseModel):
     device: str = ""           # "desktop" | "mobile" — optional Serper param
     competitor_urls: list[str] = []
     content_draft: str = ""    # optional existing draft to score against the brief
+    business_context: BusinessContext | None = None  # auto-injected from brand kit
 
 
 class MetaSuggestion(BaseModel):
@@ -84,6 +94,8 @@ class CompetitorInsight(BaseModel):
     word_count: int
     readability_score: float
     top_keywords: list[str]
+    content_summary: str = ""       # first ~1500 chars of scraped page text
+    headings: list[str] = []        # H1/H2/H3 from the page
 
 
 class DraftScore(BaseModel):
@@ -169,7 +181,8 @@ _GEMINI_URL = (
 )
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "openai/gpt-oss-120b"
+_GROQ_MODEL = "llama-3.3-70b-versatile"  # 300K TPM, 1K RPM, supports JSON mode
+_GROQ_MAX_CHARS = 25_000  # safe per-request limit
 
 
 def _gemini_call_raw(prompt: str, max_retries: int = 3) -> str | None:
@@ -208,13 +221,36 @@ def _gemini_call_raw(prompt: str, max_retries: int = 3) -> str | None:
     return None
 
 
-def _groq_call(prompt: str, max_retries: int = 2) -> str | None:
-    """Groq fallback call — used when Gemini is down."""
+_GROQ_MAX_OUTPUT_TOKENS = 8192  # enough for full-document HTML rewrites
+
+
+def _groq_call(prompt: str, max_retries: int = 2, json_mode: bool = True) -> str | None:
+    """Groq fallback call — used when Gemini is down.
+
+    `json_mode=True` enables OpenAI-compatible JSON mode, which guarantees
+    a valid JSON response shape (the API server enforces it) and prevents
+    the model from emitting markdown fences. All our prompts request JSON,
+    so the default is True.
+    """
     if not settings.GROQ_API_KEY:
         logger.warning("[LLM] Groq API key not set — skipping fallback")
         return None
     logger.info("[LLM] 🟡 Calling Groq/%s (prompt %d chars)...", _GROQ_MODEL, len(prompt))
     t0 = time.time()
+    payload: dict = {
+        "model": _GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are an expert SEO strategist. Always respond with valid JSON only, no markdown fences."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.4,
+        # Without this, Groq defaults to ~1024 tokens and truncates mid-JSON
+        # on any endpoint that asks for full HTML (apply-tips, blog generate).
+        # "max_tokens": _GROQ_MAX_OUTPUT_TOKENS,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
     for attempt in range(max_retries):
         try:
             resp = httpx.post(
@@ -223,15 +259,8 @@ def _groq_call(prompt: str, max_retries: int = 2) -> str | None:
                     "Authorization": f"Bearer {settings.GROQ_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": _GROQ_MODEL,
-                    "messages": [
-                        {"role": "system", "content": "You are an expert SEO strategist. Always respond with valid JSON only, no markdown fences."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.4,
-                },
-                timeout=30.0,
+                json=payload,
+                timeout=45.0,
             )
             if resp.status_code in (429, 500, 502, 503, 504):
                 wait = 2 ** (attempt + 1)
@@ -242,9 +271,23 @@ def _groq_call(prompt: str, max_retries: int = 2) -> str | None:
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"]
-            logger.info("[LLM] ✅ Groq responded in %.1fs (%d chars)", time.time() - t0, len(text))
-            return text
+            body = resp.json()
+            choice = (body.get("choices") or [{}])[0]
+            text = (choice.get("message") or {}).get("content") or ""
+            finish_reason = choice.get("finish_reason")
+            logger.info(
+                "[LLM] ✅ Groq responded in %.1fs (%d chars, finish=%s)",
+                time.time() - t0, len(text), finish_reason,
+            )
+            # Empty content with finish=stop means the model refused — retry
+            # once more before giving up. Empty with finish=length means the
+            # output hit max_tokens at the *start* (nothing emitted yet) —
+            # also worth a retry.
+            if not text.strip() and attempt + 1 < max_retries:
+                logger.warning("[LLM] Groq returned empty content (finish=%s) — retrying", finish_reason)
+                time.sleep(2 ** (attempt + 1))
+                continue
+            return text or None
         except httpx.HTTPStatusError as exc:
             logger.warning("[LLM] ❌ Groq HTTP error %s: %s", exc.response.status_code, exc)
             return None
@@ -261,6 +304,9 @@ def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
     if result:
         return result
     logger.info("[LLM] ⚠️  Gemini unavailable — falling back to Groq")
+    if len(prompt) > _GROQ_MAX_CHARS:
+        prompt = prompt[:_GROQ_MAX_CHARS] + "\n\n[...content truncated for fallback model...]"
+        logger.warning("[LLM] Prompt truncated to %d chars for Groq fallback", _GROQ_MAX_CHARS)
     return _groq_call(prompt)
 
 
@@ -419,6 +465,7 @@ def _gemini_analyse_serp(
     serp_snippets: list[dict],
     aggregated: dict,
     target_word_count: int,
+    business_context: dict | None = None,
 ) -> dict:
     """
     Send clean, aggregated SERP data (NOT raw HTML) to Gemini.
@@ -433,7 +480,32 @@ def _gemini_analyse_serp(
         for i, s in enumerate(serp_snippets[:10])
     )
 
+    # Build business context block if provided
+    biz_block = ""
+    if business_context:
+        parts = []
+        if business_context.get("business_name"):
+            parts.append(f"Business: {business_context['business_name']}")
+        if business_context.get("niche"):
+            parts.append(f"Industry/Niche: {business_context['niche']}")
+        if business_context.get("location"):
+            parts.append(f"Location: {business_context['location']}")
+        if business_context.get("target_audience"):
+            parts.append(f"Target Audience: {business_context['target_audience']}")
+        if business_context.get("products"):
+            parts.append(f"Products/Services: {business_context['products']}")
+        if business_context.get("brand_voice"):
+            parts.append(f"Brand Voice: {business_context['brand_voice']}")
+        if parts:
+            biz_block = (
+                "=== BUSINESS CONTEXT (tailor ALL output specifically for this business) ===\n"
+                + "\n".join(parts)
+                + "\n\n"
+            )
+
     prompt = f"""You are a world-class SEO strategist. Analyse the following real Google SERP data and competitor content for the topic: "{topic}"
+
+{biz_block}""".rstrip() + f"""
 
 === SERP RESULTS (from Google) ===
 {serp_block}
@@ -599,6 +671,8 @@ def generate_seo_brief(
             word_count=p["word_count"],
             readability_score=p["readability_score"],
             top_keywords=p["top_keywords"][:5],
+            content_summary=p.get("content_summary", "")[:1500],
+            headings=[h.get("text", h) if isinstance(h, dict) else h for h in p.get("headings", [])[:10]],
         )
         for p in scraped_pages
     ]
@@ -619,6 +693,7 @@ def generate_seo_brief(
         serp_snippets=serp_results_raw,
         aggregated=aggregated,
         target_word_count=data.target_word_count,
+        business_context=data.business_context.model_dump() if data.business_context else None,
     )
 
     logger.info("[STEP 4/11] ✅ LLM analysis done in %.1fs", time.time() - t0)
@@ -866,12 +941,125 @@ def score_content(
     )
 
 # ---------------------------------------------------------------------------
-# POST /api/seo/tips  — AI tips based on actual content + score
+# POST /api/seo/tips  — AI tips grounded in the full live-editor analysis
 # ---------------------------------------------------------------------------
 
+# Tips endpoint — constants
+_TIPS_ALLOWED_CATEGORIES = {"Keyword", "Readability", "Structure", "Meta", "Coverage", "Links", "Length", "Content"}
+_TIPS_ALLOWED_PRIORITIES = {"high", "medium", "low"}
+_TIPS_MAX_HTML_CHARS = 6000
+_TIPS_MIN = 4
+_TIPS_MAX = 8
+
+# Sub-score weights must match frontend/src/lib/seo-analysis.ts SCORE_WEIGHTS
+_SUBSCORE_WEIGHTS: dict[str, float] = {
+    "Keyword": 0.25,
+    "Coverage": 0.20,
+    "Readability": 0.15,
+    "Structure": 0.15,
+    "Links": 0.10,
+    "Meta": 0.10,
+    "Length": 0.05,
+}
+
+# Priority thresholds expressed as max overall-score gain from fixing the category.
+_PRIORITY_HIGH_MIN = 8.0
+_PRIORITY_MEDIUM_MIN = 3.0
+
+# Regex patterns — one or more per category — that identify what a tip is
+# *really* targeting. Order matters inside `_detect_category`: the category
+# with the most matches wins; ties keep the declared category to avoid
+# thrashing on ambiguous tips.
+_CATEGORY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "Length": (
+        re.compile(r"\bword count\b", re.I),
+        re.compile(r"\bmore words\b", re.I),
+        re.compile(r"\bexpand (?:to|the|by)\b", re.I),
+        re.compile(r"\b(?:reach|hit)\s+(?:the\s+|your\s+)?(?:target|\d+\s+words?)\b", re.I),
+        re.compile(r"\btotal words?\b", re.I),
+        re.compile(r"\bto hit\s+\d+\s+words?\b", re.I),
+        re.compile(r"\bword\s+target\b", re.I),
+    ),
+    "Meta": (
+        re.compile(r"\bmeta title\b", re.I),
+        re.compile(r"\bmeta description\b", re.I),
+        re.compile(r"\btitle tag\b", re.I),
+        re.compile(r"\bdescription tag\b", re.I),
+        re.compile(r"\bserp snippet\b", re.I),
+    ),
+    "Structure": (
+        re.compile(r"\badd (?:an?\s+)?(?:h[123]|heading)\b", re.I),
+        re.compile(r"\bsplit into sections\b", re.I),
+        re.compile(r"\bbreak (?:into|up) (?:the\s+)?paragraph", re.I),
+        re.compile(r"\bsub-?heading\b", re.I),
+    ),
+    "Readability": (
+        re.compile(r"\b(?:sentence length|long sentences?|shorten sentences?)\b", re.I),
+        re.compile(r"\bpassive voice\b", re.I),
+        re.compile(r"\bflesch\b", re.I),
+        re.compile(r"\bavg sentence\b", re.I),
+    ),
+    "Links": (
+        re.compile(r"\badd (?:a|more)\s+link", re.I),
+        re.compile(r"\b(?:internal|external|outbound|inbound)\s+link", re.I),
+        re.compile(r"\blink to\s", re.I),
+    ),
+    "Coverage": (
+        re.compile(r"\bunique terms?\b", re.I),
+        re.compile(r"\blsi\b", re.I),
+        re.compile(r"\bsemantic (?:coverage|terms?)\b", re.I),
+        re.compile(r"\bsupporting terms?\b", re.I),
+        re.compile(r"\brelated topics?\b", re.I),
+        re.compile(r"\bsubtopic", re.I),
+        re.compile(r"\bentity coverage\b", re.I),
+    ),
+    "Keyword": (
+        re.compile(r"\bkeyword density\b", re.I),
+        re.compile(r"\bkeyword in (?:the\s+)?(?:h[123]|title|description|first paragraph)", re.I),
+        re.compile(r"\buse the keyword\b", re.I),
+        re.compile(r"\b(?:primary|focus) keyword\b", re.I),
+    ),
+}
+
+
+class SEOTipsAnalysis(BaseModel):
+    """Subset of the frontend `SEOAnalysisResult` the tips endpoint needs.
+
+    All fields default — older clients (that send only the legacy shape)
+    still work; missing data just degrades the prompt context.
+    """
+    overall: int = 0
+    keyword_score: int = 0
+    coverage_score: int = 0
+    readability_score: int = 0
+    structure_score: int = 0
+    links_score: int = 0
+    meta_score: int = 0
+    length_score: int = 0
+    meta_detail: dict = {}
+    readability: dict = {}
+    keyword_density: dict = {}
+    keyword_placement: dict = {}
+    lsi: dict = {}
+    passive_voice: dict = {}
+    links: dict = {}
+    content_length: dict = {}
+    structure: dict = {}
+
+
 class SEOTipsRequest(BaseModel):
-    content: str
+    # New, preferred payload
+    html: str = ""
+    meta_title: str = ""
+    meta_description: str = ""
     primary_keyword: str = ""
+    related_keywords: str = ""
+    target_word_count: int = 1500
+    analysis: SEOTipsAnalysis | None = None
+
+    # Legacy fields — kept for backwards compatibility with older clients.
+    # If `html` and `analysis` are absent these still produce a usable prompt.
+    content: str = ""
     overall_score: int = 0
     readability_status: str = ""
     keyword_status: str = ""
@@ -879,8 +1067,8 @@ class SEOTipsRequest(BaseModel):
 
 
 class SEOTip(BaseModel):
-    category: str   # e.g. "Keyword", "Readability", "Structure"
-    priority: str   # "high" | "medium" | "low"
+    category: str   # Keyword | Readability | Structure | Meta | Coverage | Links | Length | Content
+    priority: str   # high | medium | low
     tip: str        # the actionable advice
 
 
@@ -888,85 +1076,522 @@ class SEOTipsResponse(BaseModel):
     tips: list[SEOTip]
 
 
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _compute_headroom(a: SEOTipsAnalysis) -> dict[str, dict]:
+    """Return per-category `{current, weight_pct, max_gain}` map.
+
+    `max_gain` is the maximum points a category can contribute to the *overall*
+    score if its sub-score went from current → 100. Used to calibrate priority
+    without leaving it to the LLM's instinct.
+    """
+    scores = {
+        "Keyword": a.keyword_score,
+        "Coverage": a.coverage_score,
+        "Readability": a.readability_score,
+        "Structure": a.structure_score,
+        "Links": a.links_score,
+        "Meta": a.meta_score,
+        "Length": a.length_score,
+    }
+    return {
+        cat: {
+            "current": scores[cat],
+            "weight_pct": int(_SUBSCORE_WEIGHTS[cat] * 100),
+            "max_gain": round(_SUBSCORE_WEIGHTS[cat] * (100 - scores[cat]), 1),
+        }
+        for cat in _SUBSCORE_WEIGHTS
+    }
+
+
+def _detect_category(tip_text: str) -> str | None:
+    """Return the best-matching category from tip text, else None.
+
+    Scores each category by how many of its patterns fire, returning the
+    winner only if it has strictly more matches than any other category.
+    Ties → None (don't override the declared category).
+    """
+    scores: dict[str, int] = {}
+    for cat, patterns in _CATEGORY_PATTERNS.items():
+        hits = sum(1 for p in patterns if p.search(tip_text))
+        if hits:
+            scores[cat] = hits
+    if not scores:
+        return None
+    top_cat, top_hits = max(scores.items(), key=lambda kv: kv[1])
+    # Reject if any other category ties the top score
+    if sum(1 for h in scores.values() if h == top_hits) > 1:
+        return None
+    return top_cat
+
+
+def _enforce_priority(priority: str, category: str, headroom: dict[str, dict]) -> str:
+    """Clamp priority to what the category's headroom can actually justify.
+
+    Applies only to sub-score categories; `Content` (catch-all) keeps the
+    LLM's priority since we can't attribute it to a single weight.
+    """
+    info = headroom.get(category)
+    if info is None:
+        return priority
+    gain = info["max_gain"]
+    if gain < _PRIORITY_MEDIUM_MIN:
+        return "low"
+    if gain < _PRIORITY_HIGH_MIN and priority == "high":
+        return "medium"
+    return priority
+
+
+def _normalize_tip(item: dict, headroom: dict[str, dict] | None = None) -> SEOTip | None:
+    tip_text = (item.get("tip") or "").strip()
+    if not tip_text:
+        return None
+
+    category = (item.get("category") or "Content").strip()
+    if category not in _TIPS_ALLOWED_CATEGORIES:
+        category = "Content"
+
+    # Reclassify if the tip text clearly targets a different category
+    detected = _detect_category(tip_text)
+    if detected and detected in _TIPS_ALLOWED_CATEGORIES and detected != category:
+        category = detected
+
+    priority = (item.get("priority") or "medium").strip().lower()
+    if priority not in _TIPS_ALLOWED_PRIORITIES:
+        priority = "medium"
+
+    if headroom is not None:
+        priority = _enforce_priority(priority, category, headroom)
+
+    return SEOTip(category=category, priority=priority, tip=tip_text)
+
+
+def _build_priority_section(headroom: dict[str, dict]) -> str:
+    rows = sorted(headroom.items(), key=lambda kv: kv[1]["max_gain"], reverse=True)
+    lines = ["HEADROOM (max overall-score gain if that category went to 100; higher = bigger impact):"]
+    for cat, info in rows:
+        lines.append(
+            f"- {cat}: current {info['current']}/100, weight {info['weight_pct']}%, max +{info['max_gain']} overall"
+        )
+    lines.append("")
+    lines.append("PRIORITY RULES — apply these literally, do not guess:")
+    lines.append(f"- high:   category max_gain ≥ {_PRIORITY_HIGH_MIN}")
+    lines.append(f"- medium: category max_gain between {_PRIORITY_MEDIUM_MIN} and {_PRIORITY_HIGH_MIN}")
+    lines.append(f"- low:    category max_gain < {_PRIORITY_MEDIUM_MIN}")
+    return "\n".join(lines)
+
+
+def _build_rubric_section() -> str:
+    return """SCORING RUBRIC (weights → overall score):
+- Keyword (25%): density target 1–3%; placement in H1 (+40), first H2 (+35), first paragraph (+25)
+- Content Coverage / LSI (20%): target 200+ unique supporting terms
+- Readability (15%): 0.7 × Flesch + 0.3 × (100 − passive% × 2). Flesch ≥ 70 easy, 50–70 moderate, <50 difficult
+- Structure (15%): exactly one H1, ≥ 2 H2s, paragraphs ≤ 150 words
+- Links (10%): 0 = 0, else 40 + count × 15 (capped at 100)
+- Meta (10%): title 10–60 chars, description 50–155 chars, keyword in each
+- Length (5%): linear — word_count / target_word_count
+
+STATUS VOCAB:
+- keyword_density.status: optimal | under | over | missing
+- readability.status: easy | moderate | difficult | no_content
+- content_length.status: optimal | near | under | short
+"""
+
+
+def _build_analysis_section(req: SEOTipsRequest) -> str:
+    """Serialise the structured analysis into a compact prompt section.
+
+    Only include keys that carry signal — empty dicts fall back to the legacy
+    status fields so old clients still produce meaningful tips.
+    """
+    a = req.analysis
+    if a is None:
+        return (
+            f"overall_score: {req.overall_score}\n"
+            f"readability_status: {req.readability_status or 'unknown'}\n"
+            f"keyword_density_status: {req.keyword_status or 'unknown'}\n"
+            f"structure_issues: {', '.join(req.structure_issues) or 'none'}\n"
+        )
+
+    def line(label: str, obj: dict | None) -> str:
+        if not obj:
+            return ""
+        return f"{label}: {json.dumps(obj, separators=(',', ':'), ensure_ascii=False)}\n"
+
+    parts = [
+        f"overall_score: {a.overall}/100\n",
+        (
+            "sub_scores: "
+            f"keyword={a.keyword_score}, coverage={a.coverage_score}, "
+            f"readability={a.readability_score}, structure={a.structure_score}, "
+            f"links={a.links_score}, meta={a.meta_score}, length={a.length_score}\n"
+        ),
+        line("keyword_density", a.keyword_density),
+        line("keyword_placement", a.keyword_placement),
+        line("readability", a.readability),
+        line("passive_voice", a.passive_voice),
+        line("structure", a.structure),
+        line("links", a.links),
+        line("lsi", a.lsi),
+        line("content_length", a.content_length),
+        line("meta_detail", a.meta_detail),
+    ]
+    return "".join(p for p in parts if p)
+
+
+def _rule_based_tips(req: SEOTipsRequest) -> list[SEOTip]:
+    """Deterministic fallback when Gemini is unavailable or returns junk.
+
+    Reads the structured analysis when present; falls back to legacy status
+    fields otherwise.
+    """
+    a = req.analysis
+    kw = req.primary_keyword or "your keyword"
+    tips: list[SEOTip] = []
+
+    # Keyword
+    kw_status = (a.keyword_density.get("status") if a else "") or req.keyword_status
+    kw_density = (a.keyword_density.get("density") if a else None)
+    if kw_status in ("missing", "under"):
+        tips.append(SEOTip(category="Keyword", priority="high",
+            tip=f'"{kw}" appears too rarely ({kw_density or "0"}%). Use it in the first paragraph, at least one H2, and 1–3% of body text.'))
+    elif kw_status == "over":
+        tips.append(SEOTip(category="Keyword", priority="high",
+            tip=f'"{kw}" is over-used ({kw_density}%). Replace some occurrences with synonyms to avoid keyword-stuffing penalties.'))
+
+    # Keyword placement
+    if a and req.primary_keyword:
+        kp = a.keyword_placement
+        missing = [where for where, present in (
+            ("H1", kp.get("in_h1")),
+            ("first H2", kp.get("in_h2")),
+            ("first paragraph", kp.get("in_first_paragraph")),
+        ) if not present]
+        if missing:
+            tips.append(SEOTip(category="Keyword", priority="medium",
+                tip=f'Add "{kw}" to: {", ".join(missing)}. Each placement is worth up to 40 points on the keyword sub-score.'))
+
+    # Readability
+    r_status = (a.readability.get("status") if a else "") or req.readability_status
+    if r_status == "difficult":
+        aws = a.readability.get("avg_words_per_sentence") if a else None
+        tips.append(SEOTip(category="Readability", priority="high",
+            tip=f"Sentences are too long ({'avg ' + str(aws) + ' words' if aws else 'very long'}). Target <20 words per sentence and split paragraphs >150 words."))
+
+    # Structure
+    issues = (a.structure.get("issues") if a else None) or req.structure_issues
+    for issue in (issues or [])[:2]:
+        tips.append(SEOTip(category="Structure", priority="medium", tip=issue))
+
+    # Meta
+    if a:
+        m = a.meta_detail
+        if not m.get("title_ok"):
+            tips.append(SEOTip(category="Meta", priority="medium",
+                tip=f'Meta title is {m.get("title_length", 0)} chars. Target 10–60 for full SERP display.'))
+        if not m.get("description_ok"):
+            tips.append(SEOTip(category="Meta", priority="medium",
+                tip=f'Meta description is {m.get("description_length", 0)} chars. Target 50–155 to avoid truncation.'))
+        if req.primary_keyword and not m.get("keyword_in_title"):
+            tips.append(SEOTip(category="Meta", priority="high",
+                tip=f'Include "{kw}" in the meta title — worth 30 points on the meta sub-score.'))
+
+    # Coverage
+    if a and a.coverage_score < 50:
+        unique = a.lsi.get("unique_terms", 0)
+        tips.append(SEOTip(category="Coverage", priority="medium",
+            tip=f"Only {unique} supporting terms detected (target 200+). Add related subtopics and synonyms to broaden semantic coverage."))
+
+    # Length
+    if a:
+        cl = a.content_length
+        cl_status = cl.get("status")
+        wc = cl.get("word_count", 0)
+        tgt = cl.get("target", req.target_word_count)
+        if cl_status == "short":
+            tips.append(SEOTip(category="Length", priority="medium",
+                tip=f"Content is only {wc} / {tgt} words. Add ~{max(tgt - wc, 0)} more words — expand weak sections with examples or explanations."))
+        elif cl_status == "under":
+            tips.append(SEOTip(category="Length", priority="low",
+                tip=f"Content is {wc} / {tgt} words. Expand one or two sections to reach target."))
+        elif cl_status == "near":
+            tips.append(SEOTip(category="Length", priority="low",
+                tip=f"You're close — {wc} / {tgt} words. Add ~{max(tgt - wc, 0)} more words to hit target."))
+
+    # Catch-all
+    if not tips:
+        overall = a.overall if a else req.overall_score
+        if overall < 45:
+            tips.append(SEOTip(category="Content", priority="high",
+                tip="Add a single H1 at the top and break sections with H2s. That alone lifts both the structure and keyword-placement sub-scores significantly."))
+
+    return tips[:_TIPS_MAX]
+
+
 @router.post("/tips", response_model=SEOTipsResponse)
 def generate_seo_tips(
     data: SEOTipsRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Analyse the actual content + score data with Gemini and return
-    specific, non-generic, actionable tips.
-    Falls back to rule-based tips if Gemini is unavailable.
-    """
-    # Truncate content to ~1500 chars for the prompt (avoid token waste)
-    content_preview = data.content[:1500] + ("…" if len(data.content) > 1500 else "")
+    """Return specific, rubric-aware SEO tips for the live editor.
 
-    prompt = f"""You are an expert SEO editor. Analyse this content and give specific, actionable improvement tips.
+    - Sends the full analysis + HTML + meta + related keywords to Gemini.
+    - Embeds the scoring rubric so Gemini knows which lever moves which score.
+    - Falls back to deterministic rule-based tips if Gemini fails.
+    """
+    # Prefer new `html`; fall back to legacy `content` (plain text)
+    source = data.html or data.content or ""
+    source_label = "HTML" if data.html else "TEXT"
+    content_preview = _truncate(source, _TIPS_MAX_HTML_CHARS)
+
+    headroom = _compute_headroom(data.analysis) if data.analysis is not None else None
+    priority_section = _build_priority_section(headroom) if headroom else ""
+
+    prompt = f"""You are an expert SEO editor. Produce {_TIPS_MIN}–{_TIPS_MAX} specific, actionable tips for this content.
 
 PRIMARY KEYWORD: "{data.primary_keyword or 'not set'}"
-OVERALL SEO SCORE: {data.overall_score}/100
-READABILITY STATUS: {data.readability_status}
-KEYWORD DENSITY STATUS: {data.keyword_status}
-STRUCTURE ISSUES: {", ".join(data.structure_issues) if data.structure_issues else "none"}
+RELATED KEYWORDS: {data.related_keywords or 'none'}
+META TITLE ({len(data.meta_title)} chars): {data.meta_title or '(empty)'}
+META DESCRIPTION ({len(data.meta_description)} chars): {data.meta_description or '(empty)'}
+TARGET WORD COUNT: {data.target_word_count}
 
-CONTENT (first 1500 chars):
+LIVE ANALYSIS:
+{_build_analysis_section(data)}
+
+{_build_rubric_section()}
+{priority_section}
+
+CONTENT ({source_label}, truncated to {_TIPS_MAX_HTML_CHARS} chars):
 ---
 {content_preview}
 ---
 
-Give exactly 4-6 specific tips based on what you actually see in this content.
-Each tip must reference something concrete in the text — not generic advice.
+Rules for tips:
+1. Each tip MUST reference a concrete element the writer can locate — a specific heading, sentence, paragraph, meta field, or missing section. No generic advice.
+2. Pick `category` from the sub-score it targets. Tips about "hitting the word count" are Length, not Coverage. Tips about unique/supporting terms are Coverage. Tips about H1/H2/H3 are Structure.
+3. Do not suggest changes that are already satisfied by the analysis above.
+4. Keep each tip ≤ 240 characters.
 
-Return ONLY a JSON array (no markdown):
+Return ONLY a JSON array, no markdown, no commentary:
 [
   {{
-    "category": "Keyword | Readability | Structure | Meta | Content",
+    "category": "Keyword | Readability | Structure | Meta | Coverage | Links | Length | Content",
     "priority": "high | medium | low",
     "tip": "specific actionable advice referencing actual content"
   }}
 ]
-
-Priority rules:
-- high: fixes that will raise score by 10+ points
-- medium: meaningful improvements
-- low: polish and optimisation
 """
-    raw = _gemini_call(prompt)
+
     tips: list[SEOTip] = []
+    raw = _gemini_call(prompt)
 
     if raw:
         try:
             parsed = json.loads(_strip_fences(raw))
             if isinstance(parsed, list):
                 for item in parsed:
-                    if isinstance(item, dict) and "tip" in item:
-                        tips.append(SEOTip(
-                            category=item.get("category", "General"),
-                            priority=item.get("priority", "medium"),
-                            tip=item["tip"],
-                        ))
-        except Exception:
-            pass
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = _normalize_tip(item, headroom)
+                    if normalized is not None:
+                        tips.append(normalized)
+                    if len(tips) >= _TIPS_MAX:
+                        break
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("SEO tips: Gemini returned non-JSON payload: %s", exc)
 
-    # Rule-based fallback if Gemini failed or returned nothing
     if not tips:
-        if data.keyword_status in ("missing", "under"):
-            tips.append(SEOTip(category="Keyword", priority="high",
-                tip=f'Your keyword "{data.primary_keyword}" appears too rarely. Use it naturally in the first paragraph, at least one H2, and 1–3% of your word count.'))
-        if data.keyword_status == "over":
-            tips.append(SEOTip(category="Keyword", priority="high",
-                tip=f'"{data.primary_keyword}" is over-used (>{3}%). Replace some occurrences with synonyms to avoid keyword stuffing penalties.'))
-        if data.readability_status in ("difficult",):
-            tips.append(SEOTip(category="Readability", priority="high",
-                tip="Your sentences are too long and complex. Aim for sentences under 20 words. Split long paragraphs into 2–3 shorter ones."))
-        if data.structure_issues:
-            for issue in data.structure_issues[:2]:
-                tips.append(SEOTip(category="Structure", priority="medium", tip=issue))
-        if data.overall_score < 45:
-            tips.append(SEOTip(category="Content", priority="high",
-                tip="Add a clear H1 heading at the top, then use H2s to break up each main section. This alone will significantly improve your score."))
+        logger.info("SEO tips: using rule-based fallback (Gemini empty or malformed)")
+        tips = _rule_based_tips(data)
 
     return SEOTipsResponse(tips=tips)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/seo/apply-tips  — one-click auto-fix of AI tips
+# ---------------------------------------------------------------------------
+
+_APPLY_MAX_HTML_CHARS = 8000          # input ceiling (chars)
+_APPLY_MIN_OUTPUT_RATIO = 0.5          # reject if Gemini shrinks content < 50%
+_APPLY_MAX_TIPS = 10                   # cap tips sent per request
+
+
+class SEOApplyTipsRequest(BaseModel):
+    html: str = ""
+    meta_title: str = ""
+    meta_description: str = ""
+    primary_keyword: str = ""
+    related_keywords: str = ""
+    target_word_count: int = 1500
+    tips: list[SEOTip] = []
+    analysis: SEOTipsAnalysis | None = None
+
+
+class SEOSkippedTip(BaseModel):
+    index: int
+    reason: str
+
+
+class SEOApplyTipsResponse(BaseModel):
+    html: str
+    meta_title: str
+    meta_description: str
+    applied: list[int]
+    skipped: list[SEOSkippedTip]
+    changes_summary: str
+
+
+def _is_valid_apply_output(payload: dict, original_html_len: int) -> bool:
+    """Shape + safety check on Gemini's apply-tips response.
+
+    - Required keys present with correct types.
+    - HTML must look like HTML (has `<` / `>`) and not shrink below 50% of input
+      length. The ratio guards against accidental content destruction when the
+      model returns a summary instead of a full document.
+    """
+    required_str_keys = ("html", "meta_title", "meta_description", "changes_summary")
+    if not all(isinstance(payload.get(k), str) for k in required_str_keys):
+        return False
+    if not isinstance(payload.get("applied"), list) or not isinstance(payload.get("skipped"), list):
+        return False
+
+    html = payload["html"]
+    if "<" not in html or ">" not in html:
+        return False
+    if original_html_len > 0 and len(html) < original_html_len * _APPLY_MIN_OUTPUT_RATIO:
+        return False
+    return True
+
+
+def _coerce_skipped(raw: list) -> list[SEOSkippedTip]:
+    out: list[SEOSkippedTip] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        reason = item.get("reason") or ""
+        if isinstance(idx, int) and isinstance(reason, str):
+            out.append(SEOSkippedTip(index=idx, reason=reason))
+    return out
+
+
+@router.post("/apply-tips", response_model=SEOApplyTipsResponse)
+def apply_seo_tips(
+    data: SEOApplyTipsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Apply the given AI tips to the draft in one shot.
+
+    Returns updated HTML + meta fields plus the indices of tips that were
+    applied vs. skipped (with reasons). Safe by construction:
+      - Shrinkage guard: output HTML must be ≥ 50% of input size.
+      - Shape guard: malformed Gemini output falls back to the original.
+      - Tips requiring user-specific data (URLs, private facts) are skipped.
+    """
+    if not data.html.strip():
+        raise HTTPException(status_code=400, detail="html is required")
+    if not data.tips:
+        raise HTTPException(status_code=400, detail="tips list is empty")
+
+    tips = data.tips[:_APPLY_MAX_TIPS]
+    html_in = _truncate(data.html, _APPLY_MAX_HTML_CHARS)
+
+    tips_block = "\n".join(
+        f"[{i}] ({t.category}, {t.priority}) {t.tip}" for i, t in enumerate(tips)
+    )
+
+    prompt = f"""You are an expert SEO editor applying improvements to a draft in a single pass.
+
+PRIMARY KEYWORD: "{data.primary_keyword or 'not set'}"
+RELATED KEYWORDS: {data.related_keywords or 'none'}
+TARGET WORD COUNT: {data.target_word_count}
+CURRENT META TITLE ({len(data.meta_title)} chars): {data.meta_title or '(empty)'}
+CURRENT META DESCRIPTION ({len(data.meta_description)} chars): {data.meta_description or '(empty)'}
+
+TIPS TO APPLY (indexed):
+{tips_block}
+
+CURRENT HTML:
+---
+{html_in}
+---
+
+RULES:
+1. Preserve the author's voice, factual claims, existing examples, and all correct information. Do NOT invent statistics, quotes, names, or URLs.
+2. Do NOT delete existing content unless a tip explicitly requires removal. Prefer adding or rewriting in place.
+3. Skip (do not apply) any tip that requires data you don't have:
+   - Links tips that don't include a specific URL
+   - Tips that reference external facts, testimonials, or citations
+   For each skipped tip, include its index and a one-line reason.
+4. Output MUST be valid HTML using only these tags: <h1>, <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <a href>, <br>. Close every tag.
+5. Integrate the primary keyword naturally; keep density between 1–3%. Never keyword-stuff.
+6. Meta title: 10–60 chars. Meta description: 50–155 chars. Include the primary keyword in both when a Meta tip is applied.
+7. Keep headings meaningful. Exactly one <h1>. At least two <h2>s if adding structure. Break paragraphs longer than ~150 words.
+
+Return ONLY this JSON object (no markdown, no commentary):
+{{
+  "html": "<h1>...</h1>...",
+  "meta_title": "updated title",
+  "meta_description": "updated description",
+  "applied": [0, 1, 3],
+  "skipped": [{{"index": 2, "reason": "requires a specific URL"}}],
+  "changes_summary": "one-sentence summary of what changed"
+}}
+"""
+
+    raw = _gemini_call(prompt)
+    if not raw or not raw.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="AI is busy right now. Please try again in a moment.",
+        )
+
+    try:
+        parsed = json.loads(_strip_fences(raw))
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Truncated JSON (common when the fallback model hits max_tokens
+        # mid-object) looks like a parse error ending at the last char.
+        # Surface a clearer, actionable message instead of a generic 502.
+        truncated_hint = len(raw) > 0 and str(exc).endswith(f"(char {len(raw)})")
+        logger.warning(
+            "Apply-tips: non-JSON payload (truncated=%s, raw=%d chars): %s",
+            truncated_hint, len(raw), exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "AI response was cut off — try again, or shorten the content first."
+                if truncated_hint
+                else "AI returned an invalid response. Please try again."
+            ),
+        )
+
+    if not isinstance(parsed, dict) or not _is_valid_apply_output(parsed, len(html_in)):
+        logger.warning(
+            "Apply-tips: shape/shrinkage guard failed (in=%d, out=%s)",
+            len(html_in),
+            len(parsed.get("html", "")) if isinstance(parsed, dict) else "N/A",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="AI output failed validation. Please try again.",
+        )
+
+    applied_raw = parsed.get("applied") or []
+    applied = [i for i in applied_raw if isinstance(i, int) and 0 <= i < len(tips)]
+
+    return SEOApplyTipsResponse(
+        html=parsed["html"],
+        meta_title=parsed.get("meta_title") or data.meta_title,
+        meta_description=parsed.get("meta_description") or data.meta_description,
+        applied=applied,
+        skipped=_coerce_skipped(parsed.get("skipped") or []),
+        changes_summary=(parsed.get("changes_summary") or "").strip(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1647,7 @@ def list_seo_saves(
 ):
     saves = (
         db.query(SeoSave)
-        .filter(SeoSave.user_id == current_user.id)
+        .filter(SeoSave.user_id == current_user.id, SeoSave.type != "blog")
         .order_by(SeoSave.created_at.desc())
         .limit(50)
         .all()

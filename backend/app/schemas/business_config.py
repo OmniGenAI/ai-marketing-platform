@@ -6,16 +6,15 @@ from pydantic import BaseModel
 class BusinessConfigCreate(BaseModel):
     business_name: str
     niche: str
+    location: str | None = None
     tone: str = "professional"
     products: str = ""
     brand_voice: str = ""
-    hashtags: str = ""
     target_audience: str = ""
-    platform_preference: str = "both"
-    email: str | None = None
-    phone: str | None = None
-    address: str | None = None
+    hashtags: str = ""
+    competitors: str | None = None
     website: str | None = None
+    website_context: str | None = None
 
 
 class BusinessConfigResponse(BaseModel):
@@ -23,15 +22,13 @@ class BusinessConfigResponse(BaseModel):
     user_id: str
     business_name: str
     niche: str
+    location: str | None
     tone: str
     products: str
     brand_voice: str
-    hashtags: str
     target_audience: str
-    platform_preference: str
-    email: str | None
-    phone: str | None
-    address: str | None
+    hashtags: str
+    competitors: str | None
     website: str | None
     website_context: str | None
     created_at: datetime
@@ -48,3 +45,4 @@ class ScrapeWebsiteResponse(BaseModel):
     success: bool
     message: str
     context: dict | None = None
+    summary: str | None = None

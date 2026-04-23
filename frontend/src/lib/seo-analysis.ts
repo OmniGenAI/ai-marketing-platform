@@ -9,6 +9,11 @@ const DENSITY_OPTIMAL_MAX = 3;
 const LSI_UNIQUE_TERMS_TARGET = 200;
 const PARA_WORD_LIMIT = 150;
 const MIN_H2_COUNT = 2;
+const TITLE_MIN = 10;
+const TITLE_MAX = 60;
+const DESC_MIN = 50;
+const DESC_MAX = 155;
+
 const SCORE_WEIGHTS = {
   keyword: 0.25,
   coverage: 0.20,
@@ -18,6 +23,28 @@ const SCORE_WEIGHTS = {
   meta: 0.10,
   length: 0.05,
 } as const;
+
+const DENSITY_STATUS_SCORE: Record<string, number> = {
+  optimal: 100,
+  under: 50,
+  over: 40,
+  missing: 0,
+};
+
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+  "by", "from", "is", "are", "was", "were", "be", "been", "have", "has", "had", "do",
+  "does", "did", "will", "would", "could", "should", "may", "might", "can", "this",
+  "that", "these", "those", "it", "its", "we", "you", "he", "she", "they", "i", "me",
+  "my", "our", "your", "their", "what", "how", "when", "where", "who", "which", "not",
+  "no", "so", "if", "as", "up", "out", "about", "into", "than", "then", "there", "also",
+  "more", "all", "just", "get", "use", "make", "like", "very", "many", "some", "one",
+  "two", "new", "good", "best", "well", "only", "such", "because", "much", "most",
+  "other", "over", "while", "any", "each", "every", "after", "before", "between",
+  "through", "under", "same", "own",
+]);
+
+const PASSIVE_RE = /\b(?:is|are|was|were|be|been|being)\s+\w+ed\b/i;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,9 +101,7 @@ export interface SEOAnalysisResult {
     score: number;
   };
   links: {
-    internal_count: number;
-    external_count: number;
-    total_links: number;
+    count: number;
     score: number;
   };
   content_length: {
@@ -97,154 +122,322 @@ export interface SEOAnalysisResult {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const STOPWORDS = new Set([
-  "the","a","an","and","or","but","in","on","at","to","for","of","with",
-  "by","from","is","are","was","were","be","been","have","has","had","do",
-  "does","did","will","would","could","should","may","might","can","this",
-  "that","these","those","it","its","we","you","he","she","they","i","me",
-  "my","our","your","their","what","how","when","where","who","which","not",
-  "no","so","if","as","up","out","about","into","than","then","there","also",
-  "more","all","just","get","use","make","like",
-]);
-
-const PASSIVE_RE = /\b(is|are|was|were|be|been|being)\s+\w+ed\b/i;
-
-// ---------------------------------------------------------------------------
-// HTML Utilities
-// ---------------------------------------------------------------------------
-
-function stripHtml(html: string): string {
-  if (typeof window === "undefined") return html.replace(/<[^>]+>/g, " ");
-  const div = document.createElement("div");
-  div.innerHTML = html;
-  return div.textContent ?? div.innerText ?? "";
+interface ParsedHtml {
+  h1: string[];
+  h2: string[];
+  h3: string[];
+  paragraphs: string[];
+  linkCount: number;
 }
 
-function parseHtml(html: string) {
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+function clamp(n: number, min = 0, max = 100): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+function roundTo(value: number, decimals = 1): number {
+  const f = 10 ** decimals;
+  return Math.round(value * f) / f;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function countWords(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+function splitSentences(text: string): string[] {
+  return text.split(/[.!?]+/).filter((s) => s.trim().length > 0);
+}
+
+// Improved Flesch syllable heuristic: drops silent -e / -es / -ed suffixes and
+// counts vowel groups, with a floor of 1. Not perfect, but close to common
+// implementations used by Yoast / readability-score libraries.
+function countSyllables(word: string): number {
+  const w = word.toLowerCase();
+  if (w.length <= 3) return 1;
+  const trimmed = w
+    .replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "")
+    .replace(/^y/, "");
+  const groups = trimmed.match(/[aeiouy]{1,2}/g);
+  return Math.max(1, groups?.length ?? 1);
+}
+
+// ---------------------------------------------------------------------------
+// HTML parsing
+// ---------------------------------------------------------------------------
+
+// Block/flow-level tags whose boundaries must become whitespace when
+// extracting plain text; otherwise DOMParser's textContent concatenates
+// neighbouring blocks ("<p>A</p><p>B</p>" → "AB", one word instead of two),
+// which under-counts words and makes the Content Length sub-score too low.
+const _BLOCK_BOUNDARY_RE = /<\/(?:p|div|h[1-6]|li|tr|td|th|blockquote|section|article|header|footer|aside|nav|pre|figure|figcaption)>|<br\s*\/?>|<hr\s*\/?>/gi;
+
+function stripHtml(html: string): string {
+  const withBreaks = html.replace(_BLOCK_BOUNDARY_RE, (m) => m + " ");
+  if (typeof window === "undefined") {
+    return withBreaks.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  const div = document.createElement("div");
+  div.innerHTML = withBreaks;
+  return (div.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+function parseHtml(html: string): ParsedHtml {
   if (typeof window === "undefined") {
     const get = (tag: string) =>
-      Array.from(html.matchAll(new RegExp(`<${tag}[^>]*>(.*?)</${tag}>`, "gis"))).map(
-        (m) => m[1].replace(/<[^>]+>/g, "").trim(),
-      );
-    return { h1: get("h1"), h2: get("h2"), h3: get("h3"), paragraphs: get("p"), links: [] as { href: string }[] };
+      Array.from(
+        html.matchAll(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "gi")),
+      ).map((m) => m[1].replace(/<[^>]+>/g, "").trim());
+    const linkCount = (html.match(/<a\s[^>]*href=/gi) ?? []).length;
+    return {
+      h1: get("h1"),
+      h2: get("h2"),
+      h3: get("h3"),
+      paragraphs: get("p"),
+      linkCount,
+    };
   }
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
+  const textOf = (el: Element) => (el.textContent ?? "").trim();
+
+  const anchors = Array.from(doc.querySelectorAll("a[href]"));
+  const linkCount = anchors.filter((el) => {
+    const raw = el.getAttribute("href")?.trim() ?? "";
+    if (!raw) return false;
+    if (raw.startsWith("#")) return false;
+    if (/^(?:javascript|mailto|tel):/i.test(raw)) return false;
+    return true;
+  }).length;
+
   return {
-    h1: Array.from(doc.querySelectorAll("h1")).map((el) => el.textContent ?? ""),
-    h2: Array.from(doc.querySelectorAll("h2")).map((el) => el.textContent ?? ""),
-    h3: Array.from(doc.querySelectorAll("h3")).map((el) => el.textContent ?? ""),
-    paragraphs: Array.from(doc.querySelectorAll("p")).map((el) => el.textContent ?? ""),
-    links: Array.from(doc.querySelectorAll("a[href]")).map((el) => ({ href: (el as HTMLAnchorElement).href })),
+    h1: Array.from(doc.querySelectorAll("h1")).map(textOf),
+    h2: Array.from(doc.querySelectorAll("h2")).map(textOf),
+    h3: Array.from(doc.querySelectorAll("h3")).map(textOf),
+    paragraphs: Array.from(doc.querySelectorAll("p")).map(textOf),
+    linkCount,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Individual analysis functions (Single Responsibility)
+// Analysis functions
 // ---------------------------------------------------------------------------
 
 function calcReadability(text: string) {
   const words = text.match(/\b[a-zA-Z]+\b/g) ?? [];
-  const sentences = text.split(/[.!?]+/).filter((s) => s.trim());
-  const sc = sentences.length || 1;
-  const wc = words.length;
-  if (wc === 0) return { flesch: 0, grade: 0, sc, wc, aws: 0, status: "no_content" };
-  const syllables = words.reduce((sum, w) => {
-    const n = Math.max(1, (w.toLowerCase().match(/[aeiou]/g) ?? []).length - (w.toLowerCase().endsWith("e") ? 1 : 0));
-    return sum + n;
-  }, 0);
-  const aws = wc / sc;
-  const asw = syllables / wc;
-  const flesch = Math.max(0, Math.min(100, Math.round((206.835 - 1.015 * aws - 84.6 * asw) * 10) / 10));
-  const grade = Math.max(0, Math.round((0.39 * aws + 11.8 * asw - 15.59) * 10) / 10);
+  const sentences = splitSentences(text);
+  const wordCount = words.length;
+  const sentenceCount = Math.max(1, sentences.length);
+
+  if (wordCount === 0) {
+    return { flesch: 0, grade: 0, sentenceCount: 0, wordCount: 0, avgWordsPerSentence: 0, status: "no_content" };
+  }
+
+  const syllables = words.reduce((sum, w) => sum + countSyllables(w), 0);
+  const avgWordsPerSentence = wordCount / sentenceCount;
+  const avgSyllablesPerWord = syllables / wordCount;
+
+  const flesch = roundTo(
+    clamp(206.835 - 1.015 * avgWordsPerSentence - 84.6 * avgSyllablesPerWord),
+  );
+  const grade = Math.max(
+    0,
+    roundTo(0.39 * avgWordsPerSentence + 11.8 * avgSyllablesPerWord - 15.59),
+  );
   const status = flesch >= 70 ? "easy" : flesch >= 50 ? "moderate" : "difficult";
-  return { flesch, grade, sc, wc, aws: Math.round(aws * 10) / 10, status };
+
+  return {
+    flesch,
+    grade,
+    sentenceCount,
+    wordCount,
+    avgWordsPerSentence: roundTo(avgWordsPerSentence),
+    status,
+  };
 }
 
 function calcKeywordDensity(plain: string, kw: string, wordCount: number) {
-  if (!kw || wordCount === 0) return { occurrences: 0, density: 0, status: "missing" };
-  const plainLower = plain.toLowerCase();
-  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const occurrences = kw.split(/\s+/).length === 1
-    ? (plainLower.match(new RegExp(`\\b${escaped}\\b`, "g")) ?? []).length
-    : plainLower.split(kw).length - 1;
-  const density = Math.round((occurrences / wordCount) * 1000) / 10;
-  const status = density >= DENSITY_OPTIMAL_MIN && density <= DENSITY_OPTIMAL_MAX ? "optimal" : density < DENSITY_OPTIMAL_MIN ? "under" : "over";
+  if (!kw || wordCount === 0) {
+    return { occurrences: 0, density: 0, status: "missing" };
+  }
+  const re = new RegExp(`\\b${escapeRegex(kw)}\\b`, "gi");
+  const occurrences = (plain.match(re) ?? []).length;
+  const density = roundTo((occurrences / wordCount) * 100);
+
+  let status: string;
+  if (occurrences === 0) status = "missing";
+  else if (density < DENSITY_OPTIMAL_MIN) status = "under";
+  else if (density > DENSITY_OPTIMAL_MAX) status = "over";
+  else status = "optimal";
+
   return { occurrences, density, status };
 }
 
-function calcKeywordPlacement(h1: string[], h2: string[], paragraphs: string[], kw: string) {
-  if (!kw) return { in_h1: false, in_h2: false, in_first_paragraph: false, placement_score: 0 };
-  const in_h1 = h1.some((t) => t.toLowerCase().includes(kw));
-  const in_h2 = h2.some((t) => t.toLowerCase().includes(kw));
-  const in_first = (paragraphs[0]?.toLowerCase() ?? "").includes(kw);
-  const placement_score = (in_h1 ? 40 : 0) + (in_h2 ? 35 : 0) + (in_first ? 25 : 0);
-  return { in_h1, in_h2, in_first_paragraph: in_first, placement_score };
+function calcKeywordPlacement(
+  h1: string[],
+  h2: string[],
+  paragraphs: string[],
+  kw: string,
+) {
+  if (!kw) {
+    return { in_h1: false, in_h2: false, in_first_paragraph: false, placement_score: 0 };
+  }
+  const contains = (s: string) => s.trim().toLowerCase().includes(kw);
+  const in_h1 = h1.some(contains);
+  const in_h2 = h2.some(contains);
+  const in_first_paragraph = paragraphs.length > 0 ? contains(paragraphs[0]) : false;
+  const placement_score =
+    (in_h1 ? 40 : 0) + (in_h2 ? 35 : 0) + (in_first_paragraph ? 25 : 0);
+  return { in_h1, in_h2, in_first_paragraph, placement_score };
 }
 
-function calcPassiveVoice(plain: string, sentenceCount: number) {
-  const sentenceList = plain.split(/[.!?]+/).filter((s) => s.trim());
-  const passiveCount = sentenceList.filter((s) => PASSIVE_RE.test(s)).length;
-  const passivePct = Math.round((passiveCount / sentenceCount) * 100 * 10) / 10;
+function calcPassiveVoice(plain: string) {
+  const sentences = splitSentences(plain);
+  const total = sentences.length;
+  if (total === 0) {
+    return { passiveCount: 0, passivePct: 0, status: "good", score: 100 };
+  }
+  const passiveCount = sentences.filter((s) => PASSIVE_RE.test(s)).length;
+  const passivePct = roundTo((passiveCount / total) * 100);
   const status = passivePct <= 10 ? "good" : passivePct <= 20 ? "moderate" : "high";
-  return { passiveCount, passivePct, status, score: Math.max(0, Math.round(100 - passivePct * 3)) };
+  const score = clamp(Math.round(100 - passivePct * 2));
+  return { passiveCount, passivePct, status, score };
 }
 
-function calcStructure(h1: string[], h2: string[], h3: string[], paragraphs: string[]) {
-  const paraWordCounts = paragraphs.map((p) => p.trim().split(/\s+/).filter(Boolean).length);
+function calcStructure(
+  h1: string[],
+  h2: string[],
+  h3: string[],
+  paragraphs: string[],
+) {
+  const paraWordCounts = paragraphs.map((p) => countWords(p));
   const longParas = paraWordCounts.filter((c) => c > PARA_WORD_LIMIT).length;
   const avgParaWords = paraWordCounts.length
-    ? Math.round((paraWordCounts.reduce((a, b) => a + b, 0) / paraWordCounts.length) * 10) / 10
+    ? roundTo(paraWordCounts.reduce((a, b) => a + b, 0) / paraWordCounts.length)
     : 0;
+
   const issues: string[] = [];
   if (h1.length === 0) issues.push("Missing H1 heading");
   if (h1.length > 1) issues.push(`Multiple H1 headings (${h1.length}) — use only one`);
-  if (h2.length < MIN_H2_COUNT) issues.push("Add at least 2 H2 subheadings for structure");
-  if (longParas > 0) issues.push(`${longParas} paragraph(s) exceed 150 words — break them up`);
-  const score = Math.min(100, Math.max(0, (h1.length === 1 ? 30 : 0) + Math.min(h2.length, 4) * 15 - issues.length * 10));
-  return { h1_count: h1.length, h2_count: h2.length, h3_count: h3.length, paragraph_count: paragraphs.length, avg_paragraph_words: avgParaWords, long_paragraphs: longParas, issues, score };
+  if (h2.length < MIN_H2_COUNT) issues.push(`Add at least ${MIN_H2_COUNT} H2 subheadings for structure`);
+  if (longParas > 0) issues.push(`${longParas} paragraph(s) exceed ${PARA_WORD_LIMIT} words — break them up`);
+
+  let score = 0;
+  if (h1.length === 1) score += 30;
+  else if (h1.length > 1) score += 10;
+  score += Math.min(h2.length, 4) * 15;
+  if (paragraphs.length > 0 && longParas === 0) score += 10;
+
+  return {
+    h1_count: h1.length,
+    h2_count: h2.length,
+    h3_count: h3.length,
+    paragraph_count: paragraphs.length,
+    avg_paragraph_words: avgParaWords,
+    long_paragraphs: longParas,
+    issues,
+    score: clamp(score),
+  };
 }
 
-function calcLinks(links: { href: string }[]) {
-  const externalLinks = links.filter((l) => /^https?:\/\//i.test(l.href)).length;
-  const internalLinks = links.length - externalLinks;
-  return { internal_count: internalLinks, external_count: externalLinks, total_links: links.length, score: Math.min(100, internalLinks * 20 + externalLinks * 15) };
+function calcLinks(linkCount: number) {
+  const score = linkCount === 0 ? 0 : clamp(40 + linkCount * 15);
+  return { count: linkCount, score };
 }
 
 function calcLsi(plain: string, relatedKeywords: string, kw: string) {
-  const relatedKws = relatedKeywords.split(/[\n,]/).map((k) => k.trim().toLowerCase()).filter(Boolean);
+  const related = relatedKeywords
+    .split(/[\n,]/)
+    .map((k) => k.trim().toLowerCase())
+    .filter(Boolean);
   const kwParts = new Set(kw.split(/\s+/).filter(Boolean));
-  const lsiWords = ((plain + " " + relatedKws.join(" ")).toLowerCase().match(/\b[a-zA-Z]{4,}\b/g) ?? [])
+
+  const tokens = ((plain + " " + related.join(" ")).toLowerCase().match(/\b[a-zA-Z]{4,}\b/g) ?? [])
     .filter((w) => !STOPWORDS.has(w) && !kwParts.has(w));
-  const counts = lsiWords.reduce<Record<string, number>>((acc, w) => { acc[w] = (acc[w] ?? 0) + 1; return acc; }, {});
+
+  const counts = tokens.reduce<Record<string, number>>((acc, w) => {
+    acc[w] = (acc[w] ?? 0) + 1;
+    return acc;
+  }, {});
+
   const uniqueTerms = Object.keys(counts).length;
-  const topTerms = Object.entries(counts).sort(([, a], [, b]) => b - a).slice(0, 10).map(([term, count]) => ({ term, count }));
-  return { top_terms: topTerms, unique_terms: uniqueTerms, coverage_score: Math.min(100, Math.round((uniqueTerms / LSI_UNIQUE_TERMS_TARGET) * 100)) };
+  const topTerms = Object.entries(counts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 10)
+    .map(([term, count]) => ({ term, count }));
+
+  const coverageScore = clamp(Math.round((uniqueTerms / LSI_UNIQUE_TERMS_TARGET) * 100));
+  return { top_terms: topTerms, unique_terms: uniqueTerms, coverage_score: coverageScore };
 }
 
 function calcMeta(title: string, description: string, kw: string) {
+  const titleLower = title.toLowerCase();
+  const descLower = description.toLowerCase();
   const titleLen = title.length;
   const descLen = description.length;
-  const kwInTitle = kw ? (kw.split(/\s+/).every((w) => title.toLowerCase().includes(w)) || title.toLowerCase().includes(kw)) : false;
-  const kwInDesc = kw ? description.toLowerCase().includes(kw) : false;
-  const titleOk = titleLen >= 10 && titleLen <= 60;
-  const descOk = descLen >= 50 && descLen <= 155;
-  const score = (titleLen > 0 ? 20 : 0) + (kwInTitle ? 30 : 0) + (descLen > 0 ? 20 : 0) + (kwInDesc ? 20 : 0) + (titleOk && descOk ? 10 : titleOk || descOk ? 5 : 0);
-  return { keyword_in_title: kwInTitle, keyword_in_description: kwInDesc, title_length: titleLen, title_ok: titleOk, description_length: descLen, description_ok: descOk, score };
+
+  const keyword_in_title = kw ? titleLower.includes(kw) : false;
+  const keyword_in_description = kw ? descLower.includes(kw) : false;
+  const title_ok = titleLen >= TITLE_MIN && titleLen <= TITLE_MAX;
+  const description_ok = descLen >= DESC_MIN && descLen <= DESC_MAX;
+
+  let score = 0;
+  if (titleLen > 0) score += 20;
+  if (keyword_in_title) score += 30;
+  if (descLen > 0) score += 20;
+  if (keyword_in_description) score += 20;
+  if (title_ok && description_ok) score += 10;
+  else if (title_ok || description_ok) score += 5;
+
+  return {
+    keyword_in_title,
+    keyword_in_description,
+    title_length: titleLen,
+    title_ok,
+    description_length: descLen,
+    description_ok,
+    score,
+  };
 }
 
-function calcContentLength(wordCount: number, targetWordCount: number) {
-  const percentage = Math.min(100, Math.round((wordCount / targetWordCount) * 100));
-  const score = percentage >= 100 ? 100 : percentage >= 70 ? 70 : Math.round(percentage * 0.7);
-  return { word_count: wordCount, target: targetWordCount, percentage, score, status: percentage >= 100 ? "optimal" : percentage >= 70 ? "under" : "short" };
+// Content-length band thresholds (percentage of target word count).
+// Status transitions happen at these points, and the UI progress bar uses
+// the same numbers so the colors match the status label one-to-one.
+export const CONTENT_LENGTH_BANDS = {
+  OPTIMAL: 100,   // at or over target
+  NEAR: 80,       // close — small push needed
+  UNDER: 50,      // noticeably short
+} as const;
+
+export type ContentLengthStatus = "short" | "under" | "near" | "optimal";
+
+export function contentLengthStatus(percentage: number): ContentLengthStatus {
+  if (percentage >= CONTENT_LENGTH_BANDS.OPTIMAL) return "optimal";
+  if (percentage >= CONTENT_LENGTH_BANDS.NEAR) return "near";
+  if (percentage >= CONTENT_LENGTH_BANDS.UNDER) return "under";
+  return "short";
+}
+
+function calcContentLength(wordCount: number, target: number) {
+  const safeTarget = target > 0 ? target : 1500;
+  const safeWords = Math.max(0, wordCount);
+  const percentage = clamp(Math.round((safeWords / safeTarget) * 100));
+  const score = percentage;
+  const status = contentLengthStatus(percentage);
+  return { word_count: safeWords, target: safeTarget, percentage, score, status };
 }
 
 // ---------------------------------------------------------------------------
-// Main export — composes individual analysis functions
+// Public entrypoint
 // ---------------------------------------------------------------------------
 
 export function analyzeContent(
@@ -257,27 +450,27 @@ export function analyzeContent(
 ): SEOAnalysisResult {
   const kw = keyword.trim().toLowerCase();
   const plain = stripHtml(html);
-  const { h1, h2, h3, paragraphs, links } = parseHtml(html);
-  const wordCount = plain.trim() ? plain.trim().split(/\s+/).length : 0;
+  const parsed = parseHtml(html);
+  const wordCount = countWords(plain);
 
   const readability = calcReadability(plain);
   const density = calcKeywordDensity(plain, kw, wordCount);
-  const placement = calcKeywordPlacement(h1, h2, paragraphs, kw);
-  const passive = calcPassiveVoice(plain, readability.sc);
-  const structure = calcStructure(h1, h2, h3, paragraphs);
-  const linkData = calcLinks(links);
+  const placement = calcKeywordPlacement(parsed.h1, parsed.h2, parsed.paragraphs, kw);
+  const passive = calcPassiveVoice(plain);
+  const structure = calcStructure(parsed.h1, parsed.h2, parsed.h3, parsed.paragraphs);
+  const linkData = calcLinks(parsed.linkCount);
   const lsi = calcLsi(plain, relatedKeywords, kw);
   const meta = calcMeta(title, description, kw);
   const contentLength = calcContentLength(wordCount, targetWordCount);
 
-  const densityScoreMap: Record<string, number> = { optimal: 100, under: 50, over: 40, missing: 0 };
-  const kwScore = Math.round((densityScoreMap[density.status] ?? 0) * 0.5 + placement.placement_score * 0.5);
-  const readabilityScore = Math.max(0, Math.round(readability.flesch - passive.passivePct * 2));
+  const densityScore = DENSITY_STATUS_SCORE[density.status] ?? 0;
+  const keyword_score = Math.round(densityScore * 0.5 + placement.placement_score * 0.5);
+  const readability_score = Math.round(readability.flesch * 0.7 + passive.score * 0.3);
 
   const overall = Math.round(
-    kwScore * SCORE_WEIGHTS.keyword +
+    keyword_score * SCORE_WEIGHTS.keyword +
     lsi.coverage_score * SCORE_WEIGHTS.coverage +
-    readabilityScore * SCORE_WEIGHTS.readability +
+    readability_score * SCORE_WEIGHTS.readability +
     structure.score * SCORE_WEIGHTS.structure +
     linkData.score * SCORE_WEIGHTS.links +
     meta.score * SCORE_WEIGHTS.meta +
@@ -286,9 +479,9 @@ export function analyzeContent(
 
   return {
     overall,
-    keyword_score: kwScore,
+    keyword_score,
     coverage_score: lsi.coverage_score,
-    readability_score: readabilityScore,
+    readability_score,
     structure_score: structure.score,
     links_score: linkData.score,
     meta_score: meta.score,
@@ -298,8 +491,8 @@ export function analyzeContent(
       flesch_score: readability.flesch,
       grade_level: readability.grade,
       word_count: wordCount,
-      sentence_count: readability.sc,
-      avg_words_per_sentence: readability.aws,
+      sentence_count: readability.sentenceCount,
+      avg_words_per_sentence: readability.avgWordsPerSentence,
       status: readability.status,
     },
     keyword_density: {
@@ -318,12 +511,11 @@ export function analyzeContent(
     passive_voice: {
       passive_count: passive.passiveCount,
       passive_percentage: passive.passivePct,
-      total_sentences: readability.sc,
+      total_sentences: readability.sentenceCount,
       status: passive.status,
       score: passive.score,
     },
     links: linkData,
-
     content_length: contentLength,
     structure: {
       h1_count: structure.h1_count,
@@ -332,6 +524,7 @@ export function analyzeContent(
       paragraph_count: structure.paragraph_count,
       avg_paragraph_words: structure.avg_paragraph_words,
       long_paragraphs: structure.long_paragraphs,
-      issues: structure.issues,    },
+      issues: structure.issues,
+    },
   };
 }

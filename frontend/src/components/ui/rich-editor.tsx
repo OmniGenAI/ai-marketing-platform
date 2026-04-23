@@ -475,6 +475,37 @@ interface RichEditorProps {
   onMetaChange?: (meta: MetaFields) => void;
 }
 
+// Meta-field character budgets — kept in lockstep with the SEO scoring
+// thresholds in `frontend/src/lib/seo-analysis.ts` (TITLE_MIN/MAX,
+// DESC_MIN/MAX). Update both places together.
+const META_TITLE_MIN = 10;
+const META_TITLE_MAX = 60;
+const META_DESC_MIN = 50;
+const META_DESC_MAX = 155;
+
+type MetaLenStatus = "empty" | "short" | "ok" | "over";
+
+function metaLenStatus(len: number, min: number, max: number): MetaLenStatus {
+  if (len === 0) return "empty";
+  if (len < min) return "short";
+  if (len > max) return "over";
+  return "ok";
+}
+
+const META_BAR_BG: Record<MetaLenStatus, string> = {
+  empty: "bg-muted",
+  short: "bg-red-500",
+  ok: "bg-emerald-500",
+  over: "bg-red-500",
+};
+
+const META_BAR_TEXT: Record<MetaLenStatus, string> = {
+  empty: "text-muted-foreground",
+  short: "text-red-500",
+  ok: "text-emerald-500",
+  over: "text-red-500",
+};
+
 export function RichEditor({
   value = "",
   onChange,
@@ -685,19 +716,22 @@ export function RichEditor({
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         </button>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div className="h-1 w-24 bg-muted rounded-full overflow-hidden hidden sm:block">
-                          <div 
-                            className={`h-full transition-all duration-300 ${
-                              meta.title.length > 70 ? "bg-red-500" : meta.title.length >= 50 ? "bg-emerald-500" : "bg-blue-500"
-                            }`}
-                            style={{ width: `${Math.min(100, (meta.title.length / 70) * 100)}%` }}
-                          />
-                        </div>
-                        <span className={`text-[10px] font-mono font-medium ${
-                          meta.title.length > 70 ? "text-red-500" : meta.title.length >= 50 ? "text-emerald-500" : "text-muted-foreground"
-                        }`}>{meta.title.length}/70</span>
-                      </div>
+                      {(() => {
+                        const s = metaLenStatus(meta.title.length, META_TITLE_MIN, META_TITLE_MAX);
+                        return (
+                          <div className="flex items-center gap-2">
+                            <div className="h-1 w-24 bg-muted rounded-full overflow-hidden hidden sm:block">
+                              <div
+                                className={`h-full transition-all duration-300 ${META_BAR_BG[s]}`}
+                                style={{ width: `${Math.min(100, (meta.title.length / META_TITLE_MAX) * 100)}%` }}
+                              />
+                            </div>
+                            <span className={`text-[10px] font-mono font-medium ${META_BAR_TEXT[s]}`}>
+                              {meta.title.length}/{META_TITLE_MAX}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <input
                       type="text"
@@ -721,19 +755,22 @@ export function RichEditor({
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         </button>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div className="h-1 w-24 bg-muted rounded-full overflow-hidden hidden sm:block">
-                          <div 
-                            className={`h-full transition-all duration-300 ${
-                              meta.description.length > 156 ? "bg-red-500" : meta.description.length >= 120 ? "bg-emerald-500" : "bg-blue-500"
-                            }`}
-                            style={{ width: `${Math.min(100, (meta.description.length / 156) * 100)}%` }}
-                          />
-                        </div>
-                        <span className={`text-[10px] font-mono font-medium ${
-                          meta.description.length > 156 ? "text-red-500" : meta.description.length >= 120 ? "text-emerald-500" : "text-muted-foreground"
-                        }`}>{meta.description.length}/156</span>
-                      </div>
+                      {(() => {
+                        const s = metaLenStatus(meta.description.length, META_DESC_MIN, META_DESC_MAX);
+                        return (
+                          <div className="flex items-center gap-2">
+                            <div className="h-1 w-24 bg-muted rounded-full overflow-hidden hidden sm:block">
+                              <div
+                                className={`h-full transition-all duration-300 ${META_BAR_BG[s]}`}
+                                style={{ width: `${Math.min(100, (meta.description.length / META_DESC_MAX) * 100)}%` }}
+                              />
+                            </div>
+                            <span className={`text-[10px] font-mono font-medium ${META_BAR_TEXT[s]}`}>
+                              {meta.description.length}/{META_DESC_MAX}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <textarea
                       rows={2}

@@ -4,10 +4,11 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 const protectedPaths = [
   "/dashboard",
-  "/business-config",
+  "/brand-kit",
   "/generate",
+  "/seo",
+  "/blog",
   "/posts",
-  "/reels",
   "/subscription",
   "/settings",
 ];
@@ -77,10 +78,11 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     "/dashboard/:path*",
-    "/business-config/:path*",
+    "/brand-kit/:path*",
     "/generate/:path*",
+    "/seo/:path*",
+    "/blog/:path*",
     "/posts/:path*",
-    "/reels/:path*",
     "/subscription/:path*",
     "/settings/:path*",
     "/login",

@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -39,6 +39,7 @@ import {
   Brain,
   AlertTriangle,
   List,
+  BookOpen,
 } from "lucide-react";
 import Link from "next/link";
 import api from "@/lib/api";
@@ -263,9 +264,12 @@ function H2Item({ section, index }: { section: H2Section; index: number }) {
   const [open, setOpen] = useState(index < 3);
   return (
     <div className="rounded-lg border overflow-hidden transition-colors hover:border-foreground/20">
-      <button
-        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors"
+      <div
+        role="button"
+        tabIndex={0}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors cursor-pointer"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen((v) => !v)}
       >
         <span className="shrink-0 flex h-6 w-6 items-center justify-center rounded bg-muted text-xs font-bold text-muted-foreground">
           {index + 1}
@@ -275,7 +279,7 @@ function H2Item({ section, index }: { section: H2Section; index: number }) {
           <CopyBtn text={section.heading} />
           {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
         </div>
-      </button>
+      </div>
       {open && (
         <div className="px-4 pb-3 pt-2 border-t bg-muted/10">
           <p className="text-sm text-muted-foreground leading-relaxed flex items-start gap-1.5">
@@ -317,11 +321,21 @@ function LoadingState() {
 
 function SEOBriefContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const savedBriefId = searchParams.get("id");
 
   const [topic, setTopic] = useState("");
   const [wordCount, setWordCount] = useState("1500");
   const [country, setCountry] = useState("");
+  const [businessContext, setBusinessContext] = useState<{
+    business_name: string;
+    niche: string;
+    location: string;
+    target_audience: string;
+    products: string;
+    brand_voice: string;
+  } | null>(null);
+  const [brandKitCompetitors, setBrandKitCompetitors] = useState<string[]>([]);
 
   const [isLoading, setIsLoading] = useState(!!savedBriefId);
   const [brief, setBrief] = useState<SEOBriefResponse | null>(null);
@@ -345,6 +359,35 @@ function SEOBriefContent() {
       .finally(() => setIsLoading(false));
   }, [savedBriefId]);
 
+  // Silently load brand kit context on mount
+  useEffect(() => {
+    api.get("/api/brand-kit")
+      .then((res) => {
+        if (res.data) {
+          setBusinessContext({
+            business_name: res.data.business_name || "",
+            niche: res.data.niche || "",
+            location: res.data.location || "",
+            target_audience: res.data.target_audience || "",
+            products: res.data.products || "",
+            brand_voice: res.data.brand_voice || "",
+          });
+
+          // Auto-fill competitor URLs from brand kit
+          if (res.data.competitors) {
+            const urls = (res.data.competitors as string)
+              .split(",")
+              .map((u: string) => u.trim())
+              .filter((u: string) => u.startsWith("http"));
+            if (urls.length > 0) {
+              setBrandKitCompetitors(urls);
+            }
+          }
+        }
+      })
+      .catch(() => {}); // silent — brand kit is optional
+  }, []);
+
   const handleGenerate = async () => {
     if (!topic.trim()) { toast.error("Please enter a topic"); return; }
     setIsLoading(true);
@@ -356,8 +399,9 @@ function SEOBriefContent() {
         topic: topic.trim(),
         target_word_count: parseInt(wordCount) || 1500,
         country,
-        competitor_urls: [],
+        competitor_urls: brandKitCompetitors,
         content_draft: "",
+        ...(businessContext && { business_context: businessContext }),
       }, { timeout: 180_000 }); // 3 min — scraping + AI takes time
       setBrief(res.data);
       setActiveTab(res.data.draft_score ? "draft" : "outline");
@@ -378,13 +422,16 @@ function SEOBriefContent() {
   return (
     <div className="min-h-full bg-background">
       {/* Breadcrumb */}
-      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-        <Link href="/seo" className="inline-flex items-center gap-1 hover:text-foreground transition-colors">
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground mb-4">
+        <button
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+        >
           <ArrowLeft className="h-3.5 w-3.5" />
-          SEO
-        </Link>
+          Back
+        </button>
         <span>/</span>
-        <span className="text-foreground font-medium">Brief</span>
+        <span className="text-foreground font-medium">SEO Brief</span>
       </div>
       <div className="mx-auto py-4 space-y-8">
 
@@ -638,18 +685,15 @@ function SEOBriefContent() {
                             <div className="p-4 space-y-4">
                               <div className="space-y-2">
                                 <div className="flex items-start justify-between gap-3">
-                                  <p className="text-sm font-medium leading-snug flex-1">{m.title}</p>
-                                  <div className="flex gap-4">
+                                  <p className="text-sm font-medium leading-snug flex-1 group">{m.title} <CopyBtn text={m.title} className="group-hover:visible invisible ml-2 pt-2" /></p>
                                     <CharBar value={m.title_length} max={60} />
-                                    <CopyBtn text={m.title} />
-                                  </div>
+                                  
                                 </div>
                               </div>
                               <Separator />
                               <div className="space-y-2">
                                 <div className="flex items-start justify-between gap-3">
-                                  <p className="text-sm text-muted-foreground leading-snug flex-1">{m.description}</p>
-                                  <CopyBtn text={m.description} />
+                                  <p className="text-sm text-muted-foreground leading-snug flex-1  group">{m.description} <CopyBtn text={m.description} className="group-hover:visible invisible ml-2 pt-2" /></p>
                                   <CharBar value={m.description_length} max={155} />
                                 </div>
                               </div>
@@ -1023,6 +1067,40 @@ function SEOBriefContent() {
                     <><Brain className="h-4 w-4" /> Generate AI Brief</>
                   )}
                 </Button>
+                {brief && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full gap-2"
+                    onClick={() => {
+                      sessionStorage.setItem("blog_prefill", JSON.stringify({
+                        topic: brief.topic,
+                        primary_keyword: brief.primary_keyword,
+                        secondary_keywords: brief.secondary_keywords,
+                        h2_outline: brief.h2_outline,
+                        content_gaps: brief.content_gaps || [],
+                        recommendations: brief.recommendations || [],
+                        serp_results: (brief.serp_results || []).slice(0, 8).map((s: { title: string; link: string; snippet: string }) => ({
+                          title: s.title,
+                          link: s.link,
+                          snippet: s.snippet,
+                        })),
+                        competitor_insights: (brief.competitor_insights || []).slice(0, 4).map((c: { url: string; title: string; top_keywords: string[]; content_summary?: string; headings?: string[] }) => ({
+                          url: c.url,
+                          title: c.title,
+                          top_keywords: c.top_keywords,
+                          content_summary: c.content_summary || "",
+                          headings: c.headings || [],
+                        })),
+                        nlp_terms: brief.nlp_terms || [],
+                      }));
+                      router.push("/blog/generate");
+                    }}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                    Generate Blog from Brief
+                  </Button>
+                )}
                 {savedBriefId && (
                   <Link
                     href="/seo/brief"

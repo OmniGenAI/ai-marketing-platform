@@ -8,7 +8,6 @@ import { RichEditor } from "@/components/ui/rich-editor";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import Link from "next/dist/client/link";
-import { ArrowLeft, PenLine } from "lucide-react";
 
 const MIN_WORDS_FOR_TIPS = 100;
 const AUTOSAVE_DEBOUNCE_MS = 2000;
@@ -182,46 +181,15 @@ function SEOEditorContent() {
     const [metaDesc, setMetaDesc] = useState("");
     const [focusKeyword, setFocusKeyword] = useState("");
     const [relatedKeywords, setRelatedKeywords] = useState("");
-    const [isLoadingDraft, setIsLoadingDraft] = useState(false);
-
-    // Set loading state on mount if ?draft= param is present (avoids SSR/client mismatch)
-    useEffect(() => {
-        if (searchParams.get("draft")) setIsLoadingDraft(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const [isLoadingDraft, setIsLoadingDraft] = useState(() => {
+        // initialise true only when a ?draft= param is present
+        if (typeof window !== "undefined") {
+            return new URLSearchParams(window.location.search).has("draft");
+        }
+        return false;
+    });
 
     // Load draft from saved ID if ?draft= param is present
-    // Read prefill from sessionStorage (coming from Blog Generator or similar).
-    // New callers pass a JSON object with { content, metaTitle, metaDesc,
-    // focusKeyword, relatedKeywords }. Legacy string callers still work —
-    // we treat the raw string as HTML content.
-    useEffect(() => {
-        const raw = sessionStorage.getItem("seo_editor_prefill");
-        if (!raw) return;
-        sessionStorage.removeItem("seo_editor_prefill");
-        let html = raw;
-        try {
-            const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === "object") {
-                if (typeof parsed.content === "string") html = parsed.content;
-                if (typeof parsed.metaTitle === "string") setMetaTitle(parsed.metaTitle);
-                if (typeof parsed.metaDesc === "string") setMetaDesc(parsed.metaDesc);
-                if (typeof parsed.focusKeyword === "string") setFocusKeyword(parsed.focusKeyword);
-                if (typeof parsed.relatedKeywords === "string") setRelatedKeywords(parsed.relatedKeywords);
-                if (typeof parsed.targetWords === "string" && parsed.targetWords) {
-                    setTargetWords(parsed.targetWords);
-                } else if (typeof parsed.targetWords === "number") {
-                    setTargetWords(String(parsed.targetWords));
-                }
-            }
-        } catch {
-            // raw string (legacy) — fall through
-        }
-        setContent(html);
-        setPlainText(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
-
     useEffect(() => {
         const draftId = searchParams.get("draft");
         if (!draftId) return;
@@ -235,7 +203,6 @@ function SEOEditorContent() {
                 if (d.focusKeyword) setFocusKeyword(d.focusKeyword);
                 if (d.relatedKeywords) setRelatedKeywords(d.relatedKeywords);
                 setSaveId(draftId);
-                hasUserEditedRef.current = true; // allow autosave for loaded drafts
                 // Seed the snapshot so autosave treats the loaded state as "in sync"
                 // and only fires after the user actually edits something.
                 lastSavedSnapshotRef.current = JSON.stringify({
@@ -311,16 +278,12 @@ function SEOEditorContent() {
         [content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords]
     );
 
-    const derivedText = plainText.trim() || content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    const wordCount = derivedText ? derivedText.split(/\s+/).length : 0;
+    const wordCount = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
     const overallLabel = !score ? "-" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
     const [isSaving, setIsSaving] = useState(false);
     const [saveId, setSaveId] = useState<string | null>(null);
     const [isApplying, setIsApplying] = useState(false);
     const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>("idle");
-    // Only auto-create a draft after the user has actually typed/edited in the
-    // editor. Prevents blog-prefilled content from being auto-saved immediately.
-    const hasUserEditedRef = useRef(false);
     // Holds the in-flight POST when we auto-create a draft on first edit.
     // Acts as a mutex so concurrent callers share one create call.
     const autoCreateInFlightRef = useRef<Promise<string> | null>(null);
@@ -388,7 +351,7 @@ function SEOEditorContent() {
         debounceRef.current = setTimeout(() => {
             runScore(content, focusKeyword, metaTitle, metaDesc, relatedKeywords, targetWords);
             const plain = content.replace(/<[^>]+>/g, "").trim();
-            if (plain.length > 0 && !saveId && !autoCreateInFlightRef.current && hasUserEditedRef.current) {
+            if (plain.length > 0 && !saveId && !autoCreateInFlightRef.current) {
                 ensureSaveId();
             }
         }, 400);
@@ -504,36 +467,18 @@ function SEOEditorContent() {
     }
 
     return (
-        <div className="flex flex-col h-[calc(100vh-6rem)] overflow-hidden">
-            {/* Breadcrumb */}
-            <div className="flex items-center gap-1.5 text-sm text-muted-foreground mb-3 shrink-0">
-                <button
-                    onClick={() => router.back()}
-                    className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-                >
-                    <ArrowLeft className="h-3.5 w-3.5" />
-                    Back
-                </button>
-                <span>/</span>
-                <span className="text-foreground font-medium">SEO Editor</span>
-            </div>
-
-            <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div className="flex h-[calc(100vh-6rem)] overflow-hidden">
 
             {/* â”€â”€ LEFT: Editor panel â”€â”€ */}
             <div className="flex flex-1 flex-col min-w-0 pr-6 gap-4">
                 {/* Header row — this is actually the scores ring, editor header is in the left panel */}
                 <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-3">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-emerald-500/10 border-emerald-500/20">
-                            <PenLine className="h-5 w-5 text-emerald-500" />
-                        </div>
-                        <div>
-                            <h1 className="text-xl font-bold tracking-tight dark:text-white">Live SEO Editor</h1>
-                            <p className="mt-0.5 text-sm text-muted-foreground">
-                                Paste or write your content. SEO score updates as you type.
-                            </p>
-                        </div>
+                    <div>
+
+                        <h1 className="text-2xl font-bold tracking-tight dark:text-white">Live SEO Editor</h1>
+                        <p className="mt-0.5 text-sm text-muted-foreground">
+                            Paste or write your content. SEO score updates as you type.
+                        </p>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
                         <AutoSaveIndicator status={autoSaveStatus} />
@@ -557,7 +502,6 @@ function SEOEditorContent() {
                     <RichEditor
                         value={content}
                         onChange={(html, text) => {
-                            hasUserEditedRef.current = true;
                             setContent(html);
                             setPlainText(text);
                         }}
@@ -669,7 +613,7 @@ function SEOEditorContent() {
                                                 )}
                                             >
                                                 <span className={cn("font-semibold block mb-0.5", PRIORITY_LABEL[tip.priority])}>
-                                                    {tip.category} · {tip.priority}
+                                                    {tip.category} {"·"} {tip.priority}
                                                 </span>
                                                 {tip.tip}
                                             </li>
@@ -851,7 +795,6 @@ function SEOEditorContent() {
                     </div>
                 </div>}
             </div>
-            </div>{/* end flex wrapper */}
         </div>
     );
 }

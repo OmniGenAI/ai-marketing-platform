@@ -12,6 +12,7 @@ import {
   Building2,
   Film,
   Search,
+  BookOpen,
 } from "lucide-react";
 
 const navItems = [
@@ -21,24 +22,29 @@ const navItems = [
     icon: LayoutDashboard,
   },
   {
-    title: "Business Config",
-    href: "/business-config",
+    title: "Brand Kit",
+    href: "/brand-kit",
     icon: Building2,
   },
   {
     title: "Generate Post",
-    href: "/generate",
+    href: "/generate/social",
     icon: Sparkles,
   },
   {
     title: "Create Reel",
-    href: "/reels",
+    href: "/generate/reel",
     icon: Film,
   },
   {
     title: "SEO",
     href: "/seo",
     icon: Search,
+  },
+  {
+    title: "Blog",
+    href: "/blog",
+    icon: BookOpen,
   },
   {
     title: "My Posts",

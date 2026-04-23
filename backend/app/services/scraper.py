@@ -1,112 +1,168 @@
 import json
 import logging
+import time
+import warnings
 
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+
+def _fetch_html(url: str, timeout: float = 15.0) -> BeautifulSoup | None:
+    """Fetch a URL and return a BeautifulSoup object, or None on failure."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            resp = httpx.get(url, headers=_HEADERS, timeout=timeout,
+                             follow_redirects=True, verify=False)
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "lxml")
+    except Exception as e:
+        logger.debug("[SCRAPER] fetch failed for %s: %s", url, e)
+        return None
+
+
+def _find_inner_pages(soup: BeautifulSoup, base_url: str) -> dict[str, str]:
+    """
+    Find relevant inner page URLs (about, services, contact, products).
+    Returns a dict like {"about": "https://...", "services": "https://..."}.
+    Only matches links that are on the same domain to avoid external URLs.
+    """
+    from urllib.parse import urlparse
+
+    base_domain = urlparse(base_url).netloc
+    page_patterns = {
+        "about":    ["about", "about-us", "who-we-are", "our-story", "our-team"],
+        "services": ["services", "service", "what-we-do", "solutions", "offerings"],
+        "products": ["products", "product", "shop", "store", "catalogue", "catalog"],
+        "contact":  ["contact", "contact-us", "get-in-touch", "reach-us"],
+    }
+    found: dict[str, str] = {}
+
+    for link in soup.find_all("a", href=True):
+        href: str = link["href"]
+        full_url = urljoin(base_url, href)
+        # Only follow same-domain links
+        if urlparse(full_url).netloc != base_domain:
+            continue
+        path = urlparse(full_url).path.lower().rstrip("/")
+        text = link.get_text(strip=True).lower()
+
+        for page_type, keywords in page_patterns.items():
+            if page_type in found:
+                continue
+            if any(kw in path or kw == text for kw in keywords):
+                found[page_type] = full_url
+
+        if len(found) == len(page_patterns):
+            break
+
+    return found
 
 
 def scrape_website(url: str) -> dict:
     """
-    Scrape a website and extract useful context for AI content generation.
-    Returns a dict with meta_description, main_content, about_content, etc.
+    Scrape a business website for AI content generation context.
+    Fetches homepage + up to 3 key inner pages (about, services, contact).
+    Returns a rich context dict ready to be stored and injected into AI prompts.
     """
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     result = {
         "url": url,
         "title": "",
         "meta_description": "",
         "main_content": "",
         "about_content": "",
-        "services": "",
+        "services_content": "",
         "contact_info": "",
+        "pages_scraped": [],
     }
 
-    try:
-        # Normalize URL
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
+    logger.info("[SCRAPER] Starting website scrape: %s", url)
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+    # ── Homepage ────────────────────────────────────────────────────────
+    soup = _fetch_html(url)
+    if soup is None:
+        raise Exception(f"Could not reach {url}")
 
-        # Fetch main page (disable SSL verification to avoid macOS certificate issues)
-        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True, verify=False)
-        response.raise_for_status()
+    title_tag = soup.find("title")
+    if title_tag:
+        result["title"] = title_tag.get_text(strip=True)
 
-        soup = BeautifulSoup(response.text, "lxml")
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc and meta_desc.get("content"):
+        result["meta_description"] = meta_desc["content"]
+    else:
+        og_desc = soup.find("meta", attrs={"property": "og:description"})
+        if og_desc and og_desc.get("content"):
+            result["meta_description"] = og_desc["content"]
 
-        # Extract title
-        title_tag = soup.find("title")
-        if title_tag:
-            result["title"] = title_tag.get_text(strip=True)
+    result["main_content"] = _extract_main_content(soup)[:3000]
+    result["contact_info"] = _extract_contact_info(soup)
+    result["pages_scraped"].append(url)
 
-        # Extract meta description
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-        if meta_desc and meta_desc.get("content"):
-            result["meta_description"] = meta_desc["content"]
+    # ── Inner pages ─────────────────────────────────────────────────────
+    inner_pages = _find_inner_pages(soup, url)
+    logger.info("[SCRAPER] Found inner pages: %s", list(inner_pages.keys()))
 
-        # Extract Open Graph description as fallback
-        if not result["meta_description"]:
-            og_desc = soup.find("meta", attrs={"property": "og:description"})
-            if og_desc and og_desc.get("content"):
-                result["meta_description"] = og_desc["content"]
+    if "about" in inner_pages:
+        about_soup = _fetch_html(inner_pages["about"], timeout=10.0)
+        if about_soup:
+            result["about_content"] = _extract_main_content(about_soup)[:2000]
+            result["pages_scraped"].append(inner_pages["about"])
 
-        # Extract main content
-        main_content = _extract_main_content(soup)
-        result["main_content"] = main_content[:2000]  # Limit size
+    if "services" in inner_pages or "products" in inner_pages:
+        sp_url = inner_pages.get("services") or inner_pages.get("products")
+        sp_soup = _fetch_html(sp_url, timeout=10.0)
+        if sp_soup:
+            result["services_content"] = _extract_main_content(sp_soup)[:2000]
+            result["pages_scraped"].append(sp_url)
 
-        # Try to find and extract About page
-        about_url = _find_about_page(soup, url)
-        if about_url:
-            try:
-                about_response = httpx.get(about_url, headers=headers, timeout=10.0, follow_redirects=True, verify=False)
-                about_response.raise_for_status()
-                about_soup = BeautifulSoup(about_response.text, "lxml")
-                about_content = _extract_main_content(about_soup)
-                result["about_content"] = about_content[:1500]
-            except Exception:
-                pass  # Skip if about page fails
+    # If contact info not found on homepage, try contact page
+    if not result["contact_info"] and "contact" in inner_pages:
+        contact_soup = _fetch_html(inner_pages["contact"], timeout=10.0)
+        if contact_soup:
+            result["contact_info"] = _extract_contact_info(contact_soup)
+            if inner_pages["contact"] not in result["pages_scraped"]:
+                result["pages_scraped"].append(inner_pages["contact"])
 
-        # Extract contact info
-        contact_info = _extract_contact_info(soup)
-        result["contact_info"] = contact_info
-
-    except httpx.HTTPStatusError as e:
-        raise Exception(f"Failed to fetch website: HTTP {e.response.status_code}")
-    except httpx.RequestError as e:
-        raise Exception(f"Failed to connect to website: {str(e)}")
-    except Exception as e:
-        raise Exception(f"Failed to scrape website: {str(e)}")
-
+    logger.info("[SCRAPER] Done — title=%r pages=%d", result["title"][:50], len(result["pages_scraped"]))
     return result
 
 
 def _extract_main_content(soup: BeautifulSoup) -> str:
-    """Extract main text content from a page."""
-    # Remove scripts, styles, nav, footer, etc.
+    """Extract clean main text content from a page."""
     for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
         element.decompose()
 
-    # Try to find main content area
-    main_areas = soup.find_all(["main", "article", "div"], class_=lambda x: x and any(
-        term in str(x).lower() for term in ["content", "main", "body", "article"]
-    ))
+    # Prefer semantic tags first
+    for tag in ("main", "article"):
+        el = soup.find(tag)
+        if el:
+            return el.get_text(separator=" ", strip=True)
 
-    if main_areas:
-        text_parts = []
-        for area in main_areas[:3]:  # Limit to first 3 matches
-            text_parts.append(area.get_text(separator=" ", strip=True))
-        return " ".join(text_parts)
+    # Fall back to a div with content-related class
+    for div in soup.find_all("div", class_=True):
+        classes = " ".join(div.get("class", [])).lower()
+        if any(term in classes for term in ("content", "main", "article")):
+            text = div.get_text(separator=" ", strip=True)
+            if len(text) > 200:
+                return text
 
-    # Fallback to body text
     body = soup.find("body")
-    if body:
-        return body.get_text(separator=" ", strip=True)
-
-    return ""
+    return body.get_text(separator=" ", strip=True) if body else ""
 
 
 def _find_about_page(soup: BeautifulSoup, base_url: str) -> str | None:
@@ -167,11 +223,7 @@ def json_to_website_context(json_str: str) -> dict:
 # Playwright + BeautifulSoup article scraper (for SEO competitor analysis)
 # ---------------------------------------------------------------------------
 
-_PLAYWRIGHT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+_PLAYWRIGHT_UA = _HEADERS["User-Agent"]
 
 
 def _extract_headings(soup: BeautifulSoup) -> list[dict]:
@@ -228,23 +280,22 @@ def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[d
             })
         return results
 
-    import time as _time
     results: list[dict] = []
     try:
         logger.info("[SCRAPER] 🚀 Launching Playwright Chromium (headless)...")
-        t_browser = _time.time()
+        t_browser = time.time()
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             ctx = browser.new_context(
                 user_agent=_PLAYWRIGHT_UA,
                 ignore_https_errors=True,
             )
-            logger.info("[SCRAPER] ✅ Browser ready in %.1fs", _time.time() - t_browser)
+            logger.info("[SCRAPER] ✅ Browser ready in %.1fs", time.time() - t_browser)
 
             for idx, url in enumerate(normalized):
                 entry: dict = {"url": url, "title": "", "headings": [], "main_content": ""}
                 logger.info("[SCRAPER] 📄 [%d/%d] Loading %s ...", idx + 1, len(normalized), url[:80])
-                t_page = _time.time()
+                t_page = time.time()
                 try:
                     page = ctx.new_page()
                     # Block heavy assets
@@ -268,16 +319,16 @@ def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[d
                     entry["main_content"] = _extract_main_content(soup)[:3_000]
                     content_len = len(entry["main_content"])
                     logger.info("[SCRAPER]    ✅ Done in %.1fs — title='%s' headings=%d content=%d chars",
-                                _time.time() - t_page, entry["title"][:50], len(entry["headings"]), content_len)
+                                time.time() - t_page, entry["title"][:50], len(entry["headings"]), content_len)
 
                 except Exception as exc:
-                    logger.warning("[SCRAPER]    ❌ Failed in %.1fs: %s", _time.time() - t_page, exc)
+                    logger.warning("[SCRAPER]    ❌ Failed in %.1fs: %s", time.time() - t_page, exc)
 
                 results.append(entry)
 
             browser.close()
             logger.info("[SCRAPER] 🏁 Browser closed — %d pages scraped in %.1fs total",
-                        len(results), _time.time() - t_browser)
+                        len(results), time.time() - t_browser)
 
     except Exception as exc:
         logger.error("[SCRAPER] ❌ Playwright batch error: %s", exc)
