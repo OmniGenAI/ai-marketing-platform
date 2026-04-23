@@ -1,11 +1,12 @@
 import json
 import logging
+import os
 import time
 import warnings
 
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,36 @@ def json_to_website_context(json_str: str) -> dict:
 
 _PLAYWRIGHT_UA = _HEADERS["User-Agent"]
 
+# Scrape.do fallback — used when Playwright fails / is unavailable. Token is
+# read from env so it can be rotated without a code change. Fallback is silently
+# skipped when the token is missing.
+_SCRAPEDO_TOKEN = os.getenv("SCRAPEDO_TOKEN", "9c866fcc8f7840bdb8d30b765c7794c46542f274983")
+_SCRAPEDO_ENDPOINT = "http://api.scrape.do/"
+
+
+def _scrape_via_scrapedo(url: str, timeout: float = 30.0) -> dict | None:
+    """Fetch a URL via scrape.do and parse it into the article-shape dict.
+
+    Returns None on any failure so callers can decide their own fallback path.
+    """
+    if not _SCRAPEDO_TOKEN:
+        return None
+    try:
+        proxied = f"{_SCRAPEDO_ENDPOINT}?url={quote(url, safe='')}&token={_SCRAPEDO_TOKEN}"
+        resp = httpx.get(proxied, timeout=timeout, follow_redirects=True)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        title_tag = soup.find("title")
+        return {
+            "url": url,
+            "title": title_tag.get_text(strip=True) if title_tag else "",
+            "headings": _extract_headings(soup),
+            "main_content": _extract_main_content(soup)[:3_000],
+        }
+    except Exception as exc:
+        logger.warning("[SCRAPER]    ❌ scrape.do fallback failed for %s: %s", url[:80], exc)
+        return None
+
 
 def _extract_headings(soup: BeautifulSoup) -> list[dict]:
     """Extract h1/h2/h3 headings from a BeautifulSoup tree."""
@@ -268,9 +299,13 @@ def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[d
             TimeoutError as PlaywrightTimeoutError,
         )
     except ImportError:
-        logger.warning("playwright not installed — falling back to httpx scraper")
+        logger.warning("playwright not installed — trying scrape.do then httpx fallback")
         results = []
         for u in normalized:
+            via_scrapedo = _scrape_via_scrapedo(u)
+            if via_scrapedo and via_scrapedo.get("main_content"):
+                results.append(via_scrapedo)
+                continue
             fallback = scrape_website(u)
             results.append({
                 "url": u,
@@ -322,7 +357,20 @@ def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[d
                                 time.time() - t_page, entry["title"][:50], len(entry["headings"]), content_len)
 
                 except Exception as exc:
-                    logger.warning("[SCRAPER]    ❌ Failed in %.1fs: %s", time.time() - t_page, exc)
+                    logger.warning("[SCRAPER]    ❌ Failed in %.1fs: %s — trying scrape.do fallback", time.time() - t_page, exc)
+                    via_scrapedo = _scrape_via_scrapedo(url)
+                    if via_scrapedo and via_scrapedo.get("main_content"):
+                        entry = via_scrapedo
+                        logger.info("[SCRAPER]    ✅ scrape.do fallback ok — title='%s' content=%d chars",
+                                    entry["title"][:50], len(entry["main_content"]))
+
+                # If Playwright produced an empty page (bot-block, JS-only), try scrape.do
+                if not entry.get("main_content"):
+                    via_scrapedo = _scrape_via_scrapedo(url)
+                    if via_scrapedo and via_scrapedo.get("main_content"):
+                        entry = via_scrapedo
+                        logger.info("[SCRAPER]    ✅ scrape.do recovered empty page — content=%d chars",
+                                    len(entry["main_content"]))
 
                 results.append(entry)
 
