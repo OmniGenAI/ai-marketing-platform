@@ -379,6 +379,27 @@ def scrape_articles_batch(urls: list[str], page_timeout: int = 15_000) -> list[d
                         len(results), time.time() - t_browser)
 
     except Exception as exc:
-        logger.error("[SCRAPER] ❌ Playwright batch error: %s", exc)
+        logger.error("[SCRAPER] ❌ Playwright batch error: %s — falling back to scrape.do for remaining URLs", exc)
+
+    # Fallback for any URL the Playwright path didn't cover (e.g. browser
+    # launch failure before the loop started, or per-URL entries that ended
+    # up empty and weren't recovered above).
+    done_urls = {r.get("url") for r in results if r.get("main_content")}
+    for u in normalized:
+        if u in done_urls:
+            continue
+        via_scrapedo = _scrape_via_scrapedo(u)
+        if via_scrapedo and via_scrapedo.get("main_content"):
+            logger.info("[SCRAPER]    ✅ scrape.do recovered %s — content=%d chars",
+                        u[:80], len(via_scrapedo["main_content"]))
+            # Replace any empty placeholder entry for this URL, else append.
+            replaced = False
+            for i, r in enumerate(results):
+                if r.get("url") == u and not r.get("main_content"):
+                    results[i] = via_scrapedo
+                    replaced = True
+                    break
+            if not replaced:
+                results.append(via_scrapedo)
 
     return results
