@@ -148,3 +148,32 @@
   .blog-rendered th, .blog-rendered td { @apply border border-border px-3 py-1.5; }
   .blog-rendered th { @apply bg-muted font-semibold text-left; }
 }
+
+/* ────────────────────────── Custom Scrollbar Styles ────────────────────────── */
+@layer components {
+  /* Base scrollbar styling — use with scrollbar-[color-name] or scrollbar-thumb-[color] */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(156 163 175) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgb(156 163 175);
+    border-radius: 3px;
+    border: 1px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(107 114 128);
+  }
+}

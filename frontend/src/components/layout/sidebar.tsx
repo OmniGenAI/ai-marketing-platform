@@ -13,6 +13,7 @@ import {
   Film,
   Search,
   BookOpen,
+  Recycle,
 } from "lucide-react";
 
 const navItems = [
@@ -35,6 +36,11 @@ const navItems = [
     title: "Create Reel",
     href: "/generate/reel",
     icon: Film,
+  },
+  {
+    title: "Repurpose",
+    href: "/generate/repurpose",
+    icon: Recycle,
   },
   {
     title: "SEO",
@@ -76,6 +82,7 @@ export function Sidebar() {
       <nav className="flex flex-col gap-1 p-4">
         {navItems.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+          const isRepurpose = item.href === "/generate/repurpose";
           return (
             <Link
               key={item.href}
