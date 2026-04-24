@@ -6,9 +6,11 @@ from pydantic import BaseModel, field_validator
 
 class ReelGenerateRequest(BaseModel):
     topic: str
+    description: str = ""            # optional extra context — what the reel is about, product details, angle, etc.
     tone: str = "professional"
     voice: str = "en-US-JennyNeural"
     duration_target: int = 30
+    seo_save_id: str | None = None   # reuse an existing SEO brief for grounded keywords
 
     @field_validator("topic")
     @classmethod
@@ -59,6 +61,7 @@ class ReelResponse(BaseModel):
     duration_target: int
     script: str | None
     hashtags: str | None
+    primary_keyword: str | None = None
     audio_url: str | None
     video_url: str | None
     thumbnail_url: str | None

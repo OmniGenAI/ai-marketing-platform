@@ -45,6 +45,9 @@ class GenerateRequest(BaseModel):
     image_option: str = "none"  # none, business, ai, upload
     business_image_id: str | None = None
     uploaded_image_url: str | None = None  # For upload option
+    seo_mode: bool = False
+    seo_save_id: str | None = None  # brief to pull keywords from
+    blog_url: str | None = None  # optional backlink appended to content
 
     @field_validator("topic")
     @classmethod
@@ -67,3 +70,5 @@ class GenerateResponse(BaseModel):
     hashtags: str
     image_url: str | None = None
     website_context_used: bool = False  # Indicates if website data was used for generation
+    seo_keywords_used: list[str] = []
+    primary_keyword: str | None = None

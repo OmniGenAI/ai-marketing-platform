@@ -6,6 +6,110 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def call_llm_with_fallback(
+    prompt: str,
+    *,
+    system: str = "",
+    temperature: float = 0.7,
+    expect_json: bool = False,
+    caller: str = "llm",
+) -> str:
+    """Try Gemini 2.5-flash → Groq llama-3.3-70b → xAI grok-2. Raises if all fail.
+
+    `expect_json=True` sets Gemini's responseMimeType to application/json and appends a
+    JSON-only instruction to the system prompt for the OpenAI-compatible providers.
+    """
+    sys_msg = system or "You are a helpful assistant. Follow the requested response format exactly."
+    if expect_json:
+        sys_msg = sys_msg + "\n\nReturn ONLY valid JSON. No markdown fences, no commentary."
+
+    def _try_gemini() -> str:
+        api_url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            f"?key={settings.GOOGLE_GEMINI_API_KEY}"
+        )
+        full_prompt = f"{sys_msg}\n\n{prompt}" if sys_msg else prompt
+        payload: dict = {
+            "contents": [{"parts": [{"text": full_prompt}]}],
+            "generationConfig": {"temperature": temperature},
+        }
+        if expect_json:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+        response = httpx.post(api_url, json=payload, timeout=45.0)
+        response.raise_for_status()
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    def _try_groq() -> str:
+        if not settings.GROQ_API_KEY:
+            raise Exception("GROQ_API_KEY not configured")
+        response = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": temperature,
+                **({"response_format": {"type": "json_object"}} if expect_json else {}),
+            },
+            timeout=45.0,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    def _try_xai() -> str:
+        if not settings.XAI_API_KEY:
+            raise Exception("XAI_API_KEY not configured")
+        response = httpx.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-2-latest",
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": temperature,
+            },
+            timeout=45.0,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    providers = [
+        ("gemini-2.5-flash", _try_gemini),
+        ("groq-llama-3.3-70b", _try_groq),
+        ("xai-grok-2", _try_xai),
+    ]
+    last_error: Exception | None = None
+    for name, fn in providers:
+        try:
+            text = fn()
+            if not (text or "").strip():
+                raise Exception(f"{name} returned empty response")
+            logger.info(f"[{caller}] {name} success ({len(text)} chars)")
+            return text
+        except httpx.HTTPStatusError as e:
+            last_error = e
+            logger.warning(
+                f"[{caller}] {name} HTTP {e.response.status_code}; falling back. "
+                f"Body: {e.response.text[:200]}"
+            )
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[{caller}] {name} failed: {e}; falling back.")
+
+    raise Exception(f"All LLM providers failed: {last_error}")
+
+
 def generate_social_post(
     business_name: str,
     niche: str,
@@ -17,6 +121,9 @@ def generate_social_post(
     platform: str,
     topic: str,
     website_context: str | None = None,
+    seo_keywords: list[str] | None = None,
+    primary_keyword: str = "",
+    blog_url: str = "",
 ) -> dict:
     """
     Generate a social media post using Google Gemini AI via direct REST API.
@@ -64,6 +171,25 @@ def generate_social_post(
     else:
         website_section = ""
 
+    # SEO-mode section: inject primary + secondary keywords
+    seo_section = ""
+    if primary_keyword or seo_keywords:
+        kw_list = [k for k in ([primary_keyword] + (seo_keywords or [])) if k]
+        seo_section = (
+            "SEO MODE — integrate these target keywords naturally into the content "
+            "(do not stuff, weave them in grammatically):\n"
+            f"- Primary keyword: {primary_keyword or '(none)'}\n"
+            f"- Secondary keywords: {', '.join(seo_keywords or [])}\n"
+        )
+
+    # Backlink section
+    backlink_section = ""
+    if blog_url:
+        backlink_section = (
+            f"BACKLINK — end the CONTENT with a short CTA line that includes this URL verbatim: {blog_url}\n"
+            "Example CTA styles: 'Read more →', 'Full guide:', 'Learn more:'.\n"
+        )
+
     prompt = f"""You are a social media marketing expert. Generate a {platform} post for the following business.
 
 CRITICAL: If website information is provided below, YOU MUST incorporate relevant details from it into the post content.
@@ -78,6 +204,10 @@ Topic/Theme: {topic}
 
 {website_section}
 
+{seo_section}
+
+{backlink_section}
+
 Platform Guidelines: {platform_guidelines.get(platform, platform_guidelines['facebook'])}
 
 INSTRUCTIONS:
@@ -85,6 +215,7 @@ INSTRUCTIONS:
 - If website context is provided, ensure the post aligns with and references the business information
 - Make the post specific to the business, not generic
 - Generate post content and relevant hashtags separately
+- If SEO keywords are provided, weave them into the CONTENT naturally and include them as hashtags
 
 Respond in this exact format:
 CONTENT:
@@ -94,53 +225,48 @@ HASHTAGS:
 [Your hashtags here, including any preferred: {hashtags}]
 """
 
-    # Use direct REST API - most reliable method
-    # Using gemini-2.5-flash which is fast and reliable
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt}
-                ]
-            }
-        ]
-    }
-
-    try:
-        response = httpx.post(
-            api_url,
-            json=payload,
-            timeout=30.0
-        )
-        response.raise_for_status()
-
-        result = response.json()
-
-        # Extract text from response
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-
-        content = ""
-        generated_hashtags = ""
-
+    def _parse(text: str) -> tuple[str, str]:
         if "CONTENT:" in text and "HASHTAGS:" in text:
             parts = text.split("HASHTAGS:")
-            content = parts[0].replace("CONTENT:", "").strip()
-            generated_hashtags = parts[1].strip()
-        else:
-            content = text.strip()
+            return parts[0].replace("CONTENT:", "").strip(), parts[1].strip()
+        return text.strip(), ""
 
-        logger.info(f"Successfully generated {platform} post for {business_name} (website_context: {bool(has_website_context)})")
+    def _post_process(content: str, generated_hashtags: str) -> dict:
+        if blog_url and blog_url not in content:
+            content = f"{content.rstrip()}\n\nRead more → {blog_url}"
+        if seo_keywords or primary_keyword:
+            def _to_tag(term: str) -> str:
+                parts_ = [p for p in "".join(
+                    c if c.isalnum() or c.isspace() else " " for c in term
+                ).split() if p]
+                return "#" + "".join(p.capitalize() for p in parts_) if parts_ else ""
+            seo_tags = [t for t in [_to_tag(primary_keyword)] + [_to_tag(k) for k in (seo_keywords or [])] if t]
+            existing = generated_hashtags.lower()
+            missing = [t for t in seo_tags if t.lower() not in existing]
+            if missing:
+                generated_hashtags = (generated_hashtags + " " + " ".join(missing)).strip()
         return {"content": content, "hashtags": generated_hashtags}
 
-    except httpx.HTTPStatusError as e:
-        error_body = e.response.text
-        logger.error(f"Gemini API error for {business_name}: {e.response.status_code}")
-        raise Exception(f"Gemini API error: {e.response.status_code} - {error_body}")
+    try:
+        text = call_llm_with_fallback(
+            prompt,
+            system="You are a social media marketing expert. Follow the requested response format exactly.",
+            temperature=0.7,
+            caller=f"social-{platform}",
+        )
     except Exception as e:
-        logger.error(f"Failed to generate content for {business_name}: {str(e)}")
-        raise Exception(f"Failed to generate content: {str(e)}")
+        logger.error(f"All LLM providers failed for {business_name}: {e}")
+        raise Exception(f"Failed to generate content: {e}")
+
+    content, generated_hashtags = _parse(text)
+    if not content.strip():
+        raise Exception("LLM returned empty content")
+    result = _post_process(content, generated_hashtags)
+    logger.info(
+        f"Successfully generated {platform} post for {business_name} "
+        f"(website_context: {bool(has_website_context)}, seo_mode: {bool(seo_keywords or primary_keyword)})"
+    )
+    return result
 
 
 import time

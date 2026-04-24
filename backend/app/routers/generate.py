@@ -8,6 +8,7 @@ from app.models.user import User
 from app.models.business_config import BusinessConfig
 from app.models.business_image import BusinessImage
 from app.models.wallet import Wallet, UsageLog
+from app.models.seo_save import SeoSave
 from app.schemas.post import GenerateRequest, GenerateResponse
 from app.dependencies import get_current_user
 from app.services.ai import generate_social_post, generate_image_from_prompt
@@ -62,6 +63,46 @@ def generate_post(
     else:
         logger.info(f"No website context for user {current_user.id} - post will be generated without website data")
 
+    # SEO mode: resolve primary + top-5 secondary keywords from a saved brief
+    primary_keyword = ""
+    seo_keywords: list[str] = []
+    if data.seo_mode:
+        brief_row = None
+        if data.seo_save_id:
+            brief_row = (
+                db.query(SeoSave)
+                .filter(
+                    SeoSave.id == data.seo_save_id,
+                    SeoSave.user_id == current_user.id,
+                    SeoSave.type == "brief",
+                )
+                .first()
+            )
+        else:
+            brief_row = (
+                db.query(SeoSave)
+                .filter(
+                    SeoSave.user_id == current_user.id,
+                    SeoSave.type == "brief",
+                )
+                .order_by(SeoSave.updated_at.desc())
+                .first()
+            )
+        if brief_row:
+            try:
+                payload = json.loads(brief_row.data or "{}")
+                primary_keyword = str(payload.get("primary_keyword", "") or "").strip()
+                raw_secondary = payload.get("secondary_keywords", []) or []
+                seo_keywords = [str(k).strip() for k in raw_secondary if str(k).strip()][:5]
+                logger.info(
+                    f"SEO mode: using brief {brief_row.id} — primary='{primary_keyword}', "
+                    f"secondary={len(seo_keywords)} keywords"
+                )
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse brief {brief_row.id} for SEO mode: {e}")
+        else:
+            logger.info(f"SEO mode requested but no brief found for user {current_user.id}")
+
     # Generate post using AI with website context
     result = generate_social_post(
         business_name=config.business_name,
@@ -74,6 +115,9 @@ def generate_post(
         platform=data.platform,
         topic=data.topic,
         website_context=config.website_context,
+        seo_keywords=seo_keywords,
+        primary_keyword=primary_keyword,
+        blog_url=(data.blog_url or "").strip(),
     )
 
     # Handle image option
@@ -123,4 +167,6 @@ def generate_post(
         hashtags=result["hashtags"],
         image_url=image_url,
         website_context_used=website_context_used,
+        seo_keywords_used=([primary_keyword] + seo_keywords) if (primary_keyword or seo_keywords) else [],
+        primary_keyword=primary_keyword or None,
     )
