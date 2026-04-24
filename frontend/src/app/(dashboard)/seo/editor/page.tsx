@@ -571,6 +571,7 @@ function SEOEditorContent() {
                             relatedKeywords: relatedKeywords
                         }}
                         onMetaChange={(m) => {
+                            hasUserEditedRef.current = true;
                             setMetaTitle(m.title);
                             setMetaDesc(m.description);
                             if (m.focusKeyword !== undefined) setFocusKeyword(m.focusKeyword);

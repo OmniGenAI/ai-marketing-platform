@@ -116,6 +116,7 @@ interface SEOBriefResponse {
   serp_preview: { title: string; url: string; description: string };
   recommendations: string[];
   draft_score?: DraftScore;
+  save_id?: string | null;
 }
 
 const WORD_COUNT_OPTIONS = [
@@ -339,6 +340,8 @@ function SEOBriefContent() {
 
   const [isLoading, setIsLoading] = useState(!!savedBriefId);
   const [brief, setBrief] = useState<SEOBriefResponse | null>(null);
+  // Tracks the row id this brief is persisted to, so re-generating updates in place.
+  const [currentSaveId, setCurrentSaveId] = useState<string | null>(savedBriefId);
   const [activeTab, setActiveTab] = useState<TabId>("outline");
   const [showAllNlp, setShowAllNlp] = useState(false);
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -352,6 +355,7 @@ function SEOBriefContent() {
         const briefData = res.data.data as SEOBriefResponse;
         setBrief(briefData);
         setTopic(briefData.topic || "");
+        setCurrentSaveId(res.data.id);
         setActiveTab(briefData.draft_score ? "draft" : "outline");
         setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
       })
@@ -392,8 +396,6 @@ function SEOBriefContent() {
     if (!topic.trim()) { toast.error("Please enter a topic"); return; }
     setIsLoading(true);
     setBrief(null);
-    // Clear saved brief ID if user generates a new one
-    if (savedBriefId) window.history.replaceState({}, "", "/seo/brief");
     try {
       const res = await api.post<SEOBriefResponse>("/api/seo/brief", {
         topic: topic.trim(),
@@ -402,9 +404,17 @@ function SEOBriefContent() {
         competitor_urls: brandKitCompetitors,
         content_draft: "",
         ...(businessContext && { business_context: businessContext }),
+        ...(currentSaveId ? { save_id: currentSaveId } : {}),
       }, { timeout: 180_000 }); // 3 min — scraping + AI takes time
       setBrief(res.data);
       setActiveTab(res.data.draft_score ? "draft" : "outline");
+      // Persist the id in the URL so reloads / "open" from list land back here.
+      if (res.data.save_id && res.data.save_id !== savedBriefId) {
+        setCurrentSaveId(res.data.save_id);
+        router.replace(`/seo/brief?id=${res.data.save_id}`, { scroll: false });
+      } else if (res.data.save_id) {
+        setCurrentSaveId(res.data.save_id);
+      }
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
@@ -1018,7 +1028,7 @@ function SEOBriefContent() {
                       value={topic}
                       onChange={(e) => setTopic(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
-                      disabled={!!savedBriefId}
+                      disabled={false}
                       className="pl-9 h-11 text-sm bg-background border-muted-foreground/20 focus-visible:ring-primary/20 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
                     />
                   </div>
@@ -1027,7 +1037,7 @@ function SEOBriefContent() {
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <Label className="text-sm font-medium tracking-tight text-foreground/80">Target Word Count</Label>
-                    <Select value={wordCount} onValueChange={setWordCount} disabled={!!savedBriefId}>
+                    <Select value={wordCount} onValueChange={setWordCount} disabled={false}>
                       <SelectTrigger className="h-10 text-sm bg-background/50 border-muted-foreground/20 disabled:opacity-60 disabled:cursor-not-allowed">
                         <SelectValue />
                       </SelectTrigger>
@@ -1040,7 +1050,7 @@ function SEOBriefContent() {
                   </div>
                   <div className="space-y-2">
                     <Label className="text-sm font-medium tracking-tight text-foreground/80">Country</Label>
-                    <Select value={country || "global"} onValueChange={(v) => setCountry(v === "global" ? "" : v)} disabled={!!savedBriefId}>
+                    <Select value={country || "global"} onValueChange={(v) => setCountry(v === "global" ? "" : v)} disabled={false}>
                       <SelectTrigger className="h-10 text-sm bg-background/50 border-muted-foreground/20 disabled:opacity-60 disabled:cursor-not-allowed">
                         <SelectValue placeholder="Global" />
                       </SelectTrigger>
@@ -1056,13 +1066,13 @@ function SEOBriefContent() {
               <div className="p-6 pt-2 space-y-2">
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !topic.trim() || !!savedBriefId}
+                  disabled={isLoading || !topic.trim()}
                   className="w-full h-12 font-semibold gap-2 shadow-md hover:shadow-lg transition-all bg-violet-500 hover:bg-violet-600 text-white disabled:bg-muted disabled:text-muted-foreground"
                 >
                   {isLoading ? (
                     <><Loader2 className="h-4 w-4 animate-spin" /> Generating Magic...</>
-                  ) : savedBriefId ? (
-                    <><Brain className="h-4 w-4" /> Viewing Saved Brief</>
+                  ) : currentSaveId ? (
+                    <><Brain className="h-4 w-4" /> Regenerate Brief</>
                   ) : (
                     <><Brain className="h-4 w-4" /> Generate AI Brief</>
                   )}
@@ -1102,12 +1112,23 @@ function SEOBriefContent() {
                   </Button>
                 )}
                 {savedBriefId && (
-                  <Link
-                    href="/seo/brief"
-                    className="block w-full text-center text-xs font-medium text-primary hover:underline"
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      sessionStorage.removeItem("blog_prefill");
+                      setTopic("");
+                      setWordCount("1500");
+                      setCountry("");
+                      setBrief(null);
+                      setCurrentSaveId(null);
+                      setActiveTab("outline");
+                      setShowAllNlp(false);
+                      router.push("/seo/brief");
+                    }}
+                    className="w-full"
                   >
                     ← Generate New Brief
-                  </Link>
+                  </Button>
                 )}
               </div>
             </div>

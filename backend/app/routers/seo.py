@@ -66,6 +66,7 @@ class SEOBriefRequest(BaseModel):
     competitor_urls: list[str] = []
     content_draft: str = ""    # optional existing draft to score against the brief
     business_context: BusinessContext | None = None  # auto-injected from brand kit
+    save_id: str | None = None  # when present, UPDATE that save instead of inserting
 
 
 class MetaSuggestion(BaseModel):
@@ -127,6 +128,7 @@ class SEOBriefResponse(BaseModel):
     serp_preview: dict
     recommendations: list[str]
     draft_score: DraftScore | None = None  # present only when content_draft was supplied
+    save_id: str | None = None  # id of the row this brief was persisted to (for UPSERT)
 
 
 class SEOScoreRequest(BaseModel):
@@ -308,6 +310,126 @@ def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
         prompt = prompt[:_GROQ_MAX_CHARS] + "\n\n[...content truncated for fallback model...]"
         logger.warning("[LLM] Prompt truncated to %d chars for Groq fallback", _GROQ_MAX_CHARS)
     return _groq_call(prompt)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/seo/keywords — lightweight keyword + hashtag extraction
+# Used by Reel/Social to enrich captions without the full brief pipeline.
+# ---------------------------------------------------------------------------
+
+
+class SEOKeywordsRequest(BaseModel):
+    topic: str
+
+
+class SEOKeywordsResponse(BaseModel):
+    primary_keyword: str
+    secondary_keywords: list[str]
+    hashtags: list[str]   # CamelCase, no leading '#'
+
+
+def _slug_to_hashtag(term: str) -> str:
+    """Convert 'content marketing tips' -> 'ContentMarketingTips' for hashtag use."""
+    parts = re.findall(r"[A-Za-z0-9]+", term)
+    return "".join(p.capitalize() for p in parts) if parts else ""
+
+
+def extract_seo_keywords(topic: str, use_serp_grounding: bool = True) -> dict:
+    """Extract primary keyword + 5 secondary keywords + 5 hashtags from a topic.
+
+    Used by `/api/seo/keywords` and by the Reel router (before script generation).
+    Always returns a populated dict thanks to rule-based fallbacks.
+
+    When `use_serp_grounding` is True and SERPER_API_KEY is configured, we fetch
+    the top-10 Google SERP titles/snippets for the topic and feed them to the
+    LLM so keyword extraction is grounded in what actually ranks — instead of
+    the LLM hallucinating plausible but unranked phrases. Adds ~1s and costs
+    one Serper call. Falls through silently when Serper is unavailable.
+    """
+    topic = topic.strip()
+    if not topic:
+        return {"primary_keyword": "", "secondary_keywords": [], "hashtags": []}
+
+    serp_context = ""
+    if use_serp_grounding:
+        try:
+            serp = _serper_organic(topic, num=10)
+            if serp:
+                lines = [
+                    f"- {s['title']}" + (f" — {s['snippet'][:120]}" if s.get("snippet") else "")
+                    for s in serp[:10]
+                ]
+                serp_context = (
+                    "\nHere are the top Google search results currently ranking for this topic.\n"
+                    "Use them to ground your keyword choices in what real users click on:\n"
+                    + "\n".join(lines)
+                    + "\n"
+                )
+        except Exception as exc:
+            logger.warning("[KEYWORDS] SERP grounding skipped: %s", exc)
+
+    prompt = (
+        "You extract SEO keywords from a content topic. "
+        "Return JSON with EXACTLY this shape and nothing else:\n"
+        '{"primary_keyword": string, "secondary_keywords": [5 short strings]}\n\n'
+        "Rules:\n"
+        "- primary_keyword is the single best search phrase for the topic (2-5 words).\n"
+        "- secondary_keywords are 5 related long-tail search phrases (2-5 words each).\n"
+        "- Lowercase, no punctuation except spaces.\n"
+        "- Prefer phrases that echo the SERP titles below — those are proven to rank.\n"
+        f"{serp_context}\n"
+        f"Topic: {topic}"
+    )
+
+    raw = _gemini_call(prompt, max_retries=2)
+    primary, secondary = "", []
+    if raw:
+        try:
+            m = re.search(r"\{.*\}", raw, re.S)
+            parsed = json.loads(m.group(0)) if m else {}
+            primary = str(parsed.get("primary_keyword", "")).strip()
+            sec = parsed.get("secondary_keywords", []) or []
+            secondary = [str(s).strip() for s in sec if str(s).strip()][:5]
+        except Exception as exc:
+            logger.warning("[KEYWORDS] Parse failed: %s", exc)
+
+    if not primary:
+        primary = topic.lower()
+    if not secondary:
+        words = [w for w in re.findall(r"[A-Za-z0-9]+", topic.lower()) if len(w) > 2]
+        base = " ".join(words[:3]) if words else topic.lower()
+        secondary = [
+            f"{base} tips",
+            f"{base} guide",
+            f"best {base}",
+            f"{base} examples",
+            f"{base} 2026",
+        ]
+
+    tag_pool = [primary] + secondary
+    hashtags: list[str] = []
+    seen = set()
+    for t in tag_pool:
+        tag = _slug_to_hashtag(t)
+        if tag and tag.lower() not in seen:
+            seen.add(tag.lower())
+            hashtags.append(tag)
+        if len(hashtags) >= 5:
+            break
+
+    return {
+        "primary_keyword": primary,
+        "secondary_keywords": secondary,
+        "hashtags": hashtags,
+    }
+
+
+@router.post("/keywords", response_model=SEOKeywordsResponse)
+def generate_keywords(data: SEOKeywordsRequest):
+    if not data.topic.strip():
+        raise HTTPException(status_code=400, detail="Topic is required")
+    result = extract_seo_keywords(data.topic)
+    return SEOKeywordsResponse(**result)
 
 
 # ---------------------------------------------------------------------------
@@ -819,14 +941,35 @@ def generate_seo_brief(
         draft_score=draft_score,
     )
     try:
-        save = SeoSave(
-            user_id=current_user.id,
-            type="brief",
-            title=data.topic.strip() or "Untitled",
-            data=json.dumps(result.model_dump()),
-        )
-        db.add(save)
-        db.commit()
+        existing = None
+        if data.save_id:
+            existing = (
+                db.query(SeoSave)
+                .filter(SeoSave.id == data.save_id,
+                        SeoSave.user_id == current_user.id,
+                        SeoSave.type == "brief")
+                .first()
+            )
+        if existing:
+            existing.title = data.topic.strip() or "Untitled"
+            existing.data = json.dumps(result.model_dump())
+            db.commit()
+            db.refresh(existing)
+            result.save_id = existing.id
+        else:
+            save = SeoSave(
+                user_id=current_user.id,
+                type="brief",
+                title=data.topic.strip() or "Untitled",
+                data=json.dumps(result.model_dump()),
+            )
+            db.add(save)
+            db.commit()
+            db.refresh(save)
+            result.save_id = save.id
+            # Re-serialise with save_id so the persisted payload matches the response.
+            save.data = json.dumps(result.model_dump())
+            db.commit()
     except Exception as exc:  # non-critical — never block the response
         logger.warning("[BRIEF] Auto-save failed: %s", exc)
         db.rollback()
