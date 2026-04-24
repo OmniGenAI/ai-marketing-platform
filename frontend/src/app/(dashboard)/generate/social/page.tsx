@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -13,6 +13,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -34,6 +43,8 @@ import {
   Image as ImageIcon,
   Send,
   Wand2,
+  Search,
+  Link as LinkIcon,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useSubscription } from "@/hooks/use-subscription";
@@ -52,8 +63,8 @@ export default function GeneratePage() {
     refresh: refreshSubscription,
   } = useSubscription();
 
-  const [platform, setPlatform] = useState("facebook");
   const [tone, setTone] = useState("professional");
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(["facebook"]);
   const [topic, setTopic] = useState("");
   const [topicError, setTopicError] = useState("");
   const [imageOption, setImageOption] = useState<ImageOption>("upload");
@@ -63,9 +74,64 @@ export default function GeneratePage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+
+  const togglePlatform = (p: string) => {
+    setSelectedPlatforms(prev => 
+      prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]
+    );
+  };
+
+  const handlePublishClick = () => {
+    setIsPublishModalOpen(true);
+  };
+
+  const handleFinalPublish = async () => {
+    if (selectedPlatforms.length === 0) {
+      toast.error("Please select at least one platform");
+      return;
+    }
+    setIsPublishModalOpen(false);
+    handlePostNow();
+  };
+
   const [isDragging, setIsDragging] = useState(false);
+  const [seoMode, setSeoMode] = useState(false);
+  const [seoSaveId, setSeoSaveId] = useState<string>("");
+  const [blogUrl, setBlogUrl] = useState("");
+  const [savedBriefs, setSavedBriefs] = useState<Array<{ id: string; title: string; primary_keyword?: string }>>([]);
+  const [seoKeywordsUsed, setSeoKeywordsUsed] = useState<string[]>([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.get<Array<{ id: string; type: string; title: string; data: Record<string, unknown> }>>(
+          "/api/seo/saves"
+        );
+        const briefs = (res.data || [])
+          .filter((s) => s.type === "brief")
+          .map((s) => ({
+            id: s.id,
+            title: s.title,
+            primary_keyword: (s.data as { primary_keyword?: string })?.primary_keyword,
+          }));
+        setSavedBriefs(briefs);
+      } catch {
+        // silent — SEO mode will fall back to most-recent-brief lookup server-side
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem("social_blog_url") : null;
+    if (saved) setBlogUrl(saved);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") localStorage.setItem("social_blog_url", blogUrl);
+  }, [blogUrl]);
 
   // Get available tones based on plan
   const getAvailableTones = () => {
@@ -171,27 +237,34 @@ export default function GeneratePage() {
     
     try {
       const payload = {
-        platform,
+        platforms: selectedPlatforms,
         tone,
         topic,
         image_option: imageOption,
         uploaded_image_url: imageOption === "upload" ? uploadedImageUrl : null,
+        seo_mode: seoMode,
+        seo_save_id: seoMode && seoSaveId ? seoSaveId : null,
+        blog_url: blogUrl.trim() || null,
       };
       console.log("[Generate] Payload:", payload);
-      
+
       const response = await api.post<GenerateResponse>("/api/generate", payload);
       console.log("[Generate] Response:", response.data);
-      
+
       setGeneratedContent(response.data.content);
       setGeneratedHashtags(response.data.hashtags);
       setGeneratedImageUrl(response.data.image_url);
-      toast.success("Post generated! 1 credit used.");
+      setSeoKeywordsUsed(response.data.seo_keywords_used || []);
+      toast.success(
+        seoMode && (response.data.seo_keywords_used?.length ?? 0) > 0
+          ? `Post generated with ${response.data.seo_keywords_used!.length} SEO keywords! 1 credit used.`
+          : "Post generated! 1 credit used."
+      );
       refreshSubscription();
     } catch (error: unknown) {
       console.error("[Generate] Error:", error);
       const err = error as { response?: { data?: { detail?: string | { msg: string }[] }; status?: number }; message?: string };
       
-      // Log full error details
       if (err.response) {
         console.error("[Generate] Response error:", err.response.status, err.response.data);
       } else if (err.message) {
@@ -231,7 +304,7 @@ export default function GeneratePage() {
         hashtags: generatedHashtags,
         image_url: getDisplayImageUrl(),
         image_option: imageOption,
-        platform,
+        platforms: selectedPlatforms,
         tone,
         status: "draft",
       });
@@ -246,18 +319,16 @@ export default function GeneratePage() {
   const handlePostNow = async () => {
     setIsPublishing(true);
     try {
-      // Create the post
       const createResponse = await api.post("/api/posts", {
         content: generatedContent,
         hashtags: generatedHashtags,
         image_url: getDisplayImageUrl(),
         image_option: imageOption,
-        platform,
+        platforms: selectedPlatforms,
         tone,
         status: "draft",
       });
 
-      // Publish it
       await api.post(`/api/posts/${createResponse.data.id}/publish`);
       toast.success("Post published successfully!");
       router.push("/posts");
@@ -365,47 +436,10 @@ export default function GeneratePage() {
                 Configure what kind of post you want to generate.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>Platform</Label>
-                  <Select value={platform} onValueChange={setPlatform}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="facebook">Facebook</SelectItem>
-                      <SelectItem value="instagram">Instagram</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>
-                    Tone
-                    {isFreePlan && (
-                      <span className="text-xs text-muted-foreground ml-2">
-                        (Upgrade for more options)
-                      </span>
-                    )}
-                  </Label>
-                  <Select value={tone} onValueChange={setTone}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableTones.map((t) => (
-                        <SelectItem key={t.value} value={t.value}>
-                          {t.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
+            <CardContent className="space-y-6">
               <div className="space-y-2">
                 <Label htmlFor="topic">
-                  Topic <span className="text-red-500">*</span>
+                  Post Topic <span className="text-red-500">*</span>
                 </Label>
                 <Textarea
                   id="topic"
@@ -416,64 +450,155 @@ export default function GeneratePage() {
                     if (topicError) setTopicError("");
                   }}
                   rows={3}
-                  className={topicError ? "border-red-500" : ""}
+                  className={topicError ? "border-red-500 focus:ring-red-500" : "focus:ring-primary"}
                 />
                 {topicError && (
                   <p className="text-sm text-red-500">{topicError}</p>
                 )}
               </div>
 
-              <Separator />
-
-              <div className="space-y-3">
-                <Label>Image Option</Label>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant={imageOption === "upload" ? "default" : "outline"}
-                    className="h-auto py-3 flex flex-col gap-1"
-                    onClick={() => {
-                      setImageOption("upload");
-                    }}
-                  >
-                    <ImageIcon className="h-5 w-5" />
-                    <span className="text-xs">Upload Image</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={imageOption === "ai" ? "default" : "outline"}
-                    className="h-auto py-3 flex flex-col gap-1"
-                    onClick={() => {
-                      setImageOption("ai");
-                      setUploadedImageUrl(null);
-                    }}
-                  >
-                    <Wand2 className="h-5 w-5" />
-                    <span className="text-xs">Generate with AI</span>
-                  </Button>
+              <div className="space-y-4">
+                <Label className="flex items-center justify-between">
+                  Tone
+                  {isFreePlan && (
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
+                      Upgrade for more
+                    </span>
+                  )}
+                </Label>
+                <div className="flex flex-wrap gap-2">
+                  {availableTones.map((t) => (
+                    <button
+                      key={t.value}
+                      type="button"
+                      onClick={() => setTone(t.value)}
+                      className={`px-4 py-2 rounded-full text-xs font-semibold transition-all border ${
+                        tone === t.value
+                          ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                          : "bg-background text-muted-foreground border-input hover:border-primary/50"
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
+              <div className="space-y-3 rounded-xl border border-primary/20 p-4 bg-muted/20 shadow-sm transition-all">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label className="flex items-center gap-2 text-sm font-bold">
+                      <Search className="h-4 w-4 text-primary" />
+                      SEO Mode
+                    </Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Interweave top keywords from your SEO briefs automatically.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={seoMode}
+                    onClick={() => setSeoMode(!seoMode)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                      seoMode ? "bg-primary" : "bg-muted-foreground/30"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow-lg ring-0 transition-transform ${
+                        seoMode ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {seoMode && (
+                  <div className="space-y-3 pt-3 animate-in fade-in slide-in-from-top-2 duration-200">
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase font-bold text-muted-foreground">Select Brief Source</Label>
+                      <Select
+                        value={seoSaveId || "latest"}
+                        onValueChange={(v) => setSeoSaveId(v === "latest" ? "" : v)}
+                      >
+                        <SelectTrigger className="bg-background">
+                          <SelectValue placeholder="Use most recent brief" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="latest">Most recent brief (auto)</SelectItem>
+                          {savedBriefs.map((b) => (
+                            <SelectItem key={b.id} value={b.id}>
+                              {b.primary_keyword ? `${b.primary_keyword} — ` : ""}
+                              {b.title || "Untitled"}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2 group">
+                <Label htmlFor="blog-url" className="flex items-center gap-2">
+                  <LinkIcon className="h-3.5 w-3.5" />
+                  Backlink URL <span className="text-[10px] text-muted-foreground font-normal">(Optional)</span>
+                </Label>
+                <Input
+                  id="blog-url"
+                  type="url"
+                  placeholder="https://yourblog.com/post-slug"
+                  value={blogUrl}
+                  onChange={(e) => setBlogUrl(e.target.value)}
+                />
+              </div>
+
+              <Separator />
+
+              <div className="grid grid-cols-2 gap-3">
+                <Button
+                  type="button"
+                  variant={imageOption === "upload" ? "default" : "outline"}
+                  className="h-auto py-3 flex flex-col gap-1 transition-all"
+                  onClick={() => setImageOption("upload")}
+                >
+                  <ImageIcon className="h-5 w-5" />
+                  <span className="text-xs font-bold uppercase tracking-tight">Upload</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant={imageOption === "ai" ? "default" : "outline"}
+                  className="h-auto py-3 flex flex-col gap-1 transition-all"
+                  onClick={() => {
+                    setImageOption("ai");
+                    setUploadedImageUrl(null);
+                  }}
+                >
+                  <Wand2 className="h-5 w-5" />
+                  <span className="text-xs font-bold uppercase tracking-tight">AI Generated</span>
+                </Button>
+              </div>
+
               {imageOption === "upload" && (
-                <div className="space-y-2">
-                  <Label>Upload Image</Label>
+                <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-200">
                   {uploadedImageUrl ? (
-                    <div className="space-y-3">
+                    <div className="relative group">
                       <div className="relative w-full h-48 rounded-lg overflow-hidden border">
                         <img
                           src={uploadedImageUrl}
                           alt="Uploaded"
                           className="w-full h-full object-cover"
                         />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setUploadedImageUrl(null)}
+                          >
+                            Replace Image
+                          </Button>
+                        </div>
                       </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setUploadedImageUrl(null)}
-                      >
-                        Remove &amp; Replace
-                      </Button>
                     </div>
                   ) : (
                     <div
@@ -481,32 +606,26 @@ export default function GeneratePage() {
                       onDragLeave={handleDragLeave}
                       onDrop={handleDrop}
                       onClick={() => !isUploading && document.getElementById("image-upload")?.click()}
-                      className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+                      className={`border-2 border-dashed rounded-lg p-6 text-center transition-all ${
                         isDragging
-                          ? "border-primary bg-primary/5"
-                          : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30"
+                          ? "border-primary bg-primary/10"
+                          : "border-muted-foreground/20 hover:border-primary/40 hover:bg-muted/40"
                       } ${isUploading ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
                     >
                       {isUploading ? (
-                        <div className="flex flex-col items-center gap-3">
-                          <RefreshCw className="h-10 w-10 text-primary animate-spin" />
-                          <p className="text-sm font-medium">Uploading...</p>
+                        <div className="flex flex-col items-center gap-2">
+                          <RefreshCw className="h-8 w-8 text-primary animate-spin" />
+                          <p className="text-xs font-bold">Uploading...</p>
                         </div>
                       ) : (
-                        <div className="flex flex-col items-center gap-3">
-                          <div className={`p-3 rounded-full transition-colors ${
-                            isDragging ? "bg-primary/10" : "bg-muted"
-                          }`}>
-                            <ImageIcon className={`h-8 w-8 transition-colors ${
-                              isDragging ? "text-primary" : "text-muted-foreground"
-                            }`} />
-                          </div>
+                        <div className="flex flex-col items-center gap-2">
+                          <ImageIcon className="h-6 w-6 text-muted-foreground" />
                           <div>
-                            <p className="text-sm font-medium">
-                              {isDragging ? "Drop to upload" : "Click to upload or drag and drop"}
+                            <p className="text-xs font-bold">
+                              {isDragging ? "Drop here" : "Upload Asset"}
                             </p>
-                            <p className="text-xs text-muted-foreground mt-1">
-                              PNG, JPG, GIF, WebP or MP4 (max 50MB)
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              JPEG • PNG • MP4
                             </p>
                           </div>
                         </div>
@@ -527,7 +646,7 @@ export default function GeneratePage() {
               <Button
                 onClick={handleGenerate}
                 disabled={isGenerating || creditsRemaining === 0}
-                className="w-full gap-2"
+                className="w-full h-12 text-base font-bold gap-2 shadow-sm transition-all"
               >
                 {isGenerating ? (
                   <>
@@ -549,7 +668,11 @@ export default function GeneratePage() {
           <CardHeader>
             <CardTitle className="flex items-center justify-between">
               Generated Post
-              <Badge variant="secondary">{platform}</Badge>
+              <div className="flex gap-1">
+                {selectedPlatforms.map(p => (
+                  <Badge key={p} variant="secondary" className="capitalize">{p}</Badge>
+                ))}
+              </div>
             </CardTitle>
             <CardDescription>
               Review and edit the AI-generated content below.
@@ -558,6 +681,22 @@ export default function GeneratePage() {
           <CardContent className="space-y-4">
             {generatedContent ? (
               <>
+                {seoKeywordsUsed.length > 0 && (
+                  <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 space-y-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-primary">
+                      <Search className="h-3.5 w-3.5" />
+                      SEO keywords injected
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {seoKeywordsUsed.filter(Boolean).map((k) => (
+                        <Badge key={k} variant="secondary" className="text-xs">
+                          {k}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {getDisplayImageUrl() && (
                   <div className="rounded-lg overflow-hidden border">
                     <img
@@ -626,7 +765,7 @@ export default function GeneratePage() {
                   </Button>
                   <Button
                     size="sm"
-                    onClick={handlePostNow}
+                    onClick={handlePublishClick}
                     disabled={isPublishing}
                     className="gap-1 ml-auto"
                   >
@@ -638,7 +777,7 @@ export default function GeneratePage() {
                     ) : (
                       <>
                         <Send className="h-3 w-3" />
-                        Post Now
+                        Publish Now
                       </>
                     )}
                   </Button>
@@ -652,6 +791,57 @@ export default function GeneratePage() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={isPublishModalOpen} onOpenChange={setIsPublishModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Select Platforms</DialogTitle>
+            <DialogDescription>
+              Choose which social media accounts you want to publish this post to.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="flex items-center space-x-3 space-y-0 rounded-md border p-4">
+              <Checkbox 
+                id="fb-check" 
+                checked={selectedPlatforms.includes("facebook")}
+                onCheckedChange={() => togglePlatform("facebook")}
+              />
+              <div className="flex-1 space-y-1 leading-none">
+                <Label htmlFor="fb-check" className="text-sm font-medium leading-none cursor-pointer">
+                  Facebook
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Publish to your connected Facebook Page.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-3 space-y-0 rounded-md border p-4">
+              <Checkbox 
+                id="ig-check" 
+                checked={selectedPlatforms.includes("instagram")}
+                onCheckedChange={() => togglePlatform("instagram")}
+              />
+              <div className="flex-1 space-y-1 leading-none">
+                <Label htmlFor="ig-check" className="text-sm font-medium leading-none cursor-pointer">
+                  Instagram
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Publish to your connected Instagram Business Account.
+                </p>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsPublishModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleFinalPublish} disabled={isPublishing}>
+              Confirm & Publish
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
