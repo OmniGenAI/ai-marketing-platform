@@ -20,6 +20,7 @@ class Reel(Base):
     duration_target: Mapped[int] = mapped_column(Integer, default=30)
     script: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashtags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_keyword: Mapped[str | None] = mapped_column(String(200), nullable=True)
     audio_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
