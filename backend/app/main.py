@@ -10,7 +10,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose
 
 
 def seed_default_plans():
@@ -206,6 +206,7 @@ app.include_router(upload.router)
 app.include_router(reels.router)
 app.include_router(seo.router)
 app.include_router(blog.router)
+app.include_router(repurpose.router)
 
 
 @app.get("/")

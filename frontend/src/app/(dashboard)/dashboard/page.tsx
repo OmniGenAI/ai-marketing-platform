@@ -189,15 +189,14 @@ export default function DashboardPage() {
                           post.status === "published"
                             ? "default"
                             : post.status === "failed"
-                            ? "destructive"
-                            : "secondary"
+                              ? "destructive"
+                              : "secondary"
                         }
                         className="text-xs"
                       >
                         {post.status}
                       </Badge>
-                    </div>
-                  </div>
+                    </div>                  </div>
                 ))}
                 {posts.length > 3 && (
                   <Link href="/posts">
