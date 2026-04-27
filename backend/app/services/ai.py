@@ -24,20 +24,37 @@ def call_llm_with_fallback(
         sys_msg = sys_msg + "\n\nReturn ONLY valid JSON. No markdown fences, no commentary."
 
     def _try_gemini() -> str:
+        # Use systemInstruction (separate field, not concatenated) so the
+        # system block becomes a stable prefix Gemini's implicit prompt cache
+        # can hash and reuse on follow-up calls within ~5 min.
         api_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
             f"?key={settings.GOOGLE_GEMINI_API_KEY}"
         )
-        full_prompt = f"{sys_msg}\n\n{prompt}" if sys_msg else prompt
         payload: dict = {
-            "contents": [{"parts": [{"text": full_prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": temperature},
         }
+        if sys_msg:
+            payload["systemInstruction"] = {"parts": [{"text": sys_msg}]}
         if expect_json:
             payload["generationConfig"]["responseMimeType"] = "application/json"
         response = httpx.post(api_url, json=payload, timeout=45.0)
         response.raise_for_status()
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        data = response.json()
+        # Log cache stats so we can verify the prefix is actually being reused.
+        usage = data.get("usageMetadata") or {}
+        cached = usage.get("cachedContentTokenCount") or 0
+        prompt_tok = usage.get("promptTokenCount") or 0
+        if cached:
+            logger.info(
+                f"[{caller}] gemini cache HIT: {cached}/{prompt_tok} prompt tokens cached"
+            )
+        elif prompt_tok:
+            logger.debug(
+                f"[{caller}] gemini cache MISS: {prompt_tok} prompt tokens (none cached)"
+            )
+        return data["candidates"][0]["content"]["parts"][0]["text"]
 
     def _try_groq() -> str:
         if not settings.GROQ_API_KEY:
@@ -271,49 +288,50 @@ HASHTAGS:
 
 import time
 
-def generate_image_from_prompt(topic: str, business_name: str, niche: str) -> str | None:
-    """
-    Generate an image using Gemini 2.5 Flash Image model.
-    Falls back to Pexels stock images on rate limit or failure.
-    """
-    # Using the fast and efficient gemini-2.5-flash-image model
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
 
-    prompt = (
+def _build_image_prompt(topic: str, business_name: str, niche: str) -> str:
+    return (
         f"Professional photorealistic social media marketing photo for {business_name}, a {niche} business. Theme: {topic}. "
         "High quality, 4k resolution, engaging, suitable for marketing. "
         "Ensure absolute physical realism, natural lighting, and correct gravity. "
         "IMPORTANT: No floating objects, no extra limbs, no unrealistic physics, no distorted proportions."
     )
 
+
+def _generate_image_gemini(prompt: str) -> str | None:
+    """Primary provider: Gemini 3 Pro image preview. Returns data-URI or None."""
+    if not settings.GOOGLE_GEMINI_API_KEY:
+        logger.info("Gemini image: API key missing, skipping")
+        return None
+
+    api_url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-3-pro-image-preview:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
+    )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["IMAGE"]
-        }
+        "generationConfig": {"responseModalities": ["IMAGE"]},
     }
-
     headers = {"Content-Type": "application/json"}
-    max_retries = 2 # Reduced retries for speed as Flash is usually reliable
+    max_retries = 2
 
-    # Use httpx.Client for connection pooling (faster retries)
     with httpx.Client(timeout=60.0) as client:
         for attempt in range(max_retries):
             try:
                 response = client.post(api_url, headers=headers, json=payload)
-                
-                # 1. Handle Rate Limiting (Free tier allows ~20/day, but can burst)
+
                 if response.status_code == 429:
-                    wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s backoff
-                    logger.warning(f"Rate limited (429). Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                    wait_time = (2 ** attempt) * 2
+                    logger.warning(
+                        f"Gemini image rate limited (429). Waiting {wait_time}s "
+                        f"before retry {attempt + 1}/{max_retries}"
+                    )
                     time.sleep(wait_time)
                     continue
-                
-                # 2. Raise for other HTTP errors (400, 403, 500)
+
                 response.raise_for_status()
                 result = response.json()
 
-                # 3. Safely extract the Base64 image
                 candidates = result.get("candidates", [])
                 if candidates:
                     parts = candidates[0].get("content", {}).get("parts", [])
@@ -323,19 +341,111 @@ def generate_image_from_prompt(topic: str, business_name: str, niche: str) -> st
                             mime_type = inline_data.get("mimeType", "image/jpeg")
                             return f"data:{mime_type};base64,{inline_data['data']}"
 
-                logger.error("API call succeeded, but no image data was found in the response.")
-                break # Break out of loop: this is a structural issue, not a network hiccup
+                logger.error("Gemini image: response had no image data")
+                return None
 
             except httpx.HTTPError as e:
-                logger.error(f"HTTP error on attempt {attempt + 1}: {e}")
-                # Optional: Retry on 500/503 Server Errors just like 429s
-                if getattr(e, 'response', None) and e.response.status_code in [500, 502, 503] and attempt < max_retries - 1:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                logger.error(f"Gemini image HTTP error attempt {attempt + 1}: {e}")
+                if status_code in (500, 502, 503) and attempt < max_retries - 1:
                     time.sleep((2 ** attempt) * 2)
                     continue
-                break # Don't retry on 400 Bad Request or 403 Forbidden
-                
-            except Exception as e:
-                logger.exception(f"Unexpected error during image generation: {e}")
-                break
+                return None
 
+            except Exception as e:
+                logger.exception(f"Gemini image unexpected error: {e}")
+                return None
+
+    return None
+
+
+def _generate_image_openai(prompt: str) -> str | None:
+    """Fallback provider: OpenAI image generation (gpt-image-1 / dall-e-3).
+
+    Requests b64_json so we can return a self-contained data URI (matching
+    Gemini's output shape — no external URL fetch needed downstream).
+    """
+    if not settings.OPENAI_API_KEY:
+        logger.info("OpenAI image: API key missing, skipping fallback")
+        return None
+
+    api_url = "https://api.openai.com/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.OPENAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": 1,
+        "size": settings.OPENAI_IMAGE_SIZE,
+        "response_format": "b64_json",
+    }
+    max_retries = 2
+
+    with httpx.Client(timeout=90.0) as client:
+        for attempt in range(max_retries):
+            try:
+                response = client.post(api_url, headers=headers, json=payload)
+
+                if response.status_code == 429:
+                    wait_time = (2 ** attempt) * 2
+                    logger.warning(
+                        f"OpenAI image rate limited (429). Waiting {wait_time}s "
+                        f"before retry {attempt + 1}/{max_retries}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+
+                response.raise_for_status()
+                result = response.json()
+
+                data = result.get("data", [])
+                if data:
+                    item = data[0]
+                    b64 = item.get("b64_json")
+                    if b64:
+                        return f"data:image/png;base64,{b64}"
+                    url = item.get("url")
+                    if url:
+                        # Some accounts/models only return URLs — pass through.
+                        return url
+
+                logger.error("OpenAI image: response had no image data")
+                return None
+
+            except httpx.HTTPError as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                logger.error(f"OpenAI image HTTP error attempt {attempt + 1}: {e}")
+                if status_code in (500, 502, 503) and attempt < max_retries - 1:
+                    time.sleep((2 ** attempt) * 2)
+                    continue
+                return None
+
+            except Exception as e:
+                logger.exception(f"OpenAI image unexpected error: {e}")
+                return None
+
+    return None
+
+
+def generate_image_from_prompt(topic: str, business_name: str, niche: str) -> str | None:
+    """Generate a marketing image with provider fallback.
+
+    Order: Gemini 3 Pro image preview → OpenAI (gpt-image-1). Returns a data URI
+    (or external URL) on success, None if every provider fails.
+    """
+    prompt = _build_image_prompt(topic, business_name, niche)
+
+    image = _generate_image_gemini(prompt)
+    if image:
+        return image
+
+    logger.warning("Gemini image generation failed — falling back to OpenAI")
+    image = _generate_image_openai(prompt)
+    if image:
+        logger.info("OpenAI fallback succeeded")
+        return image
+
+    logger.error("All image providers failed (Gemini, OpenAI)")
     return None

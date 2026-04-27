@@ -90,11 +90,11 @@ export function HookVariationsCard({ hooks, onUseInLinkedIn, onUseInTwitter }: P
                   )}
                 </div>
               </div>
-              <p className="text-sm leading-relaxed mt-1.5 flex items-center gap-2">
+              <p className="text-sm leading-relaxed mt-1.5 ">
                 {h.text}
                 <button
                   type="button"
-                  className="ml-auto opacity-0 group-hover:opacity-100 transition text-muted-foreground hover:text-foreground"
+                  className="ml-4 opacity-0 group-hover:opacity-100 transition text-muted-foreground hover:text-foreground"
                   onClick={() => copy(h.text, meta.label)}
                   title="Copy hook"
                 >

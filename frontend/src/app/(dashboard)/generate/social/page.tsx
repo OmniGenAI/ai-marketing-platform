@@ -38,7 +38,6 @@ import {
   Copy,
   Save,
   RefreshCw,
-  Coins,
   AlertTriangle,
   Image as ImageIcon,
   Send,
@@ -347,11 +346,6 @@ export default function GeneratePage() {
     toast.success("Copied to clipboard!");
   };
 
-  const formatCredits = (credits: number) => {
-    if (credits === Infinity || credits === -1) return "Unlimited";
-    return credits.toString();
-  };
-
   const getDisplayImageUrl = () => {
     if (imageOption === "ai" && generatedImageUrl) {
       return generatedImageUrl;
@@ -366,27 +360,11 @@ export default function GeneratePage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Generate Post</h1>
-          <p className="text-muted-foreground">
-            Use AI to generate engaging social media posts for your business.
-          </p>
-        </div>
-
-        <Card className="w-fit">
-          <CardContent className="py-3 px-4 flex items-center gap-2">
-            <Coins className="h-5 w-5 text-primary" />
-            <div>
-              <p className="text-sm font-medium">
-                {formatCredits(creditsRemaining)} credits
-              </p>
-              <p className="text-xs text-muted-foreground capitalize">
-                {planSlug} plan
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+      <div>
+        <h1 className="text-3xl font-bold">Generate Post</h1>
+        <p className="text-muted-foreground">
+          Use AI to generate engaging social media posts for your business.
+        </p>
       </div>
 
       {showLowCreditsWarning && (

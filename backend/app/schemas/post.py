@@ -72,3 +72,4 @@ class GenerateResponse(BaseModel):
     website_context_used: bool = False  # Indicates if website data was used for generation
     seo_keywords_used: list[str] = []
     primary_keyword: str | None = None
+    image_generation_failed: bool = False  # True if AI image was requested but failed

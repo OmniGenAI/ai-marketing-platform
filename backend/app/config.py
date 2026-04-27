@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Groq AI (super fast, free tier available)
     GROQ_API_KEY: str = ""
 
+    # OpenAI (image generation fallback - gpt-image-1 / dall-e-3)
+    OPENAI_API_KEY: str = ""
+    OPENAI_IMAGE_MODEL: str = "gpt-image-1-mini"
+    OPENAI_IMAGE_SIZE: str = "1024x1024"
+
     # fal.ai API (for Pika AI video generation)
     FAL_API_KEY: str = ""
 
