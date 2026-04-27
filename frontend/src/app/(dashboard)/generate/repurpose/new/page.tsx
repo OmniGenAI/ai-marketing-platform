@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -87,7 +87,7 @@ const CTA_STYLES: { value: CtaStyle; label: string }[] = [
   { value: "none", label: "No CTA" },
 ];
 
-export default function RepurposePage() {
+function RepurposePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const urlSaveId = searchParams.get("id");
@@ -1048,6 +1048,14 @@ export default function RepurposePage() {
         </div>
       </div >
     </div >
+  );
+}
+
+export default function RepurposePage() {
+  return (
+    <Suspense>
+      <RepurposePageInner />
+    </Suspense>
   );
 }
 
