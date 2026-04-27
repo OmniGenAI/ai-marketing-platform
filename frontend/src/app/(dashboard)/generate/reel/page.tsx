@@ -26,7 +26,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import {
   Film,
-  Coins,
   AlertTriangle,
   RefreshCw,
   Send,
@@ -319,11 +318,6 @@ export default function ReelsPage() {
     }
   };
 
-  const formatCredits = (credits: number) => {
-    if (credits === Infinity || credits === -1) return "Unlimited";
-    return credits.toString();
-  };
-
   const deriveHook = (script: string): string => {
     const clean = script.replace(/\s+/g, " ").trim();
     const match = clean.match(/^(.+?[.!?])(\s|$)/);
@@ -457,27 +451,11 @@ export default function ReelsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Create Reel</h1>
-          <p className="text-muted-foreground">
-            Generate AI-powered Instagram Reels with voiceover and stock videos.
-          </p>
-        </div>
-
-        <Card className="w-fit">
-          <CardContent className="py-3 px-4 flex items-center gap-2">
-            <Coins className="h-5 w-5 text-primary" />
-            <div>
-              <p className="text-sm font-medium">
-                {formatCredits(creditsRemaining)} credits
-              </p>
-              <p className="text-xs text-muted-foreground capitalize">
-                {planSlug} plan
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+      <div>
+        <h1 className="text-3xl font-bold">Create Reel</h1>
+        <p className="text-muted-foreground">
+          Generate AI-powered Instagram Reels with voiceover and stock videos.
+        </p>
       </div>
 
       {showLowCreditsWarning && (

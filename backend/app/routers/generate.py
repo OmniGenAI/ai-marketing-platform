@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 import json
 import logging
@@ -17,20 +18,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
 
+UNLIMITED_BALANCE = -1
+
 
 @router.post("", response_model=GenerateResponse)
-def generate_post(
+async def generate_post(
     data: GenerateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Check wallet balance
+    # Lock the wallet row to prevent concurrent credit double-spend
     wallet = (
-        db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
+        db.query(Wallet)
+        .filter(Wallet.user_id == current_user.id)
+        .with_for_update()
+        .first()
     )
 
-    # Wallet balance of -1 means unlimited credits
-    has_unlimited_credits = wallet and wallet.balance == -1
+    has_unlimited_credits = wallet and wallet.balance == UNLIMITED_BALANCE
     has_credits = wallet and wallet.balance > 0
 
     if not wallet or (not has_unlimited_credits and not has_credits):
@@ -103,33 +108,41 @@ def generate_post(
         else:
             logger.info(f"SEO mode requested but no brief found for user {current_user.id}")
 
-    # Generate post using AI with website context
-    result = generate_social_post(
-        business_name=config.business_name,
-        niche=config.niche,
-        tone=data.tone,
-        products=config.products,
-        brand_voice=config.brand_voice,
-        target_audience=config.target_audience,
-        hashtags=config.hashtags,
-        platform=data.platform,
-        topic=data.topic,
-        website_context=config.website_context,
-        seo_keywords=seo_keywords,
-        primary_keyword=primary_keyword,
-        blog_url=(data.blog_url or "").strip(),
-    )
+    # Generate post using AI with website context (offloaded to threadpool — sync I/O)
+    try:
+        result = await run_in_threadpool(
+            generate_social_post,
+            business_name=config.business_name,
+            niche=config.niche,
+            tone=data.tone,
+            products=config.products,
+            brand_voice=config.brand_voice,
+            target_audience=config.target_audience,
+            hashtags=config.hashtags,
+            platform=data.platform,
+            topic=data.topic,
+            website_context=config.website_context,
+            seo_keywords=seo_keywords,
+            primary_keyword=primary_keyword,
+            blog_url=(data.blog_url or "").strip(),
+        )
+    except Exception as e:
+        logger.error(f"AI post generation failed for user {current_user.id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to generate post. Please try again.",
+        )
 
-    # Handle image option
+    # Handle image option — image failures degrade gracefully (post still returns)
     image_url = None
+    image_generation_failed = False
 
     if data.image_option == "business" and data.business_image_id:
-        # Get the selected business image
         business_image = (
             db.query(BusinessImage)
             .filter(
                 BusinessImage.id == data.business_image_id,
-                BusinessImage.user_id == current_user.id
+                BusinessImage.user_id == current_user.id,
             )
             .first()
         )
@@ -137,36 +150,50 @@ def generate_post(
             image_url = business_image.url
 
     elif data.image_option == "ai":
-        # Generate image using AI
-        image_url = generate_image_from_prompt(
-            topic=data.topic,
-            business_name=config.business_name,
-            niche=config.niche,
-        )
+        try:
+            image_url = await run_in_threadpool(
+                generate_image_from_prompt,
+                topic=data.topic,
+                business_name=config.business_name,
+                niche=config.niche,
+            )
+        except Exception as e:
+            logger.error(f"AI image generation failed for user {current_user.id}: {e}", exc_info=True)
+            image_generation_failed = True
 
     elif data.image_option == "upload" and data.uploaded_image_url:
-        # Use the uploaded image URL
         image_url = data.uploaded_image_url
 
-    # Deduct credit (unless unlimited)
-    if wallet.balance != -1:
-        wallet.balance -= 1
-    wallet.total_credits_used += 1
+    # Deduct credit + log usage atomically with rollback safety
+    try:
+        if wallet.balance != UNLIMITED_BALANCE:
+            wallet.balance -= 1
+        wallet.total_credits_used += 1
 
-    usage_log = UsageLog(
-        wallet_id=wallet.id,
-        action="generate_post",
-        credits_used=1,
-        description=f"Generated {data.platform} post",
-    )
-    db.add(usage_log)
-    db.commit()
+        usage_log = UsageLog(
+            wallet_id=wallet.id,
+            action="generate_post",
+            credits_used=1,
+            description=f"Generated {data.platform} post",
+        )
+        db.add(usage_log)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to commit credit deduction for user {current_user.id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record usage. Please try again.",
+        )
+
+    seo_keywords_used = [k for k in [primary_keyword, *seo_keywords] if k]
 
     return GenerateResponse(
         content=result["content"],
         hashtags=result["hashtags"],
         image_url=image_url,
         website_context_used=website_context_used,
-        seo_keywords_used=([primary_keyword] + seo_keywords) if (primary_keyword or seo_keywords) else [],
+        seo_keywords_used=seo_keywords_used,
         primary_keyword=primary_keyword or None,
+        image_generation_failed=image_generation_failed,
     )

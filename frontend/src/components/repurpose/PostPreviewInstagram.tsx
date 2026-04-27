@@ -2,18 +2,18 @@
 
 import { useEffect, useRef } from "react";
 import {
-  ThumbsUp,
-  MessageSquare,
-  Repeat2,
+  Heart,
+  MessageCircle,
   Send,
+  Bookmark,
   MoreHorizontal,
-  Globe2,
   Copy,
   ChevronLeft,
   ChevronRight,
   Link as LinkIcon,
   AlertTriangle,
-  Linkedin,
+  Instagram,
+  Image as ImageIcon,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -36,15 +36,14 @@ interface Props {
   disableRegen?: boolean;
   freeRerollsRemaining?: number | null;
 
-  authorName?: string;
-  authorRole?: string;
+  handle?: string;
 }
 
 /**
- * Editable LinkedIn feed card. Looks like the real feed; the content
- * area is an auto-sizing textarea styled to match LinkedIn typography.
+ * Editable Instagram feed-card preview. Square image placeholder on top,
+ * action row, likes, editable caption below.
  */
-export function PostPreviewLinkedIn({
+export function PostPreviewInstagram({
   items,
   index,
   onIndexChange,
@@ -56,32 +55,21 @@ export function PostPreviewLinkedIn({
   regenPreset,
   disableRegen,
   freeRerollsRemaining,
-  authorName = "Your Name",
-  authorRole = "Founder",
+  handle = "yourhandle",
 }: Props) {
   const safeIndex = Math.min(index, Math.max(0, items.length - 1));
   const current = items[safeIndex] || "";
   const hasVariants = items.length > 1;
 
-  const initials =
-    authorName
-      .split(" ")
-      .map((s) => s[0])
-      .slice(0, 2)
-      .join("")
-      .toUpperCase() || "YN";
-
   return (
     <div className="space-y-2">
-      {/* Toolbar above the preview card */}
+      {/* Toolbar */}
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <div className="flex items-center gap-1.5">
-            <Linkedin className="h-4 w-4 text-[#0A66C2]" />
-            LinkedIn
-          </div>
+        <div className="flex items-center gap-1.5 text-sm font-semibold">
+          <Instagram className="h-4 w-4 text-pink-500" />
+          Instagram
           {hasVariants && (
-            <Badge variant="outline" className="font-mono text-[10px] border-purple-200">
+            <Badge variant="outline" className="ml-1 font-mono text-[10px] border-purple-200">
               {safeIndex + 1}/{items.length}
             </Badge>
           )}
@@ -116,43 +104,47 @@ export function PostPreviewLinkedIn({
         </div>
       </div>
 
-      {/* Feed card mock — editable */}
+      {/* Feed card mock */}
       <div className="rounded-lg border bg-white shadow-sm overflow-hidden text-slate-900">
-        <div className="flex items-start gap-3 p-3">
-          <div className="h-12 w-12 rounded-full bg-gradient-to-br from-[#0A66C2] to-[#004182] text-white flex items-center justify-center font-semibold shrink-0">
-            {initials}
+        {/* header */}
+        <div className="flex items-center gap-3 p-3">
+          <div className="relative shrink-0">
+            <div className="p-[2px] rounded-full bg-gradient-to-tr from-yellow-400 via-pink-500 to-purple-600">
+              <div className="h-8 w-8 rounded-full bg-white p-0.5">
+                <div className="h-full w-full rounded-full bg-gradient-to-br from-fuchsia-500 to-rose-500" />
+              </div>
+            </div>
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold leading-tight truncate">{authorName}</p>
-            <p className="text-xs text-slate-500 leading-tight truncate">{authorRole}</p>
-            <p className="text-[11px] text-slate-500 leading-tight flex items-center gap-1 mt-0.5">
-              now · <Globe2 className="h-3 w-3" />
-            </p>
-          </div>
-          <MoreHorizontal className="h-5 w-5 text-slate-400 shrink-0" />
+          <p className="text-sm font-semibold truncate">{handle}</p>
+          <MoreHorizontal className="ml-auto h-5 w-5 text-slate-400" />
         </div>
 
-        <EditableBody
+        {/* image placeholder */}
+        <div className="relative aspect-video w-full bg-gradient-to-br from-fuchsia-100 via-rose-50 to-orange-100 flex items-center justify-center border-y">
+          <div className="flex flex-col items-center gap-2 text-slate-400">
+            <ImageIcon className="h-8 w-8" />
+            <span className="text-[11px] font-medium">Your image goes here</span>
+          </div>
+        </div>
+
+        {/* actions */}
+        <div className="flex items-center gap-3 px-3 pt-2">
+          <Heart className="h-6 w-6" />
+          <MessageCircle className="h-6 w-6" />
+          <Send className="h-6 w-6" />
+          <Bookmark className="ml-auto h-6 w-6" />
+        </div>
+
+        {/* likes */}
+        <p className="px-3 pt-1 text-sm font-semibold">1,248 likes</p>
+
+        {/* editable caption */}
+        <EditableCaption
+          handle={handle}
           value={current}
           onChange={onEdit}
           disabled={regenActive}
-          placeholder="Your LinkedIn post…"
         />
-
-        <div className="flex items-center justify-between border-t px-3 py-1.5 text-slate-600">
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <ThumbsUp className="h-4 w-4" /> Like
-          </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <MessageSquare className="h-4 w-4" /> Comment
-          </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <Repeat2 className="h-4 w-4" /> Repost
-          </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <Send className="h-4 w-4" /> Send
-          </button>
-        </div>
       </div>
 
       <UrlFooter url={sourceUrl} present={current.includes(sourceUrl)} />
@@ -171,19 +163,18 @@ export function PostPreviewLinkedIn({
   );
 }
 
-function EditableBody({
+function EditableCaption({
+  handle,
   value,
   onChange,
   disabled,
-  placeholder,
 }: {
+  handle: string;
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
-  placeholder?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
-  // auto-size to content
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -192,21 +183,23 @@ function EditableBody({
   }, [value]);
 
   return (
-    <div className="px-3 pb-2">
+    <div className="px-3 py-2 text-[13px] leading-relaxed">
+      <span className="font-semibold mr-1.5">{handle}</span>
       <textarea
         ref={ref}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        placeholder={placeholder}
+        placeholder="Your caption…"
         rows={1}
         className={cn(
-          "w-full resize-none bg-transparent text-[13px] leading-relaxed",
+          "align-top inline-block w-full resize-none bg-transparent leading-relaxed",
           "text-slate-900 whitespace-pre-wrap break-words outline-none",
           "focus:ring-2 focus:ring-purple-300 focus:rounded-md focus:px-1 focus:-mx-1",
           "placeholder:text-slate-400 disabled:opacity-60",
         )}
       />
+      <p className="text-[11px] text-slate-400 mt-2">View all 34 comments · 2h</p>
     </div>
   );
 }

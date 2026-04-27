@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth } from "@/hooks/use-auth";
+import { useSubscription } from "@/hooks/use-subscription";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -10,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { LogOut, User, Menu } from "lucide-react";
+import { LogOut, User, Menu, Coins } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -35,7 +36,11 @@ const navItems = [
 
 export function Navbar() {
   const { user, logout } = useAuth();
+  const { creditsRemaining, planSlug } = useSubscription();
   const pathname = usePathname();
+
+  const formatCredits = (c: number) =>
+    c === Infinity || c === -1 ? "Unlimited" : c.toString();
 
   const initials = user?.name
     ? user.name
@@ -83,7 +88,17 @@ export function Navbar() {
         <h2 className="text-lg font-semibold md:hidden">AI Marketing</h2>
       </div>
 
-      <DropdownMenu>
+      <div className="flex items-center gap-3">
+        {/* Credit counter */}
+        <div className="hidden sm:flex items-center gap-1.5 rounded-full border bg-muted/50 px-3 py-1.5 text-sm">
+          <Coins className="h-3.5 w-3.5 text-primary shrink-0" />
+          <span className="font-medium">{formatCredits(creditsRemaining)}</span>
+          <span className="text-muted-foreground">credits</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground capitalize">{planSlug}</span>
+        </div>
+
+        <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" className="relative h-9 w-9 rounded-full">
             <Avatar className="h-9 w-9">
@@ -112,6 +127,7 @@ export function Navbar() {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      </div>
     </header>
   );
 }

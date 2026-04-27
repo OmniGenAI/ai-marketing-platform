@@ -70,3 +70,4 @@ PyYAML==6.0.3
 httptools==0.7.1
 watchfiles==1.1.1
 regex==2026.4.4
+json-repair==0.46.2

@@ -3,17 +3,16 @@
 import { useEffect, useRef } from "react";
 import {
   ThumbsUp,
-  MessageSquare,
-  Repeat2,
-  Send,
-  MoreHorizontal,
+  MessageCircle,
+  Share2,
   Globe2,
+  MoreHorizontal,
   Copy,
   ChevronLeft,
   ChevronRight,
   Link as LinkIcon,
   AlertTriangle,
-  Linkedin,
+  Facebook,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -36,15 +35,14 @@ interface Props {
   disableRegen?: boolean;
   freeRerollsRemaining?: number | null;
 
-  authorName?: string;
-  authorRole?: string;
+  pageName?: string;
 }
 
 /**
- * Editable LinkedIn feed card. Looks like the real feed; the content
- * area is an auto-sizing textarea styled to match LinkedIn typography.
+ * Editable Facebook feed post preview. Page header, editable content,
+ * Like/Comment/Share action row.
  */
-export function PostPreviewLinkedIn({
+export function PostPreviewFacebook({
   items,
   index,
   onIndexChange,
@@ -56,32 +54,29 @@ export function PostPreviewLinkedIn({
   regenPreset,
   disableRegen,
   freeRerollsRemaining,
-  authorName = "Your Name",
-  authorRole = "Founder",
+  pageName = "Your Page",
 }: Props) {
   const safeIndex = Math.min(index, Math.max(0, items.length - 1));
   const current = items[safeIndex] || "";
   const hasVariants = items.length > 1;
 
   const initials =
-    authorName
+    pageName
       .split(" ")
       .map((s) => s[0])
       .slice(0, 2)
       .join("")
-      .toUpperCase() || "YN";
+      .toUpperCase() || "YP";
 
   return (
     <div className="space-y-2">
-      {/* Toolbar above the preview card */}
+      {/* Toolbar */}
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <div className="flex items-center gap-1.5">
-            <Linkedin className="h-4 w-4 text-[#0A66C2]" />
-            LinkedIn
-          </div>
+        <div className="flex items-center gap-1.5 text-sm font-semibold">
+          <Facebook className="h-4 w-4 text-[#1877F2]" />
+          Facebook
           {hasVariants && (
-            <Badge variant="outline" className="font-mono text-[10px] border-purple-200">
+            <Badge variant="outline" className="ml-1 font-mono text-[10px] border-purple-200">
               {safeIndex + 1}/{items.length}
             </Badge>
           )}
@@ -116,17 +111,16 @@ export function PostPreviewLinkedIn({
         </div>
       </div>
 
-      {/* Feed card mock — editable */}
+      {/* Feed card mock */}
       <div className="rounded-lg border bg-white shadow-sm overflow-hidden text-slate-900">
-        <div className="flex items-start gap-3 p-3">
-          <div className="h-12 w-12 rounded-full bg-gradient-to-br from-[#0A66C2] to-[#004182] text-white flex items-center justify-center font-semibold shrink-0">
+        <div className="flex items-center gap-3 p-3">
+          <div className="h-10 w-10 rounded-full bg-gradient-to-br from-[#1877F2] to-[#0b5fcc] text-white flex items-center justify-center font-semibold text-sm shrink-0">
             {initials}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold leading-tight truncate">{authorName}</p>
-            <p className="text-xs text-slate-500 leading-tight truncate">{authorRole}</p>
+            <p className="text-sm font-semibold leading-tight truncate">{pageName}</p>
             <p className="text-[11px] text-slate-500 leading-tight flex items-center gap-1 mt-0.5">
-              now · <Globe2 className="h-3 w-3" />
+              2h · <Globe2 className="h-3 w-3" />
             </p>
           </div>
           <MoreHorizontal className="h-5 w-5 text-slate-400 shrink-0" />
@@ -136,21 +130,29 @@ export function PostPreviewLinkedIn({
           value={current}
           onChange={onEdit}
           disabled={regenActive}
-          placeholder="Your LinkedIn post…"
+          placeholder="Your Facebook post…"
         />
 
-        <div className="flex items-center justify-between border-t px-3 py-1.5 text-slate-600">
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
+        {/* reactions summary */}
+        <div className="flex items-center gap-1 px-3 pb-2 text-xs text-slate-500">
+          <span className="inline-flex -space-x-1">
+            <span className="h-4 w-4 rounded-full bg-[#1877F2] border-2 border-white" />
+            <span className="h-4 w-4 rounded-full bg-red-500 border-2 border-white" />
+          </span>
+          <span>Alex Kim and 421 others</span>
+          <span className="ml-auto">38 comments · 12 shares</span>
+        </div>
+
+        {/* actions */}
+        <div className="grid grid-cols-3 border-t text-slate-600">
+          <button type="button" className="flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium hover:bg-slate-100" tabIndex={-1}>
             <ThumbsUp className="h-4 w-4" /> Like
           </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <MessageSquare className="h-4 w-4" /> Comment
+          <button type="button" className="flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium hover:bg-slate-100" tabIndex={-1}>
+            <MessageCircle className="h-4 w-4" /> Comment
           </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <Repeat2 className="h-4 w-4" /> Repost
-          </button>
-          <button type="button" className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-slate-100" tabIndex={-1}>
-            <Send className="h-4 w-4" /> Send
+          <button type="button" className="flex items-center justify-center gap-1.5 py-1.5 text-sm font-medium hover:bg-slate-100" tabIndex={-1}>
+            <Share2 className="h-4 w-4" /> Share
           </button>
         </div>
       </div>
@@ -183,7 +185,6 @@ function EditableBody({
   placeholder?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
-  // auto-size to content
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -201,7 +202,7 @@ function EditableBody({
         placeholder={placeholder}
         rows={1}
         className={cn(
-          "w-full resize-none bg-transparent text-[13px] leading-relaxed",
+          "w-full resize-none bg-transparent text-[14px] leading-relaxed",
           "text-slate-900 whitespace-pre-wrap break-words outline-none",
           "focus:ring-2 focus:ring-purple-300 focus:rounded-md focus:px-1 focus:-mx-1",
           "placeholder:text-slate-400 disabled:opacity-60",

@@ -2,6 +2,12 @@ import json
 import logging
 import re
 
+try:
+    from json_repair import repair_json as _repair_json
+    _HAS_JSON_REPAIR = True
+except ImportError:  # pragma: no cover
+    _HAS_JSON_REPAIR = False
+
 from app.schemas.repurpose import (
     ALL_PLATFORMS,
     ContentGoal,
@@ -210,10 +216,27 @@ def score_hook(hook: str, style: str = "") -> int:
 
 BANNED_CLICHE_RE = re.compile(
     r"\b("
-    r"unleash|elevate|revolutionize|unlock|landscape|delve|game-changer|"
-    r"embark|paradigm|synergy|leverage|cutting-edge|state of the art|"
-    r"seamless|robust solution|in today's fast-paced world|"
-    r"at the end of the day|the key is|it's important to|make sure to"
+    # classic LLM vocabulary
+    r"unleash|elevate|revolutionize|unlock|landscape|delve|delving|"
+    r"game-changer|game-changing|embark|paradigm|synergy|leverage|"
+    r"cutting-edge|state of the art|seamless|seamlessly|robust solution|"
+    r"holistic|comprehensive solution|tailored solution|empower|empowering|"
+    r"foster|curate|curated|navigate the complex|dive deep|deep dive|"
+    r"mind-?blowing|world-?class|next-?level|"
+    # filler phrases LLMs love
+    r"in today's fast-paced world|in today's digital age|in the world of|"
+    r"at the end of the day|the key is|it's important to|"
+    r"it's worth noting|it's no secret that|it goes without saying|"
+    r"make sure to|let's dive in|buckle up|picture this|imagine this|"
+    r"here's the thing|the truth is|spoiler alert|plot twist|"
+    # transitions / hedges
+    r"furthermore|moreover|in essence|ultimately|essentially|"
+    r"in conclusion|to sum up|all in all|"
+    # cringe hook openers
+    r"are you tired of|stop scrolling|ready to transform|"
+    r"want to know the secret|the one thing|"
+    # AI applause filler
+    r"that's a great question|absolutely|certainly"
     r")\b",
     flags=re.IGNORECASE,
 )
@@ -291,12 +314,114 @@ def _clamp_tweet(t: str, source_url: str, max_len: int = 270) -> str:
 _HOOK_RULES = (
     "Return exactly 5 hook variations, one per style in this order: "
     "curiosity, contrarian, data, story, bold.\n"
-    "- curiosity: open a loop, max 100 chars, ends with ':' or '…'.\n"
-    "- contrarian: disagree with a common belief held in this space.\n"
-    "- data: include a specific number, percentage, or named stat.\n"
-    "- story: first-person micro-story opening ('The day I…', 'Last month…').\n"
-    "- bold: confident, unqualified claim (no 'I think', no hedging)."
+    "Every hook must reference a specific number, named tool/company/person, "
+    "dollar amount, or dated moment — no abstract setups.\n"
+    "Banned hook templates (do not use): 'Most people get X wrong', "
+    "'Here's what nobody tells you', 'The one thing that changed everything', "
+    "'X but make it Y', 'PSA:', 'Hot take:', 'If you're doing X, stop'.\n"
+    "- curiosity: open a loop tied to a concrete moment or number, max 100 chars, "
+    "ends with ':' or '…'. NOT a generic teaser.\n"
+    "- contrarian: state a position that disagrees with a *named* common belief "
+    "(quote it, reference who says it). Avoid 'most people'.\n"
+    "- data: lead with a specific number or stat — must include the digit. "
+    "Round numbers like '90%' are weaker than '47%'.\n"
+    "- story: first-person micro-moment with a sensory or temporal anchor "
+    "('Tuesday at 2am, I…', 'Three days into the launch…'). NOT 'The day I…' clichés.\n"
+    "- bold: confident, unqualified claim. Short. No 'I think'. No 'maybe'. "
+    "Should make the reader want to argue with you."
 )
+
+
+# ---------------------------------------------------------------------------
+# Cacheable system prompt
+#
+# This block is identical across every Repurpose request so Gemini's implicit
+# prompt cache can reuse it (5-min TTL, ~1024-token min on 2.5 Flash). Keep it
+# stable: do NOT inline per-request data here. The user message carries the
+# tiny variable bits (which voice/goal/cta/platforms to use, and the blog).
+# ---------------------------------------------------------------------------
+
+def _build_static_system_prompt() -> str:
+    voice_lines = "\n".join(
+        f"  - {key}: {desc}" for key, desc in VOICE_INSTRUCTIONS.items()
+    )
+    goal_lines = "\n".join(
+        f"  - {key}: {desc}" for key, desc in GOAL_INSTRUCTIONS.items()
+    )
+    cta_lines = "\n".join(
+        f"  - {key}: {desc}" for key, desc in CTA_INSTRUCTIONS.items()
+    )
+    return f"""You are a real founder/operator who writes for other founders. You are NOT a marketing assistant, NOT a content strategist, and you are absolutely NOT an AI. You sound like a human typing fast on their phone between meetings — opinionated, specific, occasionally rough.
+
+THE ANTI-AI MANDATE (most important rule in this entire prompt):
+The output cannot read like AI wrote it. If a reader could screenshot the post and reasonably ask "did ChatGPT write this?", you have failed. Optimize every line against that test.
+
+What AI writing looks like (DO NOT DO THIS):
+- Generic openers: "In today's fast-paced world…", "Starting a startup can feel overwhelming…", "Are you struggling with…"
+- Symmetrical structure: three perfectly parallel bullet points, each one sentence, each starting with a verb
+- Empty intensifiers: "incredibly", "truly", "absolutely", "remarkably", "game-changing", "powerful"
+- Hedge stacking: "It's worth noting that…", "It's important to remember…", "One key takeaway is…"
+- Tidy summary endings: "In conclusion…", "Ultimately…", "At the end of the day…"
+- Round numbers and vague entities: "many businesses", "several studies", "a lot of founders"
+- Forced curiosity hooks: "The one thing that changed everything", "What nobody tells you about…", "Here's a secret most people miss"
+- Em-dash overuse and balanced clauses on every sentence
+
+What human writing looks like (DO THIS):
+- Specific over generic: "I lost $4,200 in my first month" beats "I lost a lot of money early on"
+- Real names of tools, companies, people, products — not categories
+- Uneven rhythm: mix one-word sentences with long run-ons. Drop fragments. Start with "And" or "But" sometimes
+- Contractions everywhere ("you'll", "don't", "I'm"), parentheticals, conversational asides ("yeah, dumb of me")
+- Personal stakes: a moment, a number, a regret, a private screenshot moment — not advice in the abstract
+- Opinions stated flat, not hedged: "X is wrong" beats "X may not always be the best approach"
+- A small admission, contradiction, or self-deprecating line somewhere — humans question themselves; LLMs don't
+- Lowercase openers are fine if the voice supports it. Typos? No. But casual punctuation, yes.
+
+Test before returning each format: would a follower of @levelsio, @shl, @amasad, or @paulg actually post this? If it sounds like a LinkedIn-influencer template, rewrite it.
+
+You repurpose blog content into platform-native distribution formats. Each request specifies a VOICE, GOAL, CTA_STYLE, and PLATFORMS list — apply them strictly, ignoring any that were not selected.
+
+VOICE CATALOG (apply only the voice named in the user request):
+{voice_lines}
+
+GOAL CATALOG (apply only the goal named in the user request):
+{goal_lines}
+
+CTA_STYLE CATALOG (apply only the cta_style named in the user request):
+{cta_lines}
+
+PLATFORM OUTPUT REFERENCE (only emit keys for platforms in PLATFORMS REQUESTED — omit unrequested keys entirely):
+  - linkedin → "linkedin_posts": list of N strings, each 800-1500 chars, strong line-1 hook, short paragraphs, ends with CTA + SOURCE_URL
+  - twitter → "twitter_thread": list of 5 strings, each ≤270 chars; final tweet ends with SOURCE_URL
+  - email → "email": object {{"subject": ≤70 chars, "body": greeting + 3-4 short paragraphs + CTA + SOURCE_URL}}
+  - youtube → "youtube_description": short hook, 3-4 bullets, SOURCE_URL, 5-8 hashtags
+  - instagram → "instagram_captions": list of N strings, scroll-stopping hook, 3-4 short lines, emojis sparingly, "Link in bio 👇", 5-8 hashtags
+  - facebook → "facebook_posts": list of N strings, conversational 300-500 chars, ends with SOURCE_URL + 2-3 hashtags
+  - quotes → "quote_cards": list of 3 strings, each ≤120 chars
+  - carousel → "carousel_outline": list of 5 strings ("Slide 1: hook", "Slide 2: …", "Slide 3: …", "Slide 4: …", "Slide 5: CTA + SOURCE_URL")
+  - hooks → "hook_variations": list of 5 objects {{"style": one of curiosity|contrarian|data|story|bold, "text": hook string}}
+
+HOOK RULES (when hook_variations is requested):
+{_HOOK_RULES}
+
+HARD RULES (apply to every request, every section):
+- Write ONLY for the platforms in PLATFORMS REQUESTED. Omit unrequested keys entirely.
+- Include SOURCE_URL verbatim in every long-form format (final tweet, last carousel slide, end of each long-form post, end of email body).
+- Each Twitter tweet must be 270 characters or fewer.
+- Email subject must be 70 characters or fewer.
+- BANNED VOCABULARY — NEVER use any of these (auto-rejected): unleash, elevate, revolutionize, unlock, landscape, delve, delving, game-changer, game-changing, embark, paradigm, synergy, leverage, cutting-edge, state of the art, seamless, holistic, comprehensive solution, empower, foster, curate, dive deep, mind-blowing, world-class, "in today's fast-paced world", "in today's digital age", "at the end of the day", "the key is", "it's important to", "it's worth noting", "make sure to", "let's dive in", "buckle up", "picture this", "imagine this", "here's the thing", "the truth is", furthermore, moreover, in essence, ultimately, essentially, in conclusion, "are you tired of", "stop scrolling", "the one thing".
+- BANNED HOOK PATTERNS: "Most people [verb] X wrong.", "Here's what nobody tells you about X.", "The one thing that changed everything.", "X but make it Y.", "PSA: …", "If you're [doing X], stop.", "Hot take: …".
+- Weave PRIMARY_KEYWORD plus 1-2 secondary keywords into each format (no stuffing, no parentheses).
+- Obey VOICE and GOAL strictly — they override generic best practices.
+- BEFORE RETURNING: re-read every hook and opener. If it could plausibly appear in 10+ other LinkedIn posts this week, rewrite it. Replace generic claims with one specific number, named tool, named person, dollar amount, or dated moment.
+- Vary sentence length on purpose. At least one short fragment per long-form post. At least one specific number, name, or dated moment per format.
+- No symmetric three-bullet lists where every bullet starts with the same part of speech.
+- Output valid JSON only. No markdown fences, no preamble.
+
+Return ONLY valid JSON. No markdown fences, no commentary.
+"""
+
+
+_STATIC_SYSTEM_PROMPT = _build_static_system_prompt()
 
 
 def _schema_block(platforms: set[str], variations: int) -> str:
@@ -399,6 +524,11 @@ def _build_prompt(
     niche: str,
     variations_across_voices: bool = False,
 ) -> str:
+    """Build only the variable per-request portion of the prompt.
+
+    The stable catalogs and rules live in `_STATIC_SYSTEM_PROMPT` so that
+    Gemini's implicit prompt cache can reuse the prefix across calls.
+    """
     sec_csv = ", ".join(secondary_keywords[:5]) or "(none)"
     business_line = (
         f"{business_name} ({niche})" if business_name or niche else "(not provided)"
@@ -406,35 +536,29 @@ def _build_prompt(
     platform_set = set(platforms)
     schema = _schema_block(platform_set, variations_per_platform)
 
-    voice_block = VOICE_INSTRUCTIONS.get(voice, VOICE_INSTRUCTIONS[VoicePreset.founder_pov.value])
-    goal_block = GOAL_INSTRUCTIONS.get(goal, GOAL_INSTRUCTIONS[ContentGoal.authority.value])
-    cta_block = CTA_INSTRUCTIONS.get(cta_style, CTA_INSTRUCTIONS[CtaStyle.soft.value])
-
-    hook_section = _HOOK_RULES if include_hook_variations else (
-        "Return hook_variations as an empty array — the caller does not want hooks."
+    hook_directive = (
+        "INCLUDE hook_variations (5 styles, per HOOK RULES in system instructions)."
+        if include_hook_variations
+        else "OMIT hook_variations (return empty array)."
     )
 
-    # Voice block: single voice, OR a rotation of voices (one per variant)
-    voice_directive: str
     if variations_across_voices and variations_per_platform > 1:
         rotation = _BULK_VOICE_ROTATION[:variations_per_platform]
         rotation_lines = "\n".join(
-            f"  - Variant {i + 1}: {label} voice — {VOICE_INSTRUCTIONS[key]}"
+            f"  - Variant {i + 1}: use voice `{key}` ({label})"
             for i, (key, label) in enumerate(rotation)
         )
         voice_directive = (
-            "VOICE — BULK ACROSS STYLES:\n"
-            "For LinkedIn/Instagram/Facebook variants, rotate voice by index "
-            "(do not apply the single base voice to all). Use this exact mapping:\n"
+            f"VOICE — BULK ACROSS STYLES (base voice for non-variant sections: {voice}):\n"
+            "For LinkedIn/Instagram/Facebook variants, rotate voice by index — "
+            "look up each in the VOICE CATALOG:\n"
             f"{rotation_lines}\n"
-            "All other sections (email, YouTube, twitter_thread, quotes, carousel, "
-            f"hook_variations) stay in the single base voice — {voice}:\n"
-            f"{voice_block}"
+            "All other sections stay in the base voice."
         )
     else:
-        voice_directive = f"VOICE — {voice}:\n{voice_block}"
+        voice_directive = f"VOICE: {voice}"
 
-    return f"""Transform the following blog into distribution-ready content for the requested platforms.
+    return f"""Repurpose this blog for the requested platforms.
 
 BLOG TITLE: {blog_title}
 SOURCE_URL: {source_url}
@@ -443,17 +567,11 @@ SECONDARY_KEYWORDS: {sec_csv}
 BUSINESS: {business_line}
 
 {voice_directive}
-
-GOAL — {goal}:
-{goal_block}
-
-CTA_STYLE — {cta_style}:
-{cta_block}
-
+GOAL: {goal}
+CTA_STYLE: {cta_style}
 PLATFORMS REQUESTED: {", ".join(platforms)}
 VARIATIONS per LinkedIn/Instagram/Facebook: {variations_per_platform}
-
-{hook_section}
+{hook_directive}
 
 BLOG CONTENT (truncated):
 ---
@@ -463,16 +581,6 @@ BLOG CONTENT (truncated):
 Return a single JSON object exactly matching this shape (omit keys for any platform not in PLATFORMS REQUESTED):
 
 {schema}
-
-Hard rules:
-- Write ONLY for the platforms in PLATFORMS REQUESTED. Omit unrequested keys entirely.
-- Include SOURCE_URL verbatim in every format (final tweet, last carousel slide, end of each long-form post).
-- Each Twitter tweet must be 270 characters or fewer.
-- Email subject must be 70 characters or fewer.
-- NEVER use: unleash, elevate, revolutionize, unlock, landscape, delve, game-changer, embark, paradigm, synergy, leverage, cutting-edge, state of the art, seamless, robust solution, "in today's fast-paced world", "at the end of the day", "the key is", "it's important to", "make sure to".
-- Weave PRIMARY_KEYWORD plus 1-2 secondary keywords into each format (no stuffing, no parentheses).
-- Obey VOICE and GOAL strictly — they override generic best practices.
-- Output valid JSON only. No markdown fences, no preamble.
 """
 
 
@@ -651,12 +759,8 @@ def repurpose_content(
 
     raw = call_llm_with_fallback(
         prompt,
-        system=(
-            "You are a senior content strategist who has written for indie founders, "
-            "SaaS companies, and developer brands. You write like a human operator, "
-            "not a corporate blog. No AI clichés. No hedging. Specifics over generics."
-        ),
-        temperature=0.6,
+        system=_STATIC_SYSTEM_PROMPT,
+        temperature=0.85,
         expect_json=True,
         caller=f"repurpose[{voice}/{goal}]",
     )
@@ -667,8 +771,21 @@ def repurpose_content(
         if not isinstance(parsed, dict):
             raise ValueError("LLM JSON is not an object")
     except Exception as e:
-        logger.error(f"[repurpose] Failed to parse LLM JSON: {e}. Head: {cleaned[:400]!r}")
-        raise ValueError("Failed to parse LLM response as JSON")
+        logger.warning(
+            f"[repurpose] Failed to parse LLM JSON: {e}. Attempting repair. Head: {cleaned[:400]!r}"
+        )
+        if not _HAS_JSON_REPAIR:
+            logger.error("[repurpose] json-repair not installed, cannot recover.")
+            raise ValueError("Failed to parse LLM response as JSON")
+        try:
+            repaired = _repair_json(cleaned, return_objects=True)
+            if not isinstance(repaired, dict):
+                raise ValueError("Repaired JSON is not an object")
+            parsed = repaired
+            logger.info("[repurpose] JSON repair succeeded.")
+        except Exception as re_err:
+            logger.error(f"[repurpose] JSON repair also failed: {re_err}")
+            raise ValueError("Failed to parse LLM response as JSON")
 
     formats = _coerce_formats(parsed)
 
@@ -849,13 +966,12 @@ def _build_section_prompt(
     business_name: str,
     niche: str,
 ) -> str:
+    """Build a per-section regen prompt. Catalogs/rules live in
+    `_STATIC_SYSTEM_PROMPT` so back-to-back regens hit the Gemini cache."""
     sec_csv = ", ".join(secondary_keywords[:5]) or "(none)"
     business_line = (
         f"{business_name} ({niche})" if business_name or niche else "(not provided)"
     )
-    voice_block = VOICE_INSTRUCTIONS.get(voice, VOICE_INSTRUCTIONS[VoicePreset.founder_pov.value])
-    goal_block = GOAL_INSTRUCTIONS.get(goal, GOAL_INSTRUCTIONS[ContentGoal.authority.value])
-    cta_block = CTA_INSTRUCTIONS.get(cta_style, CTA_INSTRUCTIONS[CtaStyle.soft.value])
     preset_block = REWRITE_PROMPTS.get(preset or "", "") if preset else ""
     user_instruction = (instruction or "").strip()
 
@@ -888,14 +1004,10 @@ PRIMARY_KEYWORD: {primary_keyword}
 SECONDARY_KEYWORDS: {sec_csv}
 BUSINESS: {business_line}
 
-VOICE — {voice}:
-{voice_block}
-
-GOAL — {goal}:
-{goal_block}
-
-CTA_STYLE — {cta_style}:
-{cta_block}
+VOICE: {voice}
+GOAL: {goal}
+CTA_STYLE: {cta_style}
+VARIANTS: {variants}
 
 {directive}
 
@@ -906,14 +1018,6 @@ CTA_STYLE — {cta_style}:
 
 Return a single JSON object with exactly this shape:
 {schema}
-
-Hard rules:
-- Include SOURCE_URL verbatim in every format (final tweet, last carousel slide, end of each long-form post).
-- Each Twitter tweet must be 270 characters or fewer.
-- Email subject must be 70 characters or fewer.
-- NEVER use: unleash, elevate, revolutionize, unlock, landscape, delve, game-changer, embark, paradigm, synergy, leverage, cutting-edge, state of the art, seamless, robust solution, "in today's fast-paced world", "at the end of the day", "the key is", "it's important to", "make sure to".
-- Weave PRIMARY_KEYWORD naturally (no stuffing).
-- Output valid JSON only. No markdown fences, no preamble.
 """
 
 
@@ -1076,11 +1180,8 @@ def regenerate_section(
 
     raw = call_llm_with_fallback(
         prompt,
-        system=(
-            "You are a senior content strategist. You write like a human operator, "
-            "not a corporate blog. No AI clichés. No hedging. Output valid JSON only."
-        ),
-        temperature=0.65,
+        system=_STATIC_SYSTEM_PROMPT,
+        temperature=0.9,
         expect_json=True,
         caller=f"repurpose.regen[{section}]",
     )
