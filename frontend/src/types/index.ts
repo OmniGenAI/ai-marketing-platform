@@ -135,6 +135,8 @@ export interface GenerateResponse {
   website_context_used?: boolean;
   seo_keywords_used?: string[];
   primary_keyword?: string | null;
+  image_generation_failed?: boolean;
+  post_id?: string | null;
 }
 
 export type VoicePreset =
@@ -306,4 +308,90 @@ export interface VoiceOption {
 
 export interface VoicesResponse {
   voices: VoiceOption[];
+}
+// ---------------------------------------------------------------------------
+// Poster generator
+// ---------------------------------------------------------------------------
+// Keep these enums in sync with `backend/app/schemas/poster.py`.
+
+export type PosterTemplateStyle =
+  | "minimal"
+  | "bold"
+  | "corporate"
+  | "festival"
+  | "tech"
+  | "startup"
+  | "event"
+  | "sale";
+
+export type PosterAspectRatio = "1:1" | "4:5" | "9:16" | "16:9";
+
+export type PosterCaptionTone =
+  | "professional"
+  | "friendly"
+  | "witty"
+  | "casual";
+
+export type PosterStatus = "draft" | "exported";
+
+export interface Poster {
+  id: string;
+  user_id: string;
+  title: string;
+  theme: string;
+  optional_text: string | null;
+  template_style: PosterTemplateStyle;
+  aspect_ratio: PosterAspectRatio;
+  caption_tone: PosterCaptionTone;
+  headline: string | null;
+  tagline: string | null;
+  cta: string | null;
+  caption: string | null;
+  /** Eyebrow line above the headline ("30-Day Bootcamp · Self-paced"). */
+  event_meta: string | null;
+  /** 3 to 4 short benefit bullets — backend stores as JSON, client gets list. */
+  features: string[];
+  /** Footer brand strip ("BusinessName · site.com · @handle"). */
+  brand_label: string | null;
+  background_image_url: string | null;
+  primary_color: string | null;
+  secondary_color: string | null;
+  /** Serialized as the string "true"/"false" by the backend. */
+  show_logo: "true" | "false";
+  status: PosterStatus | string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PosterGenerateRequest {
+  title: string;
+  theme?: string;
+  optional_text?: string | null;
+  template_style: PosterTemplateStyle;
+  aspect_ratio: PosterAspectRatio;
+  caption_tone?: PosterCaptionTone;
+  primary_color?: string | null;
+  secondary_color?: string | null;
+  show_logo?: boolean;
+  /** Suggested action verb for the CTA — Enroll / Register / Join / Reserve / … */
+  cta_verb_hint?: string | null;
+}
+
+export interface PosterUpdate {
+  title?: string;
+  headline?: string;
+  tagline?: string;
+  cta?: string;
+  caption?: string;
+  event_meta?: string;
+  features?: string[];
+  brand_label?: string;
+  status?: PosterStatus | string;
+}
+
+export interface PosterGenerateResponse {
+  poster: Poster;
+  credits_remaining: number;
+  background_generation_failed: boolean;
 }

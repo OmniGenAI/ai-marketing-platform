@@ -35,7 +35,7 @@ TONE_LEGEND = {
 }
 
 # Per-provider model settings. Temps tuned for our output format (JSON mode).
-_PROVIDER_TEMPS = {"groq": 0.65, "xai": 0.8, "gemini": 0.6}
+_PROVIDER_TEMPS = {"groq": 0.65, "xai": 0.8, "openai": 0.7}
 _SCRIPT_MAX_TOKENS = 500  # plenty for a 60s reel (~130 words) + hashtags JSON
 
 # Untrusted-input delimiters — uncommon enough that casual injection strings
@@ -641,40 +641,17 @@ def generate_reel_script(
             print(f"[Reel] {provider_label} failed: {e}")
             return None
 
-    def _try_gemini() -> dict | None:
-        try:
-            api_url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-flash-latest:generateContent?key={settings.GOOGLE_GEMINI_API_KEY}"
-            )
-            response = httpx.post(
-                api_url,
-                json={
-                    "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-                    "contents": [{"parts": [{"text": user_msg}]}],
-                    "generationConfig": {
-                        "temperature": _PROVIDER_TEMPS["gemini"],
-                        "maxOutputTokens": _SCRIPT_MAX_TOKENS,
-                        "responseMimeType": "application/json",
-                    },
-                },
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            text = _extract_gemini_text(response.json())
-            if not text.strip():
-                raise ValueError("empty gemini response")
-            payload = _extract_json_object(text)
-            if payload is None:
-                # Gemini occasionally emits plaintext even with JSON mime — try
-                # to salvage: wrap whatever we got as the script.
-                print("[Reel] gemini returned non-JSON; salvaging as plaintext script")
-                payload = {"script": text.strip(), "hashtags": []}
-            return _record_candidate("gemini", payload)
-        except Exception as e:
-            errors.append(f"gemini: {type(e).__name__}")
-            print(f"[Reel] gemini failed: {e}")
+    def _try_openai() -> dict | None:
+        if not settings.OPENAI_API_KEY:
+            errors.append("openai: API key not configured")
             return None
+        return _try_openai_compat(
+            "https://api.openai.com/v1/chat/completions",
+            settings.OPENAI_API_KEY,
+            settings.OPENAI_TEXT_MODEL,
+            _PROVIDER_TEMPS["openai"],
+            "openai",
+        )
 
     def _is_good_enough(cand: dict | None) -> bool:
         if not cand:
@@ -706,8 +683,8 @@ def generate_reel_script(
         if _is_good_enough(cand):
             return {"script": cand["script"], "hashtags": cand["hashtags"]}
 
-    if settings.GOOGLE_GEMINI_API_KEY:
-        cand = _try_gemini()
+    if settings.OPENAI_API_KEY:
+        cand = _try_openai()
         if _is_good_enough(cand):
             return {"script": cand["script"], "hashtags": cand["hashtags"]}
 
@@ -722,7 +699,7 @@ def generate_reel_script(
 
     if errors:
         raise Exception(f"Script generation failed across all providers ({', '.join(errors)})")
-    raise Exception("No AI API key configured. Set GROQ_API_KEY, XAI_API_KEY, or GOOGLE_GEMINI_API_KEY.")
+    raise Exception("No AI API key configured. Set OPENAI_API_KEY, GROQ_API_KEY, or XAI_API_KEY.")
 
 def _add_audio_to_video_sync(video_path: str, audio_path: str, output_path: str) -> str:
     try:
@@ -1187,25 +1164,7 @@ async def process_reel_generation(
 
         script_preview = result["script"][:300].strip()
 
-        # --- Option 1: Gemini Veo 3 — per-sentence multi-scene with native audio ---
-        if settings.GOOGLE_GEMINI_API_KEY:
-            print(f"[Reel {reel_id}] Generating per-scene Veo 3 video (native audio)...")
-            _set_status(db_session, reel_id, "generating_ai_video")
-            sentences = split_script_into_sentences(result["script"])
-            print(f"[Reel {reel_id}] Script split into {len(sentences)} scene(s)")
-            if await generate_multi_scene_video_gemini(
-                sentences=sentences,
-                topic=topic,
-                tone=tone,
-                temp_dir=temp_dir,
-                output_path=ai_video_path,
-                generate_audio=False,
-            ):
-                use_ai_video = True
-                native_audio_embedded = True
-                print(f"[Reel {reel_id}] Veo 3 multi-scene video ready")
-
-        # --- Option 2: fal.ai / Pika (secondary AI generator) ---
+        # --- Option 1: fal.ai / Pika AI video generator ---
         if not use_ai_video and settings.FAL_API_KEY:
             print(f"[Reel {reel_id}] Generating AI video with fal.ai/Pika...")
             _set_status(db_session, reel_id, "generating_ai_video")

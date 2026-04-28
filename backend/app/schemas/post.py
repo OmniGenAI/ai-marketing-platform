@@ -48,6 +48,8 @@ class GenerateRequest(BaseModel):
     seo_mode: bool = False
     seo_save_id: str | None = None  # brief to pull keywords from
     blog_url: str | None = None  # optional backlink appended to content
+    aspect_ratio: str | None = None  # e.g. "1:1", "4:5", "9:16", "16:9", "1.91:1"
+    image_text: str | None = None  # optional headline to render on the AI image
 
     @field_validator("topic")
     @classmethod
@@ -73,3 +75,4 @@ class GenerateResponse(BaseModel):
     seo_keywords_used: list[str] = []
     primary_keyword: str | None = None
     image_generation_failed: bool = False  # True if AI image was requested but failed
+    post_id: str | None = None  # ID of the auto-saved draft Post row

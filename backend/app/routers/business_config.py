@@ -14,7 +14,7 @@ from app.dependencies import get_current_user
 from app.config import settings
 from app.services.scraper import scrape_website, website_context_to_json
 from app.services.seo_tools import extract_keywords_from_text
-from app.routers.seo import _gemini_call, _strip_fences
+from app.routers.seo import _llm_call, _strip_fences
 
 router = APIRouter(prefix="/api/brand-kit", tags=["brand-kit"])
 
@@ -63,7 +63,7 @@ Return a JSON object with exactly these fields:
 
 Rules: Only use information from the scraped content. No guessing. Return valid JSON only, no markdown fences."""
 
-    raw = _gemini_call(prompt, max_retries=2)
+    raw = _llm_call(prompt, max_retries=2)
     if not raw:
         logger.warning("[BRAND-KIT] LLM summary failed — no response")
         return None

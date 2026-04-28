@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import re
 import time
 import warnings
+from collections import Counter
 
 import httpx
 from bs4 import BeautifulSoup
@@ -43,10 +45,10 @@ def _find_inner_pages(soup: BeautifulSoup, base_url: str) -> dict[str, str]:
 
     base_domain = urlparse(base_url).netloc
     page_patterns = {
-        "about":    ["about", "about-us", "who-we-are", "our-story", "our-team"],
+        "about":    ["about", "about-us", "aboutus", "who-we-are", "our-story", "our-team", "company"],
         "services": ["services", "service", "what-we-do", "solutions", "offerings"],
-        "products": ["products", "product", "shop", "store", "catalogue", "catalog"],
-        "contact":  ["contact", "contact-us", "get-in-touch", "reach-us"],
+        "products": ["products", "product", "all-products", "shop", "store", "catalogue", "catalog"],
+        "contact":  ["contact", "contact-us", "contactus", "get-in-touch", "reach-us", "support"],
     }
     found: dict[str, str] = {}
 
@@ -89,6 +91,12 @@ def scrape_website(url: str) -> dict:
         "services_content": "",
         "contact_info": "",
         "pages_scraped": [],
+        "logo_url": None,
+        "favicon_url": None,
+        "primary_color": None,
+        "secondary_color": None,
+        "color_palette": [],
+        "social_links": {},
     }
 
     logger.info("[SCRAPER] Starting website scrape: %s", url)
@@ -111,8 +119,21 @@ def scrape_website(url: str) -> dict:
             result["meta_description"] = og_desc["content"]
 
     result["main_content"] = _extract_main_content(soup)[:3000]
-    result["contact_info"] = _extract_contact_info(soup)
     result["pages_scraped"].append(url)
+
+    # Collect every scraped soup so we can merge social + contact across pages
+    all_soups: list[tuple[str, BeautifulSoup]] = [(url, soup)]
+
+    # ── Brand assets (logo, colors) — homepage is most reliable here ───
+    try:
+        result["logo_url"] = _extract_logo(soup, url)
+        result["favicon_url"] = _extract_favicon(soup, url)
+        colors = _extract_brand_colors(soup, url)
+        result["primary_color"] = colors["primary"]
+        result["secondary_color"] = colors["secondary"]
+        result["color_palette"] = colors["palette"]
+    except Exception as e:
+        logger.warning("[SCRAPER] Brand asset extraction failed: %s", e)
 
     # ── Inner pages ─────────────────────────────────────────────────────
     inner_pages = _find_inner_pages(soup, url)
@@ -123,6 +144,7 @@ def scrape_website(url: str) -> dict:
         if about_soup:
             result["about_content"] = _extract_main_content(about_soup)[:2000]
             result["pages_scraped"].append(inner_pages["about"])
+            all_soups.append((inner_pages["about"], about_soup))
 
     if "services" in inner_pages or "products" in inner_pages:
         sp_url = inner_pages.get("services") or inner_pages.get("products")
@@ -130,16 +152,40 @@ def scrape_website(url: str) -> dict:
         if sp_soup:
             result["services_content"] = _extract_main_content(sp_soup)[:2000]
             result["pages_scraped"].append(sp_url)
+            all_soups.append((sp_url, sp_soup))
 
-    # If contact info not found on homepage, try contact page
-    if not result["contact_info"] and "contact" in inner_pages:
+    # Always fetch contact page if found — best source for emails/phones/socials
+    if "contact" in inner_pages:
         contact_soup = _fetch_html(inner_pages["contact"], timeout=10.0)
         if contact_soup:
-            result["contact_info"] = _extract_contact_info(contact_soup)
             if inner_pages["contact"] not in result["pages_scraped"]:
                 result["pages_scraped"].append(inner_pages["contact"])
+            all_soups.append((inner_pages["contact"], contact_soup))
 
-    logger.info("[SCRAPER] Done — title=%r pages=%d", result["title"][:50], len(result["pages_scraped"]))
+    # ── Merge contact + social across ALL scraped pages ────────────────
+    contact_parts: list[str] = []
+    social_links: dict[str, str] = {}
+    for _page_url, page_soup in all_soups:
+        for part in _extract_contact_info(page_soup).split("; "):
+            part = part.strip()
+            if part and part not in contact_parts:
+                contact_parts.append(part)
+        for net, link in _extract_social_links(page_soup).items():
+            if net not in social_links:
+                social_links[net] = link
+
+    result["contact_info"] = "; ".join(contact_parts)
+    result["social_links"] = social_links
+
+    logger.info(
+        "[SCRAPER] Done — title=%r pages=%d logo=%s primary=%s social=%d contact=%s",
+        result["title"][:50],
+        len(result["pages_scraped"]),
+        "yes" if result["logo_url"] else "no",
+        result["primary_color"],
+        len(social_links),
+        "yes" if contact_parts else "no",
+    )
     return result
 
 
@@ -180,32 +226,274 @@ def _find_about_page(soup: BeautifulSoup, base_url: str) -> str | None:
     return None
 
 
+# Email is matched only inside mailto: links to avoid false positives.
+# Phones come from tel: links OR a strict plain-text pattern that requires
+# either a leading '+' (country code) or parentheses around the area code.
+_EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+)
+_STRICT_PHONE_RE = re.compile(
+    # Must start with + (international) OR ( (US-style area code) — this
+    # avoids matching plain numbers like years, prices, page counts, etc.
+    r"(?:\+\d{1,3}[\s.\-]?\d{1,4}[\s.\-]?\d{2,4}[\s.\-]?\d{2,4}[\s.\-]?\d{0,4}"
+    r"|\(\d{2,4}\)\s?\d{3,4}[\s.\-]?\d{3,4})"
+)
+
+
+def _looks_like_phone(s: str) -> bool:
+    """Sanity check: 8–15 digits, not just a sequence of common false positives."""
+    digits = "".join(c for c in s if c.isdigit())
+    if not (8 <= len(digits) <= 15):
+        return False
+    # Reject if all digits are the same (e.g. "0000000000")
+    if len(set(digits)) == 1:
+        return False
+    # Reject if it's just a list of 4-digit years separated by spaces/commas
+    parts = re.split(r"[\s,;]+", s.strip())
+    if all(p.isdigit() and len(p) == 4 and 1900 <= int(p) <= 2100 for p in parts if p):
+        return False
+    return True
+
+
 def _extract_contact_info(soup: BeautifulSoup) -> str:
-    """Extract contact information from the page."""
-    contact_parts = []
+    """Extract contact information from explicit links + strict text patterns."""
+    contact_parts: list[str] = []
+    seen_emails: set[str] = set()
+    seen_phones: set[str] = set()
 
-    # Look for email addresses
-    email_links = soup.find_all("a", href=lambda x: x and x.startswith("mailto:"))
-    for link in email_links[:2]:
-        email = link["href"].replace("mailto:", "").split("?")[0]
-        if email and email not in contact_parts:
+    # 1. mailto: links — most reliable email source
+    for link in soup.find_all("a", href=lambda x: x and x.startswith("mailto:")):
+        email = link["href"].replace("mailto:", "").split("?")[0].strip().lower()
+        if email and "@" in email and email not in seen_emails:
+            seen_emails.add(email)
             contact_parts.append(f"Email: {email}")
+            if len(seen_emails) >= 2:
+                break
 
-    # Look for phone numbers
-    phone_links = soup.find_all("a", href=lambda x: x and x.startswith("tel:"))
-    for link in phone_links[:2]:
-        phone = link["href"].replace("tel:", "")
-        if phone and phone not in contact_parts:
+    # 2. tel: links — most reliable phone source
+    for link in soup.find_all("a", href=lambda x: x and x.startswith("tel:")):
+        phone = link["href"].replace("tel:", "").strip()
+        if phone and _looks_like_phone(phone) and phone not in seen_phones:
+            seen_phones.add(phone)
             contact_parts.append(f"Phone: {phone}")
+            if len(seen_phones) >= 2:
+                break
 
-    # Look for address in common elements
-    address_elements = soup.find_all(["address", "div", "p"], class_=lambda x: x and "address" in str(x).lower())
+    # 3. Email plain-text fallback (footer only — body too noisy)
+    if not seen_emails:
+        footer = soup.find("footer")
+        if footer:
+            for m in _EMAIL_RE.findall(footer.get_text(" ", strip=True)):
+                em = m.strip().lower()
+                if em.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+                    continue
+                if em not in seen_emails:
+                    seen_emails.add(em)
+                    contact_parts.append(f"Email: {em}")
+                    if len(seen_emails) >= 2:
+                        break
+
+    # 4. Phone plain-text fallback — STRICT pattern, footer only.
+    #    Skipped entirely if no tel: links found AND no strict-format match.
+    if not seen_phones:
+        footer = soup.find("footer")
+        if footer:
+            footer_text = footer.get_text(" ", strip=True)
+            for m in _STRICT_PHONE_RE.findall(footer_text):
+                phone = m.strip()
+                if not _looks_like_phone(phone):
+                    continue
+                if phone not in seen_phones:
+                    seen_phones.add(phone)
+                    contact_parts.append(f"Phone: {phone}")
+                    if len(seen_phones) >= 2:
+                        break
+
+    # 5. Address
+    address_elements = soup.find_all(
+        ["address", "div", "p"],
+        class_=lambda x: x and "address" in str(x).lower(),
+    )
+    if not address_elements:
+        address_tag = soup.find("address")
+        if address_tag:
+            address_elements = [address_tag]
     for elem in address_elements[:1]:
         address = elem.get_text(separator=" ", strip=True)
-        if address and len(address) > 10 and len(address) < 200:
+        if address and 10 < len(address) < 200:
             contact_parts.append(f"Address: {address}")
 
     return "; ".join(contact_parts)
+
+
+# ---------------------------------------------------------------------------
+# Brand asset extractors (logo, colors, social links)
+# ---------------------------------------------------------------------------
+
+def _extract_logo(soup: BeautifulSoup, base_url: str) -> str | None:
+    """Find the most likely logo URL using deterministic priority rules."""
+    # 1. <img> with logo class / alt / src
+    for img in soup.find_all("img"):
+        src = (img.get("src") or img.get("data-src") or "").strip()
+        if not src:
+            continue
+        cls = " ".join(img.get("class", [])).lower()
+        alt = (img.get("alt") or "").lower()
+        if "logo" in cls or "logo" in alt or "/logo" in src.lower() or "logo." in src.lower():
+            return urljoin(base_url, src)
+
+    # 2. <link rel="apple-touch-icon">
+    apple = soup.find("link", rel=lambda r: r and "apple-touch-icon" in (
+        " ".join(r) if isinstance(r, list) else r
+    ).lower())
+    if apple and apple.get("href"):
+        return urljoin(base_url, apple["href"])
+
+    # 3. og:image
+    og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
+    if og and og.get("content"):
+        return urljoin(base_url, og["content"])
+
+    # 4. twitter:image
+    tw = soup.find("meta", attrs={"name": "twitter:image"})
+    if tw and tw.get("content"):
+        return urljoin(base_url, tw["content"])
+
+    return None
+
+
+def _extract_favicon(soup: BeautifulSoup, base_url: str) -> str:
+    """Return the favicon URL, defaulting to /favicon.ico."""
+    for rel_match in ("icon", "shortcut icon"):
+        icon = soup.find("link", rel=lambda r: r and rel_match in (
+            " ".join(r) if isinstance(r, list) else r
+        ).lower())
+        if icon and icon.get("href"):
+            return urljoin(base_url, icon["href"])
+    return urljoin(base_url, "/favicon.ico")
+
+
+def _is_neutral_color(hex_color: str) -> bool:
+    """Skip whites, blacks, and grays — they're rarely brand colors."""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return True
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return True
+    if max(r, g, b) > 240 and min(r, g, b) > 240:
+        return True
+    if max(r, g, b) < 20:
+        return True
+    return (max(r, g, b) - min(r, g, b)) < 25
+
+
+def _normalize_hex(c: str) -> str:
+    c = c.strip().lower()
+    if c.startswith("#") and len(c) == 4:
+        return "#" + "".join(ch * 2 for ch in c[1:])
+    return c
+
+
+def _extract_brand_colors(soup: BeautifulSoup, base_url: str) -> dict:
+    """Extract brand colors via theme-color → CSS variables → frequency analysis."""
+    primary: str | None = None
+    secondary: str | None = None
+
+    # 1. theme-color meta — strong signal but skip neutrals
+    theme = soup.find("meta", attrs={"name": "theme-color"})
+    if theme and theme.get("content"):
+        candidate = theme["content"].strip()
+        if candidate.startswith("#"):
+            normalized = _normalize_hex(candidate)
+            if not _is_neutral_color(normalized):
+                primary = normalized
+
+    # 2. Collect CSS text from <style> + the first stylesheet only.
+    # Bounded fetching keeps Brand Kit save latency predictable on slow sites.
+    css_text = ""
+    for style in soup.find_all("style"):
+        css_text += style.get_text() + "\n"
+
+    stylesheet_links = soup.find_all("link", rel="stylesheet")[:1]
+    for link in stylesheet_links:
+        href = link.get("href")
+        if not href:
+            continue
+        try:
+            full_url = urljoin(base_url, href)
+            r = httpx.get(
+                full_url,
+                timeout=2.0,
+                headers=_HEADERS,
+                follow_redirects=True,
+            )
+            if r.status_code == 200:
+                css_text += r.text + "\n"
+        except Exception:
+            continue
+
+    # 3. CSS variables
+    var_matches = re.findall(
+        r"--(?:primary|brand|accent|main|theme|color-primary|color-brand)[\w-]*\s*:\s*"
+        r"(#[0-9a-fA-F]{3,8}\b|rgb[a]?\([^)]+\))",
+        css_text, re.IGNORECASE
+    )
+    var_hex: list[str] = [_normalize_hex(v) for v in var_matches if v.startswith("#")]
+
+    # 4. Frequency analysis
+    all_hex = re.findall(r"#[0-9a-fA-F]{6}\b", css_text)
+    normalized = [_normalize_hex(c) for c in all_hex]
+    filtered = [c for c in normalized if not _is_neutral_color(c)]
+    top_freq = [c for c, _ in Counter(filtered).most_common(8)]
+
+    candidates: list[str] = []
+    if primary:
+        candidates.append(primary)
+    candidates.extend(var_hex)
+    candidates.extend(top_freq)
+
+    seen: set[str] = set()
+    palette: list[str] = []
+    for c in candidates:
+        if c and c not in seen and not _is_neutral_color(c):
+            seen.add(c)
+            palette.append(c)
+        if len(palette) >= 6:
+            break
+
+    if not primary and palette:
+        primary = palette[0]
+    if len(palette) >= 2:
+        secondary = palette[1]
+
+    return {"primary": primary, "secondary": secondary, "palette": palette}
+
+
+def _extract_social_links(soup: BeautifulSoup) -> dict:
+    """Find social media profile URLs."""
+    networks = {
+        "instagram": "instagram.com",
+        "facebook": "facebook.com",
+        "twitter": "twitter.com",
+        "x": "x.com",
+        "linkedin": "linkedin.com",
+        "youtube": "youtube.com",
+        "tiktok": "tiktok.com",
+    }
+    found: dict[str, str] = {}
+    for link in soup.find_all("a", href=True):
+        href = link["href"].strip()
+        for name, domain in networks.items():
+            if name in found:
+                continue
+            if domain in href.lower():
+                found[name] = href
+                break
+    return found
 
 
 def website_context_to_json(context: dict) -> str:

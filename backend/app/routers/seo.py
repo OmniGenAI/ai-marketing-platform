@@ -177,49 +177,58 @@ class SEOScoreResponse(BaseModel):
 # LLM helpers — Gemini (primary) → Groq (fallback)
 # ---------------------------------------------------------------------------
 
-_GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent?key={key}"
-)
+_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"  # 300K TPM, 1K RPM, supports JSON mode
 _GROQ_MAX_CHARS = 25_000  # safe per-request limit
 
 
-def _gemini_call_raw(prompt: str, max_retries: int = 3) -> str | None:
-    """Raw Gemini call with exponential backoff on 429/5xx transient errors."""
-    if not settings.GOOGLE_GEMINI_API_KEY:
-        logger.warning("[LLM] Gemini API key not set — skipping")
+def _openai_call_raw(prompt: str, max_retries: int = 3) -> str | None:
+    """OpenAI call with exponential backoff on 429/5xx transient errors."""
+    if not settings.OPENAI_API_KEY:
+        logger.warning("[LLM] OpenAI API key not set — skipping")
         return None
-    logger.info("[LLM] 🔵 Calling Gemini (prompt %d chars)...", len(prompt))
+    logger.info("[LLM] 🔵 Calling OpenAI/%s (prompt %d chars)...", settings.OPENAI_TEXT_MODEL, len(prompt))
     t0 = time.time()
     for attempt in range(max_retries):
         try:
             resp = httpx.post(
-                _GEMINI_URL.format(key=settings.GOOGLE_GEMINI_API_KEY),
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                _OPENAI_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.OPENAI_TEXT_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert SEO strategist. Always respond with valid JSON only, no markdown fences."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.4,
+                    "response_format": {"type": "json_object"},
+                },
                 timeout=25.0,
             )
             if resp.status_code in (429, 500, 502, 503, 504):
                 wait = 2 ** (attempt + 1)
                 logger.warning(
-                    "[LLM] Gemini %d, retrying in %ds (attempt %d/%d)",
+                    "[LLM] OpenAI %d, retrying in %ds (attempt %d/%d)",
                     resp.status_code, wait, attempt + 1, max_retries,
                 )
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            logger.info("[LLM] ✅ Gemini responded in %.1fs (%d chars)", time.time() - t0, len(text))
+            text = resp.json()["choices"][0]["message"]["content"]
+            logger.info("[LLM] ✅ OpenAI responded in %.1fs (%d chars)", time.time() - t0, len(text))
             return text
         except httpx.HTTPStatusError as exc:
-            logger.warning("[LLM] ❌ Gemini HTTP error %s: %s", exc.response.status_code, exc)
+            logger.warning("[LLM] ❌ OpenAI HTTP error %s: %s", exc.response.status_code, exc)
             return None
         except Exception as exc:
-            logger.warning("[LLM] ❌ Gemini call failed: %s", exc)
+            logger.warning("[LLM] ❌ OpenAI call failed: %s", exc)
             return None
-    logger.warning("[LLM] ❌ Gemini exhausted retries after %d attempts (%.1fs)", max_retries, time.time() - t0)
+    logger.warning("[LLM] ❌ OpenAI exhausted retries after %d attempts (%.1fs)", max_retries, time.time() - t0)
     return None
 
 
@@ -300,12 +309,12 @@ def _groq_call(prompt: str, max_retries: int = 2, json_mode: bool = True) -> str
     return None
 
 
-def _gemini_call(prompt: str, max_retries: int = 3) -> str | None:
-    """Try Gemini first, fall back to Groq if Gemini fails."""
-    result = _gemini_call_raw(prompt, max_retries=max_retries)
+def _llm_call(prompt: str, max_retries: int = 3) -> str | None:
+    """Try OpenAI first, fall back to Groq if OpenAI fails."""
+    result = _openai_call_raw(prompt, max_retries=max_retries)
     if result:
         return result
-    logger.info("[LLM] ⚠️  Gemini unavailable — falling back to Groq")
+    logger.info("[LLM] ⚠️  OpenAI unavailable — falling back to Groq")
     if len(prompt) > _GROQ_MAX_CHARS:
         prompt = prompt[:_GROQ_MAX_CHARS] + "\n\n[...content truncated for fallback model...]"
         logger.warning("[LLM] Prompt truncated to %d chars for Groq fallback", _GROQ_MAX_CHARS)
@@ -381,7 +390,7 @@ def extract_seo_keywords(topic: str, use_serp_grounding: bool = True) -> dict:
         f"Topic: {topic}"
     )
 
-    raw = _gemini_call(prompt, max_retries=2)
+    raw = _llm_call(prompt, max_retries=2)
     primary, secondary = "", []
     if raw:
         try:
@@ -675,7 +684,7 @@ Rules:
 """
     logger.info("[ANALYSE] 🧠 Sending aggregated data to LLM for analysis...")
     t0 = time.time()
-    raw = _gemini_call(prompt, max_retries=3)
+    raw = _llm_call(prompt, max_retries=3)
     if raw:
         try:
             parsed = json.loads(_strip_fences(raw))
@@ -1530,7 +1539,7 @@ Return ONLY a JSON array, no markdown, no commentary:
 """
 
     tips: list[SEOTip] = []
-    raw = _gemini_call(prompt)
+    raw = _llm_call(prompt)
 
     if raw:
         try:
@@ -1686,7 +1695,7 @@ Return ONLY this JSON object (no markdown, no commentary):
 }}
 """
 
-    raw = _gemini_call(prompt)
+    raw = _llm_call(prompt)
     if not raw or not raw.strip():
         raise HTTPException(
             status_code=503,

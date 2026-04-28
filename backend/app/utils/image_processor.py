@@ -2,10 +2,64 @@
 Image processing utilities for social media posting.
 Handles automatic resizing/cropping to meet platform requirements.
 """
+import base64
 import io
+import logging
+import uuid
+
 import httpx
 from PIL import Image
 from typing import Tuple, Optional
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def upload_bytes_to_supabase(
+    image_bytes: bytes,
+    user_id: str,
+    *,
+    extension: str = "png",
+    content_type: str = "image/png",
+    bucket: str = "post-images",
+    subfolder: str = "ai-generated",
+) -> str | None:
+    """Synchronously upload raw image bytes to Supabase Storage.
+
+    Returns the public URL on success, or None if Supabase isn't configured /
+    upload fails. Designed to be called from sync code paths (e.g. inside a
+    threadpool task) so we can avoid awaiting the async upload helper.
+    """
+    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        logger.info("Supabase storage not configured — cannot upload generated image")
+        return None
+
+    file_path = f"{user_id}/{subfolder}/{uuid.uuid4()}.{extension}"
+    upload_url = (
+        f"{settings.SUPABASE_URL}/storage/v1/object/{bucket}/{file_path}"
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": content_type,
+    }
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(upload_url, headers=headers, content=image_bytes)
+            if resp.status_code not in (200, 201):
+                logger.warning(
+                    "Supabase upload failed (%s): %s",
+                    resp.status_code, resp.text[:200],
+                )
+                return None
+        return (
+            f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+            f"{bucket}/{file_path}"
+        )
+    except Exception as e:
+        logger.warning("Supabase upload exception: %s", e)
+        return None
 
 
 def get_instagram_compatible_aspect_ratio(width: int, height: int) -> Tuple[float, str]:
@@ -184,3 +238,63 @@ async def upload_processed_image(
     print(f"✅ Uploaded processed image: {public_url}")
 
     return public_url
+
+def composite_logo_on_image(
+    image_bytes: bytes,
+    logo_url: str,
+    position: str = "bottom-right",
+    logo_scale: float = 0.15,
+    padding_ratio: float = 0.04,
+) -> bytes:
+    """
+    Overlay a brand logo onto a generated marketing image.
+
+    Args:
+        image_bytes: Source image bytes (the AI-generated marketing photo).
+        logo_url: HTTP(S) URL or data URI of the brand logo.
+        position: "bottom-right" | "bottom-left" | "top-right" | "top-left".
+        logo_scale: Logo width as fraction of image width (default 15%).
+        padding_ratio: Edge padding as fraction of image width (default 4%).
+
+    Returns:
+        bytes: PNG-encoded composite image. Falls back to the original on failure.
+    """
+    try:
+        base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+
+        # Load logo from data URI or HTTP(S)
+        if logo_url.startswith("data:"):
+            _, b64 = logo_url.split(",", 1)
+            logo_data = base64.b64decode(b64)
+        else:
+            with httpx.Client(timeout=15.0, follow_redirects=True, verify=False) as c:
+                resp = c.get(logo_url)
+                resp.raise_for_status()
+                logo_data = resp.content
+
+        logo = Image.open(io.BytesIO(logo_data)).convert("RGBA")
+
+        # Resize logo preserving aspect ratio
+        target_w = max(1, int(base.width * logo_scale))
+        ratio = target_w / logo.width
+        target_h = max(1, int(logo.height * ratio))
+        logo = logo.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        pad = int(base.width * padding_ratio)
+        if position == "bottom-right":
+            x, y = base.width - target_w - pad, base.height - target_h - pad
+        elif position == "bottom-left":
+            x, y = pad, base.height - target_h - pad
+        elif position == "top-right":
+            x, y = base.width - target_w - pad, pad
+        else:
+            x, y = pad, pad
+
+        base.alpha_composite(logo, dest=(x, y))
+
+        out = io.BytesIO()
+        base.convert("RGB").save(out, format="PNG", optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        logger.warning(f"Logo composite failed, returning original image: {e}")
+        return image_bytes

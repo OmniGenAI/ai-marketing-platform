@@ -8,6 +8,7 @@ from app.models.social_account import SocialAccount
 from app.models.business_image import BusinessImage
 from app.models.reel import Reel
 from app.models.seo_save import SeoSave
+from app.models.poster import Poster
 
 __all__ = [
     "User",
@@ -21,4 +22,5 @@ __all__ = [
     "BusinessImage",
     "Reel",
     "SeoSave",
+    "Poster",
 ]

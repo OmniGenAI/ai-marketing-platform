@@ -147,6 +147,19 @@ export default function BrandKitPage() {
     tone?: string;
     highlights?: string[];
   } | null>(null);
+  const [scrapedContext, setScrapedContext] = useState<{
+    title?: string;
+    meta_description?: string;
+    logo_url?: string | null;
+    favicon_url?: string | null;
+    primary_color?: string | null;
+    secondary_color?: string | null;
+    color_palette?: string[];
+    social_links?: Record<string, string>;
+    contact_info?: string;
+    top_keywords?: string[];
+    pages_scraped?: string[];
+  } | null>(null);
   const [config, setConfig] = useState<BrandKitState>({
     business_name: "",
     niche: "",
@@ -173,6 +186,22 @@ export default function BrandKitPage() {
             competitors: response.data.competitors || "",
             website: response.data.website || "",
           }));
+          // Rehydrate previously saved scraped context (logo, colors, etc.)
+          if (response.data.website_context) {
+            try {
+              const ctx = JSON.parse(response.data.website_context);
+              setScrapedContext(ctx);
+              if (ctx.ai_summary) {
+                try {
+                  setWebsiteSummary(JSON.parse(ctx.ai_summary));
+                } catch {
+                  /* ignore */
+                }
+              }
+            } catch {
+              /* ignore malformed JSON */
+            }
+          }
         }
       } catch (error: unknown) {
         const err = error as { response?: { status?: number } };
@@ -224,6 +253,7 @@ export default function BrandKitPage() {
           ...prev,
           website_context: JSON.stringify(response.data.context),
         }));
+        setScrapedContext(response.data.context || null);
         if (response.data.summary) {
           try {
             setWebsiteSummary(JSON.parse(response.data.summary));
@@ -463,6 +493,133 @@ export default function BrandKitPage() {
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <span className="text-xs font-medium">AI context extracted from your website</span>
                   </div>
+
+                  {/* Brand Identity card: logo + colors + meta */}
+                  {scrapedContext && (
+                    <div className="rounded-lg border border-border bg-muted/20 p-4 space-y-4">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        <Sparkles className="h-3.5 w-3.5 text-sky-500" />
+                        Brand Identity Detected
+                      </div>
+
+                      <div className="flex items-start gap-4">
+                        {/* Logo preview */}
+                        {(scrapedContext.logo_url || scrapedContext.favicon_url) && (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={scrapedContext.logo_url || scrapedContext.favicon_url || ""}
+                            alt="Brand logo"
+                            className="w-16 h-16 rounded-lg border border-border bg-white object-contain p-2 shrink-0"
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (scrapedContext.favicon_url && img.src !== scrapedContext.favicon_url) {
+                                img.src = scrapedContext.favicon_url;
+                              } else {
+                                img.style.display = "none";
+                              }
+                            }}
+                          />
+                        )}
+                        <div className="flex-1 min-w-0 space-y-1">
+                          {scrapedContext.title && (
+                            <p className="text-sm font-semibold truncate">{scrapedContext.title}</p>
+                          )}
+                          {scrapedContext.meta_description && (
+                            <p className="text-xs text-muted-foreground line-clamp-2">{scrapedContext.meta_description}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Color palette */}
+                      {(scrapedContext.primary_color || (scrapedContext.color_palette?.length ?? 0) > 0) && (
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Colors</div>
+                          <div className="flex flex-wrap gap-2">
+                            {scrapedContext.primary_color && (
+                              <div className="flex items-center gap-2 px-2 py-1 rounded-md border border-border bg-background">
+                                <span
+                                  className="w-5 h-5 rounded border border-border shrink-0"
+                                  style={{ backgroundColor: scrapedContext.primary_color }}
+                                />
+                                <span className="text-[11px] font-mono">{scrapedContext.primary_color}</span>
+                                <span className="text-[10px] text-muted-foreground">primary</span>
+                              </div>
+                            )}
+                            {scrapedContext.secondary_color && (
+                              <div className="flex items-center gap-2 px-2 py-1 rounded-md border border-border bg-background">
+                                <span
+                                  className="w-5 h-5 rounded border border-border shrink-0"
+                                  style={{ backgroundColor: scrapedContext.secondary_color }}
+                                />
+                                <span className="text-[11px] font-mono">{scrapedContext.secondary_color}</span>
+                                <span className="text-[10px] text-muted-foreground">secondary</span>
+                              </div>
+                            )}
+                            {(scrapedContext.color_palette || [])
+                              .filter((c) => c !== scrapedContext.primary_color && c !== scrapedContext.secondary_color)
+                              .slice(0, 4)
+                              .map((c) => (
+                                <div
+                                  key={c}
+                                  className="flex items-center gap-1.5 px-1.5 py-1 rounded-md border border-border bg-background"
+                                  title={c}
+                                >
+                                  <span className="w-4 h-4 rounded border border-border" style={{ backgroundColor: c }} />
+                                  <span className="text-[10px] font-mono text-muted-foreground">{c}</span>
+                                </div>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Top keywords */}
+                      {Array.isArray(scrapedContext.top_keywords) && scrapedContext.top_keywords.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Top Keywords</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {scrapedContext.top_keywords.slice(0, 8).map((k, i) => (
+                              <span key={i} className="inline-block px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400 text-[11px] font-medium">{k}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Social links */}
+                      {scrapedContext.social_links && Object.keys(scrapedContext.social_links).length > 0 && (
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Social</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(scrapedContext.social_links).map(([net, url]) => (
+                              <a
+                                key={net}
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-block px-2 py-0.5 rounded-md bg-muted text-foreground/80 hover:text-primary text-[11px] font-medium capitalize transition-colors"
+                              >
+                                {net}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Pages scraped + contact */}
+                      {(scrapedContext.contact_info || (scrapedContext.pages_scraped?.length ?? 0) > 0) && (
+                        <div className="pt-1 space-y-1 text-[11px] text-muted-foreground border-t border-border">
+                          {scrapedContext.contact_info && (
+                            <p className="pt-2"><span className="font-semibold">Contact:</span> {scrapedContext.contact_info}</p>
+                          )}
+                          {(scrapedContext.pages_scraped?.length ?? 0) > 0 && (
+                            <p className={scrapedContext.contact_info ? "" : "pt-2"}>
+                              <span className="font-semibold">Pages read:</span> {scrapedContext.pages_scraped!.length}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {websiteSummary && (
                     <div className="rounded-lg border border-border bg-muted/20 p-4 space-y-3">
                       <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">

@@ -28,10 +28,14 @@ class Settings(BaseSettings):
     # Groq AI (super fast, free tier available)
     GROQ_API_KEY: str = ""
 
-    # OpenAI (image generation fallback - gpt-image-1 / dall-e-3)
+    # OpenAI
     OPENAI_API_KEY: str = ""
-    OPENAI_IMAGE_MODEL: str = "gpt-image-1-mini"
+    OPENAI_TEXT_MODEL: str = "gpt-4.1-mini"
+    OPENAI_IMAGE_MODEL: str = "gpt-image-1"
     OPENAI_IMAGE_SIZE: str = "1024x1024"
+
+    # Poster generation — credit cost per AI poster (background + copy)
+    POSTER_CREDIT_COST: int = 1
 
     # fal.ai API (for Pika AI video generation)
     FAL_API_KEY: str = ""

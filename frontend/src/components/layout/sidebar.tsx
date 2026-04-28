@@ -14,6 +14,7 @@ import {
   Search,
   BookOpen,
   Recycle,
+  Image as ImageIcon,
 } from "lucide-react";
 
 const navItems = [
@@ -31,6 +32,11 @@ const navItems = [
     title: "Generate Post",
     href: "/generate/social",
     icon: Sparkles,
+  },
+  {
+    title: "Generate Poster",
+    href: "/generate/poster",
+    icon: ImageIcon,
   },
   {
     title: "Create Reel",

@@ -10,6 +10,7 @@ from app.models.business_config import BusinessConfig
 from app.models.business_image import BusinessImage
 from app.models.wallet import Wallet, UsageLog
 from app.models.seo_save import SeoSave
+from app.models.post import Post
 from app.schemas.post import GenerateRequest, GenerateResponse
 from app.dependencies import get_current_user
 from app.services.ai import generate_social_post, generate_image_from_prompt
@@ -150,12 +151,37 @@ async def generate_post(
             image_url = business_image.url
 
     elif data.image_option == "ai":
+        # Pull brand colors + logo from saved Brand Kit website_context, if any
+        primary_color: str | None = None
+        secondary_color: str | None = None
+        brand_logo_url: str | None = None
+        if config.website_context:
+            try:
+                ctx = json.loads(config.website_context)
+                primary_color = ctx.get("primary_color") or None
+                secondary_color = ctx.get("secondary_color") or None
+                brand_logo_url = ctx.get("logo_url") or ctx.get("favicon_url") or None
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        logger.info(
+            f"[IMAGE] user={current_user.id} primary={primary_color} "
+            f"secondary={secondary_color} logo={'yes' if brand_logo_url else 'no'} "
+            f"logo_url={brand_logo_url[:80] if brand_logo_url else None}"
+        )
+
         try:
             image_url = await run_in_threadpool(
                 generate_image_from_prompt,
                 topic=data.topic,
                 business_name=config.business_name,
                 niche=config.niche,
+                primary_color=primary_color,
+                secondary_color=secondary_color,
+                logo_url=brand_logo_url,
+                aspect_ratio=data.aspect_ratio,
+                overlay_text=data.image_text,
+                user_id=current_user.id,
             )
         except Exception as e:
             logger.error(f"AI image generation failed for user {current_user.id}: {e}", exc_info=True)
@@ -188,6 +214,30 @@ async def generate_post(
 
     seo_keywords_used = [k for k in [primary_keyword, *seo_keywords] if k]
 
+    # Auto-save the generated post as a draft so it appears in the hub.
+    post_id: str | None = None
+    try:
+        post = Post(
+            user_id=current_user.id,
+            content=result["content"],
+            hashtags=result["hashtags"],
+            image_url=image_url,
+            image_option=data.image_option,
+            platform=data.platform,
+            tone=data.tone,
+            status="draft",
+        )
+        db.add(post)
+        db.commit()
+        db.refresh(post)
+        post_id = post.id
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            f"Failed to auto-save generated post for user {current_user.id}: {e}",
+            exc_info=True,
+        )
+
     return GenerateResponse(
         content=result["content"],
         hashtags=result["hashtags"],
@@ -196,4 +246,5 @@ async def generate_post(
         seo_keywords_used=seo_keywords_used,
         primary_keyword=primary_keyword or None,
         image_generation_failed=image_generation_failed,
+        post_id=post_id,
     )

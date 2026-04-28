@@ -3,7 +3,9 @@ import { createClient } from "@/lib/supabase/client";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  timeout: 60000,
+  // 3 minutes — image generation (planner LLM + OpenAI image + logo overlay)
+  // can take 30-90s end-to-end. 60s was causing false timeouts.
+  timeout: 180000,
 });
 
 // Store current access token globally

@@ -10,7 +10,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster
 
 
 def seed_default_plans():
@@ -154,6 +154,51 @@ def ensure_tables_exist():
             print("✅ seo_saves table created successfully")
         else:
             print("✅ seo_saves table already exists")
+
+        # posters table
+        result3 = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'posters')"))
+        if not result3.scalar():
+            print("📦 Creating posters table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS posters (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL REFERENCES users(id),
+                    title VARCHAR(500) NOT NULL,
+                    theme VARCHAR(255) NOT NULL DEFAULT '',
+                    optional_text TEXT,
+                    template_style VARCHAR(50) NOT NULL DEFAULT 'minimal',
+                    aspect_ratio VARCHAR(20) NOT NULL DEFAULT '1:1',
+                    caption_tone VARCHAR(50) NOT NULL DEFAULT 'professional',
+                    headline TEXT,
+                    tagline TEXT,
+                    cta VARCHAR(255),
+                    caption TEXT,
+                    event_meta VARCHAR(255),
+                    features TEXT,
+                    brand_label VARCHAR(255),
+                    background_image_url TEXT,
+                    primary_color VARCHAR(20),
+                    secondary_color VARCHAR(20),
+                    show_logo VARCHAR(10) NOT NULL DEFAULT 'true',
+                    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+                    error_message TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_posters_user_id ON posters(user_id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_posters_status ON posters(status)"))
+            db.commit()
+            print("✅ posters table created successfully")
+        else:
+            print("✅ posters table already exists")
+
+        # Idempotent column adds for posters depth fields (event_meta / features /
+        # brand_label) — safe to run on every startup even after the table exists.
+        db.execute(text("ALTER TABLE posters ADD COLUMN IF NOT EXISTS event_meta VARCHAR(255)"))
+        db.execute(text("ALTER TABLE posters ADD COLUMN IF NOT EXISTS features TEXT"))
+        db.execute(text("ALTER TABLE posters ADD COLUMN IF NOT EXISTS brand_label VARCHAR(255)"))
+        db.commit()
     except Exception as e:
         print(f"❌ Error checking/creating tables: {e}")
         db.rollback()
@@ -207,6 +252,7 @@ app.include_router(reels.router)
 app.include_router(seo.router)
 app.include_router(blog.router)
 app.include_router(repurpose.router)
+app.include_router(poster.router)
 
 
 @app.get("/")

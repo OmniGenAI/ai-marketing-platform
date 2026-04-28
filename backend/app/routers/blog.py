@@ -13,7 +13,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.seo_save import SeoSave
 from app.models.user import User
-from app.routers.seo import _gemini_call, _strip_fences
+from app.routers.seo import _llm_call, _strip_fences
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ def generate_blog(
     t0 = time.time()
 
     prompt = _build_blog_prompt(data)
-    raw = _gemini_call(prompt, max_retries=3)
+    raw = _llm_call(prompt, max_retries=3)
     logger.info("[BLOG] LLM raw response (%d chars): %s", len(raw) if raw else 0, (raw or "")[:2000])
 
     if not raw:

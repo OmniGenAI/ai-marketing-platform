@@ -23,12 +23,14 @@ import {
   FileText,
   CreditCard,
   Building2,
+  Image as ImageIcon,
 } from "lucide-react";
 
 const navItems = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { title: "Brand Kit", href: "/brand-kit", icon: Building2 },
   { title: "Generate Post", href: "/generate/social", icon: Sparkles },
+  { title: "Generate Poster", href: "/generate/poster", icon: ImageIcon },
   { title: "My Posts", href: "/posts", icon: FileText },
   { title: "Subscription", href: "/subscription", icon: CreditCard },
   { title: "Settings", href: "/settings", icon: Settings },
