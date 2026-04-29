@@ -168,11 +168,17 @@ def create_reel(
             description=data.description,
         )
     except Exception as exc:
-        # Never leak upstream provider text — it can include headers / keys.
+        # Log the full chain for Render Logs; surface a short reason in the
+        # API response so the frontend can show *which* provider/cause failed
+        # without leaking secrets (the underlying providers are quoted by
+        # name, not by raw error text from their HTTP responses).
+        import traceback
+        traceback.print_exc()
         print(f"[Reel] Script generation failed: {exc}")
+        reason = str(exc)[:200] or type(exc).__name__
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to generate script. Please try again.",
+            detail=f"Failed to generate script: {reason}",
         )
 
     # Prefer SEO-researched hashtags over whatever the LLM freestyled; fall
