@@ -45,6 +45,18 @@ REEL_CREDIT_COST = 4
 REEL_PIPELINE_TIMEOUT_S = 15 * 60
 
 
+def _pipeline_timeout_for(duration_target: int) -> int:
+    """xAI grok-imagine-video maxes out at 15s per clip, so a 60s reel needs
+    4 sequential/parallel segment generations + merge + TTS + upload. Scale
+    the wall-clock budget with the requested duration so a 60s reel doesn't
+    inherit the same 15-minute deadline as a 15s reel."""
+    if duration_target <= 15:
+        return 15 * 60
+    if duration_target <= 30:
+        return 25 * 60
+    return 40 * 60  # 60s+ — 4 segments in parallel + compose
+
+
 def _refund_reel_credits(db: Session, user_id: str, reason: str) -> None:
     """Credit back REEL_CREDIT_COST after a pipeline failure. No-op for unlimited wallets."""
     wallet = db.query(Wallet).filter(Wallet.user_id == user_id).first()
@@ -309,7 +321,7 @@ async def run_reel_generation(
                 primary_keyword=primary_keyword,
                 db_session=db,
             ),
-            timeout=REEL_PIPELINE_TIMEOUT_S,
+            timeout=_pipeline_timeout_for(duration_target),
         )
     except asyncio.TimeoutError:
         print(f"[Reel {reel_id}] pipeline deadline exceeded — refunding credits")

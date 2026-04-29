@@ -37,7 +37,20 @@ TONE_LEGEND = {
 
 # Per-provider model settings. Temps tuned for our output format (JSON mode).
 _PROVIDER_TEMPS = {"openai": 0.7, "xai": 0.8}
-_SCRIPT_MAX_TOKENS = 500  # plenty for a 60s reel (~130 words) + hashtags JSON
+# Was 500 — too tight after we added the `scenes` timeline array. For a 60s
+# reel that's ~130 spoken words PLUS 6 scene objects with start/end/text and
+# 5–10 hashtags, which routinely overflowed and caused JSON parse failures
+# ("Failed to generate script"). Scaled per-call by `_script_max_tokens_for`.
+_SCRIPT_MAX_TOKENS_BASE = 800
+_SCRIPT_MAX_TOKENS_FLOOR = 600
+_SCRIPT_MAX_TOKENS_CEIL = 2200
+
+
+def _script_max_tokens_for(duration_target: int) -> int:
+    """Token budget grows with reel length: longer reels = more scenes + words."""
+    # ~24 tokens per second covers spoken text + scene metadata + hashtags JSON.
+    estimate = _SCRIPT_MAX_TOKENS_BASE + duration_target * 24
+    return max(_SCRIPT_MAX_TOKENS_FLOOR, min(_SCRIPT_MAX_TOKENS_CEIL, estimate))
 
 # Untrusted-input delimiters — uncommon enough that casual injection strings
 # don't match them. Paired with an explicit "data, not instructions" note.
@@ -195,31 +208,43 @@ async def generate_multi_segment_ai_video(
     num_segments = (duration_target + XAI_VIDEO_MAX_DURATION_S - 1) // XAI_VIDEO_MAX_DURATION_S
     segment_duration = XAI_VIDEO_MAX_DURATION_S  # Each segment is max 15s
 
-    print(f"[Multi-Segment] Generating {num_segments} x {segment_duration}s clips for {duration_target}s video")
+    print(f"[Multi-Segment] Generating {num_segments} x {segment_duration}s clips for {duration_target}s video (parallel)")
 
     # Generate scene prompts for each segment
     scene_prompts = _generate_scene_prompts(script, topic, tone, num_segments)
 
-    # Generate each segment
-    segment_paths = []
-    for i, prompt in enumerate(scene_prompts):
+    # Run xAI generations in parallel — each call blocks ~1-3 minutes; doing
+    # them sequentially for a 60s reel (4 segments) blows past the pipeline
+    # deadline. Cap concurrency at 4 to stay polite to the provider.
+    semaphore = asyncio.Semaphore(min(4, num_segments))
+
+    async def _gen(i: int, prompt: str) -> tuple[int, str | None]:
         segment_path = os.path.join(temp_dir, f"segment_{i}.mp4")
-        print(f"[Multi-Segment] Generating segment {i+1}/{num_segments}...")
-
-        ok = await generate_ai_video_xai(
-            prompt=prompt,
-            output_path=segment_path,
-            duration=segment_duration,
-            aspect_ratio=aspect_ratio,
-            resolution=resolution,
-        )
-
+        async with semaphore:
+            print(f"[Multi-Segment] Starting segment {i+1}/{num_segments}…")
+            try:
+                ok = await asyncio.wait_for(
+                    generate_ai_video_xai(
+                        prompt=prompt,
+                        output_path=segment_path,
+                        duration=segment_duration,
+                        aspect_ratio=aspect_ratio,
+                        resolution=resolution,
+                    ),
+                    timeout=8 * 60,  # per-segment cap so one stuck job can't hold the rest
+                )
+            except asyncio.TimeoutError:
+                print(f"[Multi-Segment] Segment {i+1} TIMED OUT")
+                return i, None
         if ok and os.path.exists(segment_path):
-            segment_paths.append(segment_path)
-            print(f"[Multi-Segment] Segment {i+1} generated successfully")
-        else:
-            print(f"[Multi-Segment] Segment {i+1} FAILED")
-            # Continue with remaining segments even if one fails
+            print(f"[Multi-Segment] Segment {i+1} ready")
+            return i, segment_path
+        print(f"[Multi-Segment] Segment {i+1} FAILED")
+        return i, None
+
+    results = await asyncio.gather(*[_gen(i, p) for i, p in enumerate(scene_prompts)])
+    # Preserve scene order for the merge — gather already keeps order, but be explicit.
+    segment_paths = [path for _, path in sorted(results, key=lambda r: r[0]) if path]
 
     if not segment_paths:
         print("[Multi-Segment] No segments generated successfully")
@@ -700,7 +725,7 @@ def generate_reel_script(
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=_PROVIDER_TEMPS["openai"],
-                max_tokens=_SCRIPT_MAX_TOKENS,
+                max_tokens=_script_max_tokens_for(duration_target),
                 response_format={"type": "json_object"},
             )
             text = response.choices[0].message.content or ""
