@@ -21,6 +21,28 @@ from app.config import settings
 router = APIRouter(prefix="/api/subscription", tags=["subscription"])
 
 
+def _frontend_base_url() -> str:
+    """Return FRONTEND_URL guaranteed to include a scheme.
+
+    Stripe rejects checkout URLs without an explicit `http://` / `https://`,
+    but on hosted deploys (Render/Fly/etc.) the env var is occasionally set
+    without a scheme — or not set at all. We normalize here so a misconfigured
+    environment doesn't break Upgrade-plan in production.
+    """
+    raw = (settings.FRONTEND_URL or "").strip().rstrip("/")
+    if not raw:
+        return "http://localhost:3000"
+    if raw.startswith(("http://", "https://")):
+        return raw
+    lowered = raw.lower()
+    is_local = (
+        lowered.startswith("localhost")
+        or lowered.startswith("127.0.0.1")
+        or lowered.endswith(".local")
+    )
+    return f"{'http' if is_local else 'https'}://{raw}"
+
+
 @router.get("/status", response_model=SubscriptionResponse | None)
 def get_subscription_status(
     current_user: User = Depends(get_current_user),
@@ -71,8 +93,8 @@ def create_checkout(
             plan_id=str(plan.id),
             user_email=current_user.email,
             # Include session_id in success URL for verification
-            success_url=f"{settings.FRONTEND_URL}/subscription?success=true&session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{settings.FRONTEND_URL}/subscription?canceled=true",
+            success_url=f"{_frontend_base_url()}/subscription?success=true&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{_frontend_base_url()}/subscription?canceled=true",
         )
 
         return {
@@ -396,7 +418,7 @@ def get_billing_portal(
     try:
         portal_url = create_customer_portal_session(
             subscription.stripe_customer_id,
-            return_url=f"{settings.FRONTEND_URL}/subscription",
+            return_url=f"{_frontend_base_url()}/subscription",
         )
 
         if not portal_url:
