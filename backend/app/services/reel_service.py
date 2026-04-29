@@ -139,6 +139,198 @@ async def generate_ai_video_xai(
     return True
 
 
+def _generate_scene_prompts(script: str, topic: str, tone: str, num_segments: int) -> list[str]:
+    """
+    Generate distinct visual scene prompts for each video segment.
+    Each prompt describes what should be visually shown in that segment.
+    """
+    # Split script into roughly equal parts
+    words = script.split()
+    words_per_segment = max(1, len(words) // num_segments)
+
+    scene_prompts = []
+    for i in range(num_segments):
+        start_idx = i * words_per_segment
+        end_idx = start_idx + words_per_segment if i < num_segments - 1 else len(words)
+        segment_text = " ".join(words[start_idx:end_idx])[:200]
+
+        # Create varied visual styles for each segment
+        visual_styles = [
+            "establishing shot with smooth camera movement",
+            "close-up detail shot with bokeh background",
+            "dynamic angle with engaging visuals",
+            "wide cinematic shot with depth",
+        ]
+        style = visual_styles[i % len(visual_styles)]
+
+        prompt = (
+            f"Cinematic vertical social media video, {style}. "
+            f"Visually depicts: {segment_text}. "
+            f"Topic: {topic}. Tone: {tone}. "
+            f"Smooth motion, professional quality, no text overlays, no subtitles."
+        )
+        scene_prompts.append(prompt)
+
+    return scene_prompts
+
+
+async def generate_multi_segment_ai_video(
+    script: str,
+    topic: str,
+    tone: str,
+    duration_target: int,
+    temp_dir: str,
+    aspect_ratio: str = XAI_VIDEO_ASPECT_RATIO,
+    resolution: str = XAI_VIDEO_RESOLUTION,
+) -> str | None:
+    """
+    Generate a multi-segment AI video for durations > 15 seconds.
+
+    For 30s videos: generates 2 x 15s clips
+    For 60s videos: generates 4 x 15s clips
+
+    Returns path to merged video, or None on failure.
+    """
+    # Calculate number of segments needed
+    num_segments = (duration_target + XAI_VIDEO_MAX_DURATION_S - 1) // XAI_VIDEO_MAX_DURATION_S
+    segment_duration = XAI_VIDEO_MAX_DURATION_S  # Each segment is max 15s
+
+    print(f"[Multi-Segment] Generating {num_segments} x {segment_duration}s clips for {duration_target}s video")
+
+    # Generate scene prompts for each segment
+    scene_prompts = _generate_scene_prompts(script, topic, tone, num_segments)
+
+    # Generate each segment
+    segment_paths = []
+    for i, prompt in enumerate(scene_prompts):
+        segment_path = os.path.join(temp_dir, f"segment_{i}.mp4")
+        print(f"[Multi-Segment] Generating segment {i+1}/{num_segments}...")
+
+        ok = await generate_ai_video_xai(
+            prompt=prompt,
+            output_path=segment_path,
+            duration=segment_duration,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+        )
+
+        if ok and os.path.exists(segment_path):
+            segment_paths.append(segment_path)
+            print(f"[Multi-Segment] Segment {i+1} generated successfully")
+        else:
+            print(f"[Multi-Segment] Segment {i+1} FAILED")
+            # Continue with remaining segments even if one fails
+
+    if not segment_paths:
+        print("[Multi-Segment] No segments generated successfully")
+        return None
+
+    if len(segment_paths) < num_segments:
+        print(f"[Multi-Segment] Warning: Only {len(segment_paths)}/{num_segments} segments generated")
+
+    # Merge segments if we have multiple
+    if len(segment_paths) == 1:
+        return segment_paths[0]
+
+    merged_path = os.path.join(temp_dir, "merged_ai_video.mp4")
+    success = await merge_video_segments(segment_paths, merged_path, duration_target)
+
+    if success:
+        return merged_path
+    return None
+
+
+def _merge_video_segments_sync(
+    video_paths: list[str],
+    output_path: str,
+    target_duration: int,
+) -> bool:
+    """
+    Synchronously merge multiple video segments into a single video.
+    Uses MoviePy for concatenation.
+    """
+    try:
+        from moviepy import VideoFileClip, concatenate_videoclips
+        MOVIEPY_V2 = True
+    except ImportError:
+        from moviepy.editor import VideoFileClip, concatenate_videoclips
+        MOVIEPY_V2 = False
+
+    def subclip_video(clip, start, end):
+        if MOVIEPY_V2:
+            return clip.subclipped(start, end)
+        else:
+            return clip.subclip(start, end)
+
+    clips = []
+    try:
+        for i, path in enumerate(video_paths):
+            print(f"[Merge] Loading segment {i+1}: {path}")
+            clip = VideoFileClip(path)
+            print(f"[Merge] Segment {i+1}: {clip.w}x{clip.h}, duration={clip.duration:.2f}s")
+            clips.append(clip)
+
+        if not clips:
+            print("[Merge] No clips to merge")
+            return False
+
+        # Concatenate all clips
+        merged = concatenate_videoclips(clips, method="compose")
+        print(f"[Merge] Concatenated duration: {merged.duration:.2f}s")
+
+        # Trim to target duration if needed
+        if merged.duration > target_duration:
+            merged = subclip_video(merged, 0, target_duration)
+            print(f"[Merge] Trimmed to {target_duration}s")
+
+        # Write merged video
+        merged.write_videofile(
+            output_path,
+            fps=30,
+            codec="libx264",
+            audio_codec="aac",
+            preset="fast",
+            threads=4,
+            logger=None,
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-crf", "23",
+            ],
+        )
+
+        print(f"[Merge] Saved merged video to {output_path}")
+        return True
+
+    except Exception as e:
+        print(f"[Merge] Error merging videos: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        for clip in clips:
+            try:
+                clip.close()
+            except:
+                pass
+
+
+async def merge_video_segments(
+    video_paths: list[str],
+    output_path: str,
+    target_duration: int,
+) -> bool:
+    """Async wrapper for video segment merging."""
+    return await asyncio.to_thread(
+        _merge_video_segments_sync,
+        video_paths,
+        output_path,
+        target_duration,
+    )
+
+
 # Available TTS voices
 AVAILABLE_VOICES = [
     {
@@ -1118,21 +1310,42 @@ async def process_reel_generation(
         if not use_ai_video and settings.XAI_API_KEY:
             print(f"[Reel {reel_id}] Generating AI video with xAI grok-imagine-video...")
             _set_status(db_session, reel_id, "generating_ai_video")
-            video_prompt = (
-                f"Cinematic vertical social media reel video that visually depicts: {script_preview}. "
-                f"Topic: {topic}. Tone: {tone}. "
-                f"Smooth motion, engaging visuals, no text overlays, no subtitles."
-            )
-            ok = await generate_ai_video_xai(
-                prompt=video_prompt,
-                output_path=ai_video_path,
-                duration=min(duration_target, XAI_VIDEO_MAX_DURATION_S),
-                aspect_ratio=XAI_VIDEO_ASPECT_RATIO,
-                resolution=XAI_VIDEO_RESOLUTION,
-            )
-            if ok:
-                print(f"[Reel {reel_id}] xAI video generated.")
-                use_ai_video = True
+
+            # For videos > 15s, use multi-segment generation
+            if duration_target > XAI_VIDEO_MAX_DURATION_S:
+                print(f"[Reel {reel_id}] Using multi-segment generation for {duration_target}s video...")
+                merged_path = await generate_multi_segment_ai_video(
+                    script=result["script"],
+                    topic=topic,
+                    tone=tone,
+                    duration_target=duration_target,
+                    temp_dir=temp_dir,
+                    aspect_ratio=XAI_VIDEO_ASPECT_RATIO,
+                    resolution=XAI_VIDEO_RESOLUTION,
+                )
+                if merged_path:
+                    # Copy merged video to expected path
+                    import shutil
+                    shutil.copy(merged_path, ai_video_path)
+                    print(f"[Reel {reel_id}] Multi-segment video generated.")
+                    use_ai_video = True
+            else:
+                # Single segment for 15s or less
+                video_prompt = (
+                    f"Cinematic vertical social media reel video that visually depicts: {script_preview}. "
+                    f"Topic: {topic}. Tone: {tone}. "
+                    f"Smooth motion, engaging visuals, no text overlays, no subtitles."
+                )
+                ok = await generate_ai_video_xai(
+                    prompt=video_prompt,
+                    output_path=ai_video_path,
+                    duration=duration_target,
+                    aspect_ratio=XAI_VIDEO_ASPECT_RATIO,
+                    resolution=XAI_VIDEO_RESOLUTION,
+                )
+                if ok:
+                    print(f"[Reel {reel_id}] xAI video generated.")
+                    use_ai_video = True
 
         # --- Option 2: Pexels stock videos (fallback) ---
         if not use_ai_video:
