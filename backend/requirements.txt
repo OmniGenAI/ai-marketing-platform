@@ -64,7 +64,7 @@ yarl==1.23.0
 attrs==26.1.0
 google-genai==1.65.0
 openai==1.65.0
-xai-sdk==0.1.0
+xai-sdk==1.11.0
 textstat==0.7.13
 click==8.3.1
 packaging==26.0
