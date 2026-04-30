@@ -16,10 +16,49 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
 import tempfile
 import uuid
 
 from app.config import settings
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg helpers — prefer ffmpeg subprocess over moviepy for performance.
+# moviepy stays as a fallback so a missing binary or a weird input doesn't
+# break the whole pipeline.
+# ---------------------------------------------------------------------------
+_FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+_FFPROBE_BIN = shutil.which("ffprobe") or "ffprobe"
+
+
+def _ffmpeg_available() -> bool:
+    """True if both ffmpeg and ffprobe are callable on this host."""
+    try:
+        subprocess.run(
+            [_FFMPEG_BIN, "-version"],
+            capture_output=True, timeout=5, check=True,
+        )
+        subprocess.run(
+            [_FFPROBE_BIN, "-version"],
+            capture_output=True, timeout=5, check=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+_HAS_FFMPEG = _ffmpeg_available()
+
+
+def _x264_args(crf: str = "28") -> list[str]:
+    """Standard Instagram-compatible x264 encode args."""
+    return [
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", crf,
+        "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
+        "-movflags", "+faststart",
+    ]
 
 # ---- Prompt-engineering constants ----------------------------------------
 HOOK_STYLES = ("question", "stat", "contrarian", "promise")
@@ -265,15 +304,69 @@ async def generate_multi_segment_ai_video(
     return None
 
 
-def _merge_video_segments_sync(
+def _merge_video_segments_ffmpeg(
     video_paths: list[str],
     output_path: str,
     target_duration: int,
 ) -> bool:
+    """Fast path: re-encode each segment to a normalized format then concat.
+
+    xAI segments may differ in fps/resolution; concatenating with `-c copy`
+    fails on mismatch, so we normalize first (cheap with ultrafast preset).
     """
-    Synchronously merge multiple video segments into a single video.
-    Uses MoviePy for concatenation.
-    """
+    if not _HAS_FFMPEG:
+        return False
+
+    work = tempfile.mkdtemp(prefix="merge_")
+    try:
+        normalized: list[str] = []
+        for i, path in enumerate(video_paths):
+            out = os.path.join(work, f"n{i}.mp4")
+            cmd = [
+                _FFMPEG_BIN, "-y", "-loglevel", "error",
+                "-i", path,
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
+                       "crop=1080:1920,setsar=1,fps=30",
+                *_x264_args("28"),
+                "-an",
+                out,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.exists(out):
+                print(f"[Merge-ffmpeg] segment {i+1} normalize failed: {r.stderr[-300:]}")
+                return False
+            normalized.append(out)
+
+        list_file = os.path.join(work, "concat.txt")
+        with open(list_file, "w", encoding="utf-8") as f:
+            for p in normalized:
+                safe = p.replace("'", r"'\''").replace("\\", "/")
+                f.write(f"file '{safe}'\n")
+
+        cmd = [
+            _FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", list_file,
+            "-t", str(target_duration),
+            "-c:v", "copy", "-an",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[Merge-ffmpeg] concat failed: {r.stderr[-300:]}")
+            return False
+        print(f"[Merge-ffmpeg] Saved merged video to {output_path}")
+        return True
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _merge_video_segments_moviepy(
+    video_paths: list[str],
+    output_path: str,
+    target_duration: int,
+) -> bool:
+    """Fallback: MoviePy concatenation (slower but tolerates more inputs)."""
     try:
         from moviepy import VideoFileClip, concatenate_videoclips
         MOVIEPY_V2 = True
@@ -282,55 +375,35 @@ def _merge_video_segments_sync(
         MOVIEPY_V2 = False
 
     def subclip_video(clip, start, end):
-        if MOVIEPY_V2:
-            return clip.subclipped(start, end)
-        else:
-            return clip.subclip(start, end)
+        return clip.subclipped(start, end) if MOVIEPY_V2 else clip.subclip(start, end)
 
     clips = []
     try:
         for i, path in enumerate(video_paths):
-            print(f"[Merge] Loading segment {i+1}: {path}")
+            print(f"[Merge-moviepy] Loading segment {i+1}: {path}")
             clip = VideoFileClip(path)
-            print(f"[Merge] Segment {i+1}: {clip.w}x{clip.h}, duration={clip.duration:.2f}s")
             clips.append(clip)
 
         if not clips:
-            print("[Merge] No clips to merge")
             return False
 
-        # Concatenate all clips
         merged = concatenate_videoclips(clips, method="compose")
-        print(f"[Merge] Concatenated duration: {merged.duration:.2f}s")
-
-        # Trim to target duration if needed
         if merged.duration > target_duration:
             merged = subclip_video(merged, 0, target_duration)
-            print(f"[Merge] Trimmed to {target_duration}s")
 
-        # Write merged video
         merged.write_videofile(
             output_path,
-            fps=30,
-            codec="libx264",
-            audio_codec="aac",
-            preset="ultrafast",
-            threads=4,
-            logger=None,
+            fps=30, codec="libx264", audio_codec="aac",
+            preset="ultrafast", threads=4, logger=None,
             ffmpeg_params=[
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                "-profile:v", "baseline",
-                "-level", "3.0",
-                "-crf", "28",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
             ],
         )
-
-        print(f"[Merge] Saved merged video to {output_path}")
+        print(f"[Merge-moviepy] Saved merged video to {output_path}")
         return True
-
     except Exception as e:
-        print(f"[Merge] Error merging videos: {e}")
+        print(f"[Merge-moviepy] Error: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -338,8 +411,22 @@ def _merge_video_segments_sync(
         for clip in clips:
             try:
                 clip.close()
-            except:
+            except Exception:
                 pass
+
+
+def _merge_video_segments_sync(
+    video_paths: list[str],
+    output_path: str,
+    target_duration: int,
+) -> bool:
+    """Synchronously merge multiple video segments. ffmpeg first, moviepy fallback."""
+    if not video_paths:
+        return False
+    if _merge_video_segments_ffmpeg(video_paths, output_path, target_duration):
+        return True
+    print("[Merge] ffmpeg path failed/unavailable — falling back to MoviePy")
+    return _merge_video_segments_moviepy(video_paths, output_path, target_duration)
 
 
 async def merge_video_segments(
@@ -795,53 +882,82 @@ def generate_reel_script(
         raise Exception(f"Script generation failed across all providers ({', '.join(errors)})")
     raise Exception("No AI API key configured. Set OPENAI_API_KEY or XAI_API_KEY.")
 
-def _add_audio_to_video_sync(video_path: str, audio_path: str, output_path: str) -> str:
+def _add_audio_to_video_ffmpeg(video_path: str, audio_path: str, output_path: str) -> bool:
+    """Mux audio onto video using ffmpeg — fast, low memory, no decoding to numpy."""
+    if not _HAS_FFMPEG:
+        return False
+    cmd = [
+        _FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-i", video_path,
+        "-i", audio_path,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        # Some inputs need re-encoding (e.g. video in non-mp4-compatible codec).
+        # Try once more with full re-encode before giving up.
+        cmd_reencode = [
+            _FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-i", video_path, "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            *_x264_args("28"),
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            output_path,
+        ]
+        r2 = subprocess.run(cmd_reencode, capture_output=True, text=True)
+        if r2.returncode != 0:
+            print(f"[AddAudio-ffmpeg] failed: {r.stderr[-200:]} | reencode: {r2.stderr[-200:]}")
+            return False
+    return os.path.exists(output_path)
+
+
+def _add_audio_to_video_moviepy(video_path: str, audio_path: str, output_path: str) -> str:
+    """Fallback: MoviePy mux. Slower + much more RAM."""
     try:
-        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+        from moviepy import VideoFileClip, AudioFileClip
         MOVIEPY_V2 = True
     except ImportError:
-        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        from moviepy.editor import VideoFileClip, AudioFileClip
         MOVIEPY_V2 = False
 
     video = VideoFileClip(video_path)
     audio = AudioFileClip(audio_path)
 
-    # Cap final length to the video's own duration — never loop footage.
-    # If audio overruns, it has already been clamped upstream; trim defensively.
     final_duration = min(float(audio.duration or 0.0), float(video.duration or 0.0))
     if audio.duration and audio.duration > final_duration + 0.05:
-        if MOVIEPY_V2:
-            audio = audio.subclipped(0, final_duration)
-        else:
-            audio = audio.subclip(0, final_duration)
+        audio = audio.subclipped(0, final_duration) if MOVIEPY_V2 else audio.subclip(0, final_duration)
 
     if MOVIEPY_V2:
-        video = video.subclipped(0, final_duration)
-        video = video.with_audio(audio)
+        video = video.subclipped(0, final_duration).with_audio(audio)
     else:
-        video = video.subclip(0, final_duration)
-        video = video.set_audio(audio)
+        video = video.subclip(0, final_duration).set_audio(audio)
 
     video.write_videofile(
         output_path,
-        fps=30,
-        codec="libx264",
-        audio_codec="aac",
-        preset="ultrafast",
-        threads=4,
-        logger=None,
+        fps=30, codec="libx264", audio_codec="aac",
+        preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-profile:v", "baseline",
-            "-level", "3.0",
-            "-crf", "28",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
         ],
     )
-
     video.close()
     audio.close()
     return output_path
+
+
+def _add_audio_to_video_sync(video_path: str, audio_path: str, output_path: str) -> str:
+    """Mux voiceover onto video. ffmpeg first, moviepy fallback."""
+    if _add_audio_to_video_ffmpeg(video_path, audio_path, output_path):
+        return output_path
+    print("[AddAudio] ffmpeg failed/unavailable — falling back to MoviePy")
+    return _add_audio_to_video_moviepy(video_path, audio_path, output_path)
 
 
 async def add_audio_to_video(video_path: str, audio_path: str, output_path: str) -> str:
@@ -862,7 +978,23 @@ async def generate_voiceover(script: str, voice: str, output_path: str, rate: st
 
 
 def _probe_audio_duration(path: str) -> float:
-    """Read audio duration in seconds. Uses moviepy so we don't pull mutagen."""
+    """Read audio duration in seconds. ffprobe first (fast), moviepy fallback."""
+    if _HAS_FFMPEG:
+        try:
+            r = subprocess.run(
+                [
+                    _FFPROBE_BIN, "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return float(r.stdout.strip())
+        except Exception as e:
+            print(f"[probe_audio] ffprobe failed, falling back to moviepy: {e}")
+
     try:
         from moviepy import AudioFileClip
     except ImportError:
@@ -989,131 +1121,95 @@ def _compose_reel_sync(
     target_width: int = 1080,
     target_height: int = 1920,
 ) -> str:
-    """Synchronous composition — callers should dispatch via asyncio.to_thread."""
-    # Import moviepy here to avoid startup issues if ffmpeg is missing
+    """Synchronous composition using ffmpeg directly.
+
+    Replaces the previous MoviePy implementation which loaded every frame into
+    Python (huge RAM + slow). Two-pass strategy:
+      1. Per clip: scale+crop to 1080x1920 + ultrafast x264 (no audio).
+      2. Concat all scaled clips + mix in voiceover; copy video stream so we
+         only encode each clip once.
+    """
+    import subprocess
+    import shutil
+
+    if not video_paths:
+        raise Exception("No video paths provided to compose_reel")
+
+    # Audio duration drives the final reel length, but never exceed target.
+    audio_duration = float(target_duration)
     try:
-        from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
-        MOVIEPY_V2 = True
-    except ImportError:
-        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
-        MOVIEPY_V2 = False
-
-    # Helper functions for v1/v2 compatibility
-    def crop_clip(clip, x1=None, y1=None, x2=None, y2=None):
-        if MOVIEPY_V2:
-            return clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
-        else:
-            return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
-
-    def resize_clip(clip, size):
-        if MOVIEPY_V2:
-            return clip.resized(size)
-        else:
-            # moviepy v1 uses resize with newsize parameter
-            return clip.resize(newsize=size)
-
-    def subclip_video(clip, start, end):
-        if MOVIEPY_V2:
-            return clip.subclipped(start, end)
-        else:
-            return clip.subclip(start, end)
-
-    # Load audio. Cap to the requested reel duration so a stray TTS overrun
-    # can never force MoviePy to loop the underlying video footage.
-    audio = AudioFileClip(audio_path)
-    raw_audio_duration = float(audio.duration or 0.0)
-    audio_duration = min(raw_audio_duration, float(target_duration))
-    if raw_audio_duration > audio_duration + 0.05:
-        print(
-            f"[compose_reel] trimming audio {raw_audio_duration:.2f}s → {audio_duration:.2f}s "
-            f"to match target_duration"
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
+            ],
+            capture_output=True, text=True, timeout=10,
         )
-        if MOVIEPY_V2:
-            audio = audio.subclipped(0, audio_duration)
-        else:
-            audio = audio.subclip(0, audio_duration)
+        if probe.returncode == 0 and probe.stdout.strip():
+            audio_duration = min(float(probe.stdout.strip()), float(target_duration))
+    except Exception as e:
+        print(f"[compose_reel] ffprobe failed, using target duration: {e}")
 
-    # Load and process video clips
-    clips = []
-    total_duration = 0
+    # Each clip's fair-share of the timeline (round up so we cover audio).
+    n = len(video_paths)
+    per_clip = max(2.0, (audio_duration + n - 1) // n)
 
-    for video_path in video_paths:
-        try:
-            print(f"[compose_reel] Loading video: {video_path}")
-            clip = VideoFileClip(video_path)
-            print(f"[compose_reel] Loaded clip: {clip.w}x{clip.h}, duration={clip.duration}")
+    workdir = tempfile.mkdtemp(prefix="compose_")
+    scaled_paths: list[str] = []
+    try:
+        # Pass 1: per-clip scale+crop+trim+encode (parallelizable in future).
+        for i, vp in enumerate(video_paths):
+            out = os.path.join(workdir, f"s{i}.mp4")
+            vf = (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                f"crop={target_width}:{target_height},setsar=1,fps=30"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", vp,
+                "-t", str(per_clip),
+                "-vf", vf,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
+                "-an", "-movflags", "+faststart",
+                out,
+            ]
+            print(f"[compose_reel] scaling clip {i+1}/{n}: {vp}")
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.exists(out):
+                print(f"[compose_reel] clip {i+1} failed: {r.stderr[-400:]}")
+                continue
+            scaled_paths.append(out)
 
-            # Simple resize without complex cropping for better compatibility
-            try:
-                clip = resize_clip(clip, (target_width, target_height))
-                print(f"[compose_reel] Resized to {target_width}x{target_height}")
-            except Exception as resize_err:
-                print(f"[compose_reel] Resize failed, using original: {resize_err}")
-                # Use original clip without resizing if resize fails
+        if not scaled_paths:
+            raise Exception(f"No valid video clips to compose. Tried {n} videos.")
 
-            clips.append(clip)
-            total_duration += clip.duration
-            print(f"[compose_reel] Added clip, total duration: {total_duration}")
+        # Pass 2: concat scaled clips + add voiceover. -c:v copy is the win:
+        # we don't re-encode the already-encoded scaled clips.
+        list_file = os.path.join(workdir, "concat.txt")
+        with open(list_file, "w", encoding="utf-8") as f:
+            for p in scaled_paths:
+                # ffmpeg concat demuxer wants forward slashes + escaped quotes.
+                safe = p.replace("'", r"'\''").replace("\\", "/")
+                f.write(f"file '{safe}'\n")
 
-            # Stop if we have enough footage
-            if total_duration >= audio_duration + 2:  # 2 second buffer
-                break
-
-        except Exception as e:
-            print(f"[compose_reel] Error processing video {video_path}: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    if not clips:
-        print(f"[compose_reel] FAILED - no clips loaded from {len(video_paths)} video paths")
-        raise Exception(f"No valid video clips to compose. Tried {len(video_paths)} videos.")
-
-    # Concatenate all clips
-    video = concatenate_videoclips(clips, method="compose")
-
-    # Final reel length must equal the user-requested duration. We never loop
-    # the footage; if the concatenated stock clips are shorter, hold on the
-    # last frame instead (handled implicitly by trimming to whatever we have).
-    final_duration = min(float(target_duration), video.duration)
-    if audio_duration > final_duration:
-        # Defensive: shouldn't happen because we trimmed audio above, but if it
-        # does, clamp audio to the video length rather than looping video.
-        if MOVIEPY_V2:
-            audio = audio.subclipped(0, final_duration)
-        else:
-            audio = audio.subclip(0, final_duration)
-    video = subclip_video(video, 0, final_duration)
-
-    # Add audio (v1: set_audio, v2: with_audio)
-    if MOVIEPY_V2:
-        video = video.with_audio(audio)
-    else:
-        video = video.set_audio(audio)
-
-    # Write final video with Instagram-compatible settings
-    video.write_videofile(
-        output_path,
-        fps=30,
-        codec="libx264",
-        audio_codec="aac",
-        preset="fast",
-        threads=4,
-        logger=None,
-        ffmpeg_params=[
-            "-pix_fmt", "yuv420p",  # Required for Instagram compatibility
-            "-movflags", "+faststart",  # Optimize for web streaming
-            "-profile:v", "baseline",  # Maximum compatibility
-            "-level", "3.0",
-            "-crf", "23",  # Good quality
-        ],
-    )
-
-    # Clean up
-    audio.close()
-    for clip in clips:
-        clip.close()
-    video.close()
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", list_file,
+            "-i", audio_path,
+            "-t", f"{audio_duration:.3f}",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        print(f"[compose_reel] concat+mux {len(scaled_paths)} clips → {output_path}")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Exception(f"ffmpeg concat failed: {r.stderr[-400:]}")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
     return output_path
 
@@ -1213,6 +1309,21 @@ async def upload_reel_to_supabase(
 
 
 def _generate_thumbnail_sync(video_path: str, output_path: str, time: float = 1.0) -> str:
+    """Extract a frame as JPEG thumbnail. ffmpeg first, moviepy fallback."""
+    if _HAS_FFMPEG:
+        cmd = [
+            _FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-ss", f"{max(0.0, time):.2f}",
+            "-i", video_path,
+            "-frames:v", "1",
+            "-q:v", "3",
+            output_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(output_path):
+            return output_path
+        print(f"[thumbnail] ffmpeg failed, falling back to moviepy: {r.stderr[-200:]}")
+
     try:
         from moviepy import VideoFileClip
     except ImportError:
@@ -1237,6 +1348,21 @@ async def generate_thumbnail(video_path: str, output_path: str, time: float = 1.
 
 
 def _reencode_sync(src: str, dst: str) -> None:
+    """Re-encode a video to Instagram-compatible H.264/AAC. ffmpeg first."""
+    if _HAS_FFMPEG:
+        cmd = [
+            _FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-i", src,
+            "-r", "30",
+            *_x264_args("26"),
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(dst):
+            return
+        print(f"[reencode] ffmpeg failed, falling back to moviepy: {r.stderr[-200:]}")
+
     try:
         from moviepy import VideoFileClip
     except ImportError:
@@ -1244,18 +1370,11 @@ def _reencode_sync(src: str, dst: str) -> None:
     clip = VideoFileClip(src)
     clip.write_videofile(
         dst,
-        fps=30,
-        codec="libx264",
-        audio_codec="aac",
-        preset="fast",
-        threads=4,
-        logger=None,
+        fps=30, codec="libx264", audio_codec="aac",
+        preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-profile:v", "baseline",
-            "-level", "3.0",
-            "-crf", "26",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-profile:v", "baseline", "-level", "3.0", "-crf", "26",
         ],
     )
     clip.close()
@@ -1332,7 +1451,10 @@ async def process_reel_generation(
         script_preview = result["script"][:300].strip()
 
         # --- Option 1: xAI grok-imagine-video (primary) ---
-        if not use_ai_video and settings.XAI_API_KEY:
+        # Set USE_AI_VIDEO=false in env to skip xAI entirely (e.g. when the
+        # team has no credits) — saves 2-8 minutes per failed attempt.
+        _xai_enabled = os.environ.get("USE_AI_VIDEO", "true").lower() == "true"
+        if not use_ai_video and _xai_enabled and settings.XAI_API_KEY:
             print(f"[Reel {reel_id}] Generating AI video with xAI grok-imagine-video...")
             _set_status(db_session, reel_id, "generating_ai_video")
 
