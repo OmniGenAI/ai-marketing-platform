@@ -314,7 +314,7 @@ def _merge_video_segments_sync(
             fps=30,
             codec="libx264",
             audio_codec="aac",
-            preset="fast",
+            preset="ultrafast",
             threads=4,
             logger=None,
             ffmpeg_params=[
@@ -322,7 +322,7 @@ def _merge_video_segments_sync(
                 "-movflags", "+faststart",
                 "-profile:v", "baseline",
                 "-level", "3.0",
-                "-crf", "23",
+                "-crf", "28",
             ],
         )
 
@@ -827,7 +827,7 @@ def _add_audio_to_video_sync(video_path: str, audio_path: str, output_path: str)
         fps=30,
         codec="libx264",
         audio_codec="aac",
-        preset="fast",
+        preset="ultrafast",
         threads=4,
         logger=None,
         ffmpeg_params=[
@@ -835,7 +835,7 @@ def _add_audio_to_video_sync(video_path: str, audio_path: str, output_path: str)
             "-movflags", "+faststart",
             "-profile:v", "baseline",
             "-level", "3.0",
-            "-crf", "23",
+            "-crf", "28",
         ],
     )
 
