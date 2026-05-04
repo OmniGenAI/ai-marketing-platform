@@ -471,3 +471,117 @@ def delete_blog_save(
         raise HTTPException(status_code=404, detail="Blog save not found.")
     db.delete(save)
     db.commit()
+
+# ---------------------------------------------------------------------------
+# Blog Publishing — push a saved blog draft to a connected platform
+# ---------------------------------------------------------------------------
+class BlogPublishRequest(BaseModel):
+    """Optional overrides for the publish payload. If omitted, we use the
+    title/content/tags already saved in the blog draft."""
+
+    title: str | None = None
+    tags: list[str] | None = None
+    canonical_url: str | None = None  # mark dev.to as a republish
+    publish: bool = True  # False = save as draft on the platform
+
+
+class BlogPublishResponse(BaseModel):
+    platform: str
+    external_post_id: str
+    url: str
+    save_id: str
+
+
+@router.post("/saves/{save_id}/publish/devto", response_model=BlogPublishResponse)
+async def publish_blog_to_devto(
+    save_id: str,
+    payload: BlogPublishRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Publish a saved blog draft to the user's Dev.to account.
+
+    Persists the returned article id + URL inside the save's `data` JSON under
+    a `published` key so the analytics dashboard can later fetch metrics:
+
+        data["published"] = {
+            "devto": {"id": "...", "url": "...", "published_at": "..."}
+        }
+    """
+    from app.models.social_account import SocialAccount
+    from app.services.blog_publish import publish_to_devto
+
+    save = (
+        db.query(SeoSave)
+        .filter(
+            SeoSave.id == save_id,
+            SeoSave.user_id == current_user.id,
+            SeoSave.type == "blog",
+        )
+        .first()
+    )
+    if not save:
+        raise HTTPException(status_code=404, detail="Blog save not found.")
+
+    account = (
+        db.query(SocialAccount)
+        .filter(
+            SocialAccount.user_id == current_user.id,
+            SocialAccount.platform == "devto",
+        )
+        .first()
+    )
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Connect Dev.to in Settings before publishing.",
+        )
+
+    try:
+        blog_data: dict = json.loads(save.data or "{}")
+    except json.JSONDecodeError:
+        blog_data = {}
+
+    title = (payload.title if payload else None) or blog_data.get("title") or save.title
+    markdown = blog_data.get("content") or ""
+    tags = (payload.tags if payload else None) or blog_data.get("tags") or []
+
+    if not markdown.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="This blog has no content to publish — generate or paste content first.",
+        )
+
+    try:
+        result = await publish_to_devto(
+            account=account,
+            title=title,
+            markdown=markdown,
+            tags=tags,
+            canonical_url=(payload.canonical_url if payload else None),
+            publish=(payload.publish if payload else True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("[blog publish] dev.to failed")
+        raise HTTPException(status_code=502, detail=f"Dev.to API error: {exc}")
+
+    # Stash publish metadata back into the save's JSON so analytics can fetch
+    # metrics later. Keyed by platform so future providers (LinkedIn articles,
+    # Hashnode, etc.) can coexist.
+    blog_data.setdefault("published", {})[result.platform] = {
+        "id": result.external_post_id,
+        "url": result.url,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        **result.raw,
+    }
+    save.data = json.dumps(blog_data, ensure_ascii=False)
+    db.commit()
+
+    return BlogPublishResponse(
+        platform=result.platform,
+        external_post_id=result.external_post_id,
+        url=result.url,
+        save_id=save.id,
+    )
