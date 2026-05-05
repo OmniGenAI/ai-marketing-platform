@@ -15,6 +15,7 @@ import {
   BookOpen,
   Recycle,
   Image as ImageIcon,
+  BarChart3,
 } from "lucide-react";
 
 const navItems = [
@@ -62,6 +63,11 @@ const navItems = [
     title: "My Posts",
     href: "/posts",
     icon: FileText,
+  },
+  {
+    title: "Analytics",
+    href: "/analytics",
+    icon: BarChart3,
   },
   {
     title: "Subscription",

@@ -21,6 +21,15 @@ class Post(Base):
     platform: Mapped[str] = mapped_column(String(50), default="facebook")
     tone: Mapped[str] = mapped_column(String(50), default="professional")
     status: Mapped[str] = mapped_column(String(50), default="draft")
+    # Platform-issued ID returned at publish time. Format varies by provider:
+    #   facebook  -> "{page_id}_{post_id}"
+    #   instagram -> media id (numeric)
+    #   linkedin  -> activity URN ("urn:li:activity:...")
+    #   youtube   -> 11-char video id
+    #   devto     -> article id (int as string)
+    #   reddit    -> fullname ("t3_xxxxx")
+    # Stored opaquely; each provider's analytics fetcher knows how to parse it.
+    external_post_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

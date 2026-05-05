@@ -41,6 +41,25 @@ def create_post(
     return post
 
 
+@router.get("/{post_id}", response_model=PostResponse)
+def get_post(
+    post_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    post = (
+        db.query(Post)
+        .filter(Post.id == post_id, Post.user_id == current_user.id)
+        .first()
+    )
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Post not found",
+        )
+    return post
+
+
 @router.patch("/{post_id}", response_model=PostResponse)
 def update_post(
     post_id: str,
@@ -187,9 +206,12 @@ async def publish_post(
                 detail=f"Platform {post.platform} is not supported yet",
             )
 
-        # Update post status
+        # Update post status and store the platform-issued post ID so
+        # analytics can look up metrics later.
         post.status = "published"
         post.published_at = datetime.utcnow()
+        if isinstance(result, dict) and result.get("id"):
+            post.external_post_id = str(result["id"])
         db.commit()
         db.refresh(post)
 

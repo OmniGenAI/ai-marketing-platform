@@ -150,6 +150,13 @@ async def publish_to_facebook(
         response.raise_for_status()
         result = response.json()
 
+    # When posting via /photos the API returns both `id` (the photo object id)
+    # and `post_id` ("{page_id}_{post_id}") — the latter is needed to build the
+    # public permalink and to fetch post-level analytics.  Normalise the result
+    # so callers always get `id` in the "page_id_post_id" format.
+    if "post_id" in result:
+        result = {"id": result["post_id"], "photo_id": result.get("id")}
+
     print(f"✅ Published to Facebook: Post ID {result.get('id')}")
     return result
 

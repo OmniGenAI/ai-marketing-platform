@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { FileText, ArrowRight, Trash2, ExternalLink, BookOpen } from "lucide-react";
+import { FileText, ArrowRight, Trash2, ExternalLink, BookOpen, Send, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/lib/api";
 import {
@@ -14,6 +14,7 @@ import {
     PaginationPrevious,
     PaginationEllipsis,
 } from "@/components/ui/pagination";
+import { PublishToDevToDialog } from "@/components/blog/PublishToDevToDialog";
 
 const tools = [
     {
@@ -57,12 +58,56 @@ function timeAgo(iso: string) {
     return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/**
+ * Build the default tag list for the Dev.to publish dialog.
+ *
+ * Pulls from the blog's saved SEO data in priority order:
+ *   1. `tags` (explicit user-set tags, future-proofing)
+ *   2. `primary_keyword` + `secondary_keywords` (always present after generation)
+ *   3. `topic` as a last resort
+ *
+ * Dev.to does its own normalization server-side, but we trim here so the
+ * dialog input doesn't show 12 tags when only 4 will be accepted.
+ */
+function extractDefaultTags(data: Record<string, unknown> | undefined): string[] {
+    if (!data) return [];
+
+    // Prefer an explicit tag list if the editor ever stores one.
+    if (Array.isArray(data.tags) && data.tags.length) {
+        return (data.tags as unknown[])
+            .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+            .slice(0, 4);
+    }
+
+    const collected: string[] = [];
+    const seen = new Set<string>();
+    const add = (raw: unknown) => {
+        if (typeof raw !== "string") return;
+        const t = raw.trim();
+        if (!t) return;
+        const key = t.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        collected.push(t);
+    };
+
+    add(data.primary_keyword);
+    if (Array.isArray(data.secondary_keywords)) {
+        for (const k of data.secondary_keywords) add(k);
+    }
+    if (collected.length === 0) add(data.topic);
+
+    return collected.slice(0, 4);
+}
+
 export default function BlogPage() {
     const [saves, setSaves] = useState<BlogSaveItem[]>([]);
     const [loadingSaves, setLoadingSaves] = useState(true);
     const [confirmId, setConfirmId] = useState<string | null>(null);
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
+    // Publish-to-Dev.to dialog state — kept here so it survives the inner card map.
+    const [publishingSave, setPublishingSave] = useState<BlogSaveItem | null>(null);
     const PAGE_SIZE = 9;
 
     useEffect(() => {
@@ -179,43 +224,77 @@ export default function BlogPage() {
                     <p className="text-sm text-muted-foreground">No blogs yet — generate your first blog post.</p>
                 ) : (
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        {paginated.map((item) => (
-                            <div
-                                key={item.id}
-                                className="group relative flex flex-col gap-1.5 rounded-lg border bg-card p-4 hover:border-foreground/20 transition-colors"
-                            >
-                                <span className="self-start rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide border-blue-500/30 bg-blue-500/10 text-blue-500">
-                                    Blog
-                                </span>
+                        {paginated.map((item) => {
+                            // `data.published` is keyed by platform → {id, url, ...} when this
+                            // blog has been cross-posted. Used to show the "Published" badge
+                            // and link directly to the live article.
+                            const publishedMap =
+                                (item.data.published as Record<string, { url?: string }> | undefined) || {};
+                            const devToInfo = publishedMap.devto;
+                            const wordCount = item.data.word_count as number | undefined;
 
-                                <p className="text-sm font-medium line-clamp-2 pr-6">{item.title}</p>
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className="flex gap-2 items-center">
-                                        <p className="text-xs text-muted-foreground">{timeAgo(item.created_at)}</p>
-                                        {item.data.word_count != null && (
-                                            <span className="text-xs text-muted-foreground">
-                                                {item.data.word_count as number} words
-                                            </span>
-                                        )}
-                                    </span>
-                                    <Link
-                                        href={`/blog/generate?id=${item.id}`}
-                                        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                                    >
-                                        <ExternalLink className="h-3 w-3" />
-                                        Open
-                                    </Link>
-                                </div>
-
-                                <button
-                                    onClick={() => confirmDelete(item.id)}
-                                    className="absolute right-3 top-3 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 transition-all"
-                                    aria-label="Delete"
+                            return (
+                                <div
+                                    key={item.id}
+                                    className="group relative flex flex-col gap-1.5 rounded-lg border bg-card p-4 hover:border-foreground/20 transition-colors"
                                 >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                            </div>
-                        ))}
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide border-blue-500/30 bg-blue-500/10 text-blue-500">
+                                            Blog
+                                        </span>
+                                        {devToInfo?.url && (
+                                            <a
+                                                href={devToInfo.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide border-emerald-500/30 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20"
+                                                onClick={(e) => e.stopPropagation()}
+                                            >
+                                                <CheckCircle2 className="h-2.5 w-2.5" />
+                                                Dev.to
+                                            </a>
+                                        )}
+                                    </div>
+
+                                    <p className="text-sm font-medium line-clamp-2 pr-6">{item.title}</p>
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className="flex gap-2 items-center">
+                                            <p className="text-xs text-muted-foreground">{timeAgo(item.created_at)}</p>
+                                            {wordCount != null && (
+                                                <span className="text-xs text-muted-foreground">
+                                                    {wordCount} words
+                                                </span>
+                                            )}
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => setPublishingSave(item)}
+                                                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                                aria-label="Publish to Dev.to"
+                                            >
+                                                <Send className="h-3 w-3" />
+                                                Publish
+                                            </button>
+                                            <Link
+                                                href={`/blog/generate?id=${item.id}`}
+                                                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                            >
+                                                <ExternalLink className="h-3 w-3" />
+                                                Open
+                                            </Link>
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        onClick={() => confirmDelete(item.id)}
+                                        className="absolute right-3 top-3 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 transition-all"
+                                        aria-label="Delete"
+                                    >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
 
@@ -297,6 +376,39 @@ export default function BlogPage() {
                     </div>
                 </div>
             )}
+
+            {/* Publish-to-Dev.to dialog. Refreshes the saves list after a
+                successful publish so the green "Dev.to" badge shows up.
+                Tags are derived from the blog's saved primary + secondary
+                keywords (the SEO brief data), so we never publish bare. */}
+            <PublishToDevToDialog
+                saveId={publishingSave?.id ?? null}
+                defaultTitle={publishingSave?.title}
+                defaultTags={extractDefaultTags(publishingSave?.data)}
+                open={Boolean(publishingSave)}
+                onOpenChange={(o) => !o && setPublishingSave(null)}
+                onPublished={(info) => {
+                    if (!publishingSave) return;
+                    // Optimistically merge the new published metadata into local state
+                    // so the badge appears without a full refetch.
+                    setSaves((prev) =>
+                        prev.map((s) =>
+                            s.id === publishingSave.id
+                                ? {
+                                      ...s,
+                                      data: {
+                                          ...s.data,
+                                          published: {
+                                              ...((s.data.published as Record<string, unknown>) || {}),
+                                              [info.platform]: { id: info.external_post_id, url: info.url },
+                                          },
+                                      },
+                                  }
+                                : s
+                        )
+                    );
+                }}
+            />
         </div>
     );
 }

@@ -64,6 +64,37 @@ class Settings(BaseSettings):
     # Social Media Posting - set to false to disable Facebook/Instagram posting
     SOCIAL_POSTING_ENABLED: bool = True
 
+    # ---- Multi-platform OAuth ------------------------------------------------
+    # Each platform's endpoints return 503 cleanly when its credentials are
+    # missing — the user can still use the rest of the app.
+
+    # LinkedIn — https://www.linkedin.com/developers/apps
+    # Required scopes: w_member_social (publish), r_organization_social
+    # (analytics for company pages — optional).
+    LINKEDIN_CLIENT_ID: str = ""
+    LINKEDIN_CLIENT_SECRET: str = ""
+
+    # Google (used for YouTube) — https://console.cloud.google.com
+    # YouTube Data API v3 must be enabled. Scopes: youtube.upload + youtube.readonly.
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+
+    # Reddit — https://www.reddit.com/prefs/apps (type: web app)
+    # Scopes: identity, submit, read, history.
+    REDDIT_CLIENT_ID: str = ""
+    REDDIT_CLIENT_SECRET: str = ""
+    # Reddit's API requires a unique, descriptive User-Agent per their TOS.
+    REDDIT_USER_AGENT: str = "ai-marketing-platform/1.0 (by /u/anonymous)"
+
+    # Dev.to has no OAuth — users paste a personal API key from
+    # https://dev.to/settings/extensions. No global config needed; this flag
+    # lets us hide the connect card if we want to disable the feature.
+    DEVTO_ENABLED: bool = True
+
+    # AI video generation toggle (xAI grok-imagine-video). Set to false to use
+    # Pexels stock + Edge TTS instead — saves credits + minutes per reel.
+    USE_AI_VIDEO: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
     # Comma-separated list of additional allowed origins

@@ -31,6 +31,9 @@ class PostResponse(BaseModel):
     platform: str
     tone: str
     status: str
+    # Platform-issued post ID (set after successful publish). Used by the
+    # analytics endpoint to fetch live engagement metrics.
+    external_post_id: str | None = None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime

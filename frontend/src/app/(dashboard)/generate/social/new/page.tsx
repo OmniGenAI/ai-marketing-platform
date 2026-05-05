@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -52,6 +52,7 @@ type ImageOption = "ai" | "upload";
 
 export default function GeneratePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const {
     canUseCredits,
     hasFeature,
@@ -93,6 +94,44 @@ export default function GeneratePage() {
     setIsPublishModalOpen(false);
     handlePostNow();
   };
+
+  // Load existing post when ?id= is present in the URL (e.g. navigating from
+  // the Posts list to edit/re-publish a draft or published post).
+  useEffect(() => {
+    const id = searchParams.get("id");
+    if (!id) return;
+    (async () => {
+      try {
+        const res = await api.get<{
+          id: string;
+          content: string;
+          hashtags: string;
+          image_url: string | null;
+          image_option: string;
+          platform: string;
+          tone: string;
+        }>(`/api/posts/${id}`);
+        const p = res.data;
+        setCurrentPostId(p.id);
+        setGeneratedContent(p.content || "");
+        setGeneratedHashtags(p.hashtags || "");
+        setSelectedPlatform(p.platform || "facebook");
+        setTone(p.tone || "professional");
+        if (p.image_option === "upload" || p.image_option === "ai") {
+          setImageOption(p.image_option as ImageOption);
+        }
+        if (p.image_option === "upload" && p.image_url) {
+          setUploadedImageUrl(p.image_url);
+        }
+        if (p.image_option === "ai" && p.image_url) {
+          setGeneratedImageUrl(p.image_url);
+        }
+      } catch {
+        toast.error("Failed to load post");
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [isDragging, setIsDragging] = useState(false);
   const [seoMode, setSeoMode] = useState(false);

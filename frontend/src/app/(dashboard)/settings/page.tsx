@@ -17,55 +17,128 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Facebook, Instagram, Loader2, Trash2, Bug } from "lucide-react";
+import {
+  Facebook,
+  Instagram,
+  Linkedin,
+  Youtube,
+  Loader2,
+  Trash2,
+  Bug,
+  Code2,
+  MessageSquare,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import {
+  SocialConnectCard,
+  type ProviderStatus,
+} from "@/components/settings/SocialConnectCard";
+
+// Per-platform display config for the new connect cards.
+// `iconColor` matches each brand's primary; `description` shows what each
+// connection unlocks in the app.
+const PLATFORM_CONFIG: Record<
+  string,
+  { label: string; icon: React.ReactNode; iconColor: string; description: string }
+> = {
+  facebook: {
+    label: "Facebook",
+    icon: <Facebook className="h-5 w-5" />,
+    iconColor: "#1877F2",
+    description: "Publish posts to your Facebook Page + read engagement.",
+  },
+  instagram: {
+    label: "Instagram",
+    icon: <Instagram className="h-5 w-5" />,
+    iconColor: "#E4405F",
+    description: "Share to your Instagram Business account.",
+  },
+  linkedin: {
+    label: "LinkedIn",
+    icon: <Linkedin className="h-5 w-5" />,
+    iconColor: "#0A66C2",
+    description: "Publish to your LinkedIn profile.",
+  },
+  youtube: {
+    label: "YouTube",
+    icon: <Youtube className="h-5 w-5" />,
+    iconColor: "#FF0000",
+    description: "Upload videos and read view stats from your channel.",
+  },
+  devto: {
+    label: "Dev.to",
+    icon: <Code2 className="h-5 w-5" />,
+    iconColor: "#0A0A0A",
+    description: "Cross-post articles to Dev.to. Uses your personal API key.",
+  },
+  reddit: {
+    label: "Reddit",
+    icon: <MessageSquare className="h-5 w-5" />,
+    iconColor: "#FF4500",
+    description: "Submit posts to subreddits and track upvotes.",
+  },
+};
+
+// Order matches what users typically prioritize.
+const PLATFORM_ORDER = [
+  "facebook",
+  "instagram",
+  "linkedin",
+  "youtube",
+  "devto",
+  "reddit",
+];
 
 function SettingsContent() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
 
-  const fetchAccounts = useCallback(async () => {
+  // Fetch BOTH /providers (for the unified card grid) and /accounts (for the
+  // legacy quick-connect section). They overlap but serve different UI needs.
+  const fetchAll = useCallback(async () => {
     try {
-      const response = await api.get<SocialAccount[]>("/api/social/accounts");
-      setAccounts(response.data);
+      const [provRes, acctRes] = await Promise.all([
+        api.get<ProviderStatus[]>("/api/social/providers"),
+        api.get<SocialAccount[]>("/api/social/accounts"),
+      ]);
+      setProviders(provRes.data);
+      setAccounts(acctRes.data);
     } catch {
-      toast.error("Failed to load connected accounts");
+      toast.error("Failed to load social connections");
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Handle OAuth callback query params
+  // Handle OAuth callback query params (works for ALL platforms now — backend
+  // redirects to /settings?connected={platform} or ?error={platform}_failed).
   useEffect(() => {
     const connected = searchParams.get("connected");
     const error = searchParams.get("error");
     const message = searchParams.get("message");
 
     if (connected) {
-      toast.success(`${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully!`);
+      toast.success(
+        `${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully!`
+      );
       router.replace("/settings");
-      fetchAccounts();
+      fetchAll();
     } else if (error) {
-      const errorMessages: Record<string, string> = {
-        facebook_denied: "Facebook connection was cancelled",
-        facebook_failed: "Failed to connect Facebook",
-        instagram_denied: "Instagram connection was cancelled",
-        instagram_failed: "Failed to connect Instagram",
-      };
-      const errorMsg = message || errorMessages[error] || "Connection failed";
+      const errorMsg = message || "Connection failed. Please try again.";
       toast.error(errorMsg, { duration: 5000 });
       router.replace("/settings");
     }
-  }, [searchParams, router, fetchAccounts]);
+  }, [searchParams, router, fetchAll]);
 
   useEffect(() => {
-    fetchAccounts();
-  }, [fetchAccounts]);
+    fetchAll();
+  }, [fetchAll]);
 
   const connectFacebook = async () => {
     setConnecting("facebook");
@@ -95,7 +168,7 @@ function SettingsContent() {
     setConnecting("facebook-quick");
     try {
       const response = await api.post<{ message: string; page_name: string; page_id: string }>("/api/social/facebook/quick-connect");
-      await fetchAccounts();
+      await fetchAll();
       toast.success(`Quick connected to ${response.data.page_name}!`);
     } catch (error: any) {
       const errorMessage = error?.response?.data?.detail || "Failed to quick connect Facebook";
@@ -109,7 +182,7 @@ function SettingsContent() {
     setConnecting("instagram-quick");
     try {
       const response = await api.post<{ message: string; page_name: string; page_id: string }>("/api/social/instagram/quick-connect");
-      await fetchAccounts();
+      await fetchAll();
       toast.success(`Quick connected to @${response.data.page_name}!`);
     } catch (error: any) {
       const errorMessage = error?.response?.data?.detail || "Failed to quick connect Instagram";
@@ -137,7 +210,7 @@ function SettingsContent() {
     setConnecting("facebook-mock");
     try {
       await api.post("/api/social/dev/mock/facebook");
-      await fetchAccounts();
+      await fetchAll();
       toast.success("Facebook connected (Dev Mode)");
     } catch {
       toast.error("Failed to connect mock Facebook");
@@ -150,7 +223,7 @@ function SettingsContent() {
     setConnecting("instagram-mock");
     try {
       await api.post("/api/social/dev/mock/instagram");
-      await fetchAccounts();
+      await fetchAll();
       toast.success("Instagram connected (Dev Mode)");
     } catch {
       toast.error("Failed to connect mock Instagram");
@@ -212,85 +285,72 @@ function SettingsContent() {
             </div>
           ) : (
             <>
-              {/* Connected Accounts List */}
-              {accounts.length > 0 && (
-                <div className="space-y-3 mb-6">
-                  {accounts.map((account) => (
-                    <div
-                      key={account.id}
-                      className="flex items-center justify-between p-3 rounded-lg border"
-                    >
-                      <div className="flex items-center gap-3">
-                        {account.platform === "facebook" ? (
-                          <Facebook className="h-5 w-5 text-blue-600" />
-                        ) : (
-                          <Instagram className="h-5 w-5 text-pink-600" />
-                        )}
-                        <div>
-                          <p className="font-medium">{account.page_name}</p>
-                          <p className="text-sm text-muted-foreground capitalize">
-                            {account.platform}
-                          </p>
-                        </div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => disconnectAccount(account.id)}
-                        disabled={disconnecting === account.id}
-                      >
-                        {disconnecting === account.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        )}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Connect Buttons */}
-              <div className="flex flex-col sm:flex-row gap-3">
-                <Button
-                  variant={facebookConnected ? "outline" : "default"}
-                  onClick={quickConnectFacebook}
-                  disabled={connecting === "facebook-quick" || facebookConnected}
-                  className="flex items-center gap-2"
-                >
-                  {connecting === "facebook-quick" ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Facebook className="h-4 w-4" />
-                  )}
-                  {facebookConnected ? "Facebook Connected" : "Quick Connect Facebook"}
-                </Button>
-                <Button
-                  variant={instagramConnected ? "outline" : "default"}
-                  onClick={quickConnectInstagram}
-                  disabled={connecting === "instagram-quick" || instagramConnected}
-                  className="flex items-center gap-2"
-                >
-                  {connecting === "instagram-quick" ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Instagram className="h-4 w-4" />
-                  )}
-                  {instagramConnected ? "Instagram Connected" : "Quick Connect Instagram"}
-                </Button>
+              {/* All-platform connect grid (uses /api/social/providers).
+                  Sorted by PLATFORM_ORDER so the most-used networks come first. */}
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {PLATFORM_ORDER.map((platform) => {
+                  const status = providers.find((p) => p.platform === platform);
+                  const cfg = PLATFORM_CONFIG[platform];
+                  if (!status || !cfg) return null;
+                  // Match by platform name to find the matching account row for delete.
+                  const account = accounts.find(
+                    (a) => a.platform === platform
+                  );
+                  return (
+                    <SocialConnectCard
+                      key={platform}
+                      status={status}
+                      label={cfg.label}
+                      icon={cfg.icon}
+                      iconColor={cfg.iconColor}
+                      description={cfg.description}
+                      accountId={account?.id}
+                      onChanged={fetchAll}
+                    />
+                  );
+                })}
               </div>
 
-              {(!facebookConnected || !instagramConnected) && (
-                <p className="text-xs text-muted-foreground">
-                  <strong>Quick Connect</strong> uses pre-configured accounts - no OAuth redirect needed!
-                </p>
-              )}
+              <Separator className="my-4" />
 
-              {!facebookConnected && !instagramConnected && (
-                <p className="text-sm text-muted-foreground mt-2">
-                  Connect at least one social account to start publishing posts.
+              {/* Legacy quick-connect — uses pre-configured page tokens from .env.
+                  Kept for testing/dev: skips OAuth, attaches to the operator's
+                  shared FB/IG. New users should use the OAuth cards above. */}
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Quick Connect (testing — uses shared accounts from .env)
                 </p>
-              )}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Button
+                    variant={facebookConnected ? "outline" : "secondary"}
+                    onClick={quickConnectFacebook}
+                    disabled={connecting === "facebook-quick" || facebookConnected}
+                    className="flex items-center gap-2"
+                    size="sm"
+                  >
+                    {connecting === "facebook-quick" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Facebook className="h-4 w-4" />
+                    )}
+                    {facebookConnected ? "FB Connected" : "Quick Connect FB"}
+                  </Button>
+                  <Button
+                    variant={instagramConnected ? "outline" : "secondary"}
+                    onClick={quickConnectInstagram}
+                    disabled={connecting === "instagram-quick" || instagramConnected}
+                    className="flex items-center gap-2"
+                    size="sm"
+                  >
+                    {connecting === "instagram-quick" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Instagram className="h-4 w-4" />
+                    )}
+                    {instagramConnected ? "IG Connected" : "Quick Connect IG"}
+                  </Button>
+                </div>
+              </div>
 
               {/* Dev Mode Section */}
               {isDev && (
