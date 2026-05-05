@@ -9,6 +9,7 @@ from app.models.business_image import BusinessImage
 from app.models.reel import Reel
 from app.models.seo_save import SeoSave
 from app.models.poster import Poster
+from app.models.tracking import TrackingSite, TrackingEvent
 
 __all__ = [
     "User",
@@ -23,4 +24,6 @@ __all__ = [
     "Reel",
     "SeoSave",
     "Poster",
+    "TrackingSite",
+    "TrackingEvent",
 ]

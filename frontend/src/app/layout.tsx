@@ -26,6 +26,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <script src="http://127.0.0.1:8000/track.js" data-site="c6dfccc3-bb21-41b5-b1c1-2e01ecc284ca" defer></script>
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

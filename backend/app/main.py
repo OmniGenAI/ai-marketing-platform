@@ -10,7 +10,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster, analytics, social_oauth, post_analytics
 
 
 def seed_default_plans():
@@ -199,6 +199,47 @@ def ensure_tables_exist():
         db.execute(text("ALTER TABLE posters ADD COLUMN IF NOT EXISTS features TEXT"))
         db.execute(text("ALTER TABLE posters ADD COLUMN IF NOT EXISTS brand_label VARCHAR(255)"))
         db.commit()
+
+        # tracking_sites + tracking_events (analytics module)
+        result4 = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tracking_sites')"))
+        if not result4.scalar():
+            print("📦 Creating tracking_sites table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS tracking_sites (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(36) NOT NULL REFERENCES users(id),
+                    domain VARCHAR(255) NOT NULL,
+                    name VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_tracking_sites_user_id ON tracking_sites(user_id)"))
+            db.commit()
+            print("✅ tracking_sites table created successfully")
+
+        result5 = db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tracking_events')"))
+        if not result5.scalar():
+            print("📦 Creating tracking_events table...")
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS tracking_events (
+                    id VARCHAR(36) PRIMARY KEY,
+                    site_id VARCHAR(36) NOT NULL REFERENCES tracking_sites(id),
+                    type VARCHAR(20) NOT NULL DEFAULT 'pageview',
+                    path VARCHAR(500) NOT NULL DEFAULT '/',
+                    referrer VARCHAR(500),
+                    country VARCHAR(8),
+                    device VARCHAR(20),
+                    browser VARCHAR(40),
+                    visitor_hash VARCHAR(64) NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_tracking_events_site_id ON tracking_events(site_id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_tracking_events_created_at ON tracking_events(created_at)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_tracking_events_visitor_hash ON tracking_events(visitor_hash)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_tracking_events_site_created ON tracking_events(site_id, created_at)"))
+            db.commit()
+            print("✅ tracking_events table created successfully")
     except Exception as e:
         print(f"❌ Error checking/creating tables: {e}")
         db.rollback()
@@ -206,13 +247,34 @@ def ensure_tables_exist():
         db.close()
 
 
+async def _retention_loop():
+    """Run analytics retention cleanup once on boot, then every 24h."""
+    import asyncio
+    from app.routers.analytics import cleanup_old_events
+    while True:
+        if SessionLocal:
+            db = SessionLocal()
+            try:
+                deleted = cleanup_old_events(db)
+                if deleted:
+                    print(f"🧹 Pruned {deleted} old tracking_events rows")
+            except Exception as e:
+                print(f"⚠️ retention cleanup failed: {e}")
+            finally:
+                db.close()
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    import asyncio
     ensure_tables_exist()
     seed_default_plans()
+    retention_task = asyncio.create_task(_retention_loop())
     yield
-    # Shutdown (nothing to do)
+    # Shutdown
+    retention_task.cancel()
 
 app = FastAPI(
     title="AI Marketing Platform API",
@@ -242,6 +304,7 @@ app.include_router(subscription.router)
 app.include_router(wallet.router)
 app.include_router(business_config.router)
 app.include_router(generate.router)
+app.include_router(post_analytics.router)  # Must be before posts.router — /published-summary must not be matched by /{post_id}
 app.include_router(posts.router)
 app.include_router(webhooks.router)
 app.include_router(social_accounts.router)
@@ -253,6 +316,8 @@ app.include_router(seo.router)
 app.include_router(blog.router)
 app.include_router(repurpose.router)
 app.include_router(poster.router)
+app.include_router(analytics.router)
+app.include_router(social_oauth.router)
 
 
 @app.get("/")
