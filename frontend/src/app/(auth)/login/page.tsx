@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import type { AuthError } from "@supabase/supabase-js";
 
+
 function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
