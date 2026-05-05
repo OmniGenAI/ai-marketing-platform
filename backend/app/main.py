@@ -283,13 +283,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration - use regex to allow all Vercel deployments
-print("[CORS] Allowing localhost and all *.vercel.app domains")
+# CORS configuration - allow localhost, *.vercel.app, *.ngrok-free.app, *.ngrok.io,
+# *.trycloudflare.com (ngrok / Cloudflare tunnels are needed for FB Login for Business
+# during local OAuth dev because Meta requires HTTPS redirect URIs).
+print("[CORS] Allowing localhost, *.vercel.app, *.ngrok-free.app, *.ngrok.io, *.trycloudflare.com")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*\.(vercel\.app|ngrok-free\.app|ngrok\.io|trycloudflare\.com)",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],

@@ -90,10 +90,24 @@ def disconnect_account(
 @router.get("/facebook/auth")
 def facebook_auth(current_user: User = Depends(get_current_user)):
     """Redirect to Facebook OAuth authorization page"""
+    if not FACEBOOK_APP_ID or not FACEBOOK_APP_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Facebook OAuth is not configured. Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET in the backend env."
+        )
+
     params = {
         "client_id": FACEBOOK_APP_ID,
         "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "scope": "pages_show_list,pages_read_engagement,pages_manage_posts",
+        "response_type": "code",
+        # auth_type=rerequest forces Facebook to re-show the consent dialog
+        # even if the user previously authorised the app — otherwise Meta
+        # short-circuits and silently redirects, which can land users back
+        # on the FB home feed when something else is misconfigured.
+        "auth_type": "rerequest",
+        # pages_manage_metadata is required to read page access tokens via
+        # /me/accounts on newer Graph API versions (v17+).
+        "scope": "pages_show_list,pages_read_engagement,pages_manage_posts,pages_manage_metadata",
         "state": current_user.id,  # Pass user ID to verify on callback
     }
 
@@ -109,7 +123,15 @@ async def facebook_quick_connect(
     """
     Quick connect to Facebook using pre-configured Page Access Token.
     No OAuth redirect required - uses credentials from environment variables.
+    Dev-only: gated behind ALLOW_QUICK_CONNECT to prevent prod users from
+    being attached to the operator's shared Facebook Page.
     """
+    if not settings.ALLOW_QUICK_CONNECT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quick connect is disabled. Use the Facebook OAuth flow to connect your own page."
+        )
+
     page_id = settings.FACEBOOK_PAGE_ID
     page_name = settings.FACEBOOK_PAGE_NAME
     page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
@@ -223,7 +245,14 @@ async def instagram_quick_connect(
     """
     Quick connect to Instagram using pre-configured Instagram Business Account.
     No OAuth redirect required - uses credentials from environment variables.
+    Dev-only: gated behind ALLOW_QUICK_CONNECT.
     """
+    if not settings.ALLOW_QUICK_CONNECT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quick connect is disabled. Use the Instagram OAuth flow to connect your own account."
+        )
+
     account_id = settings.INSTAGRAM_ACCOUNT_ID
     username = settings.INSTAGRAM_USERNAME
     access_token = settings.INSTAGRAM_ACCESS_TOKEN
@@ -403,13 +432,30 @@ async def facebook_callback(
 @router.get("/instagram/auth")
 def instagram_auth(current_user: User = Depends(get_current_user)):
     """
-    Redirect to Instagram OAuth (uses Facebook OAuth)
-    Instagram Business API requires Facebook page connection first
+    Redirect to Instagram OAuth (uses Facebook OAuth).
+    Meta deprecated standalone Instagram Basic Display in Dec 2024, so IG
+    Business / Creator accounts can only authenticate via Facebook Login.
+    The user's IG account must be linked to a Facebook Page they admin —
+    the callback resolves the IG Business Account from that page.
     """
+    if not FACEBOOK_APP_ID or not FACEBOOK_APP_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Instagram OAuth requires Facebook App credentials. Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET in the backend env."
+        )
+
     params = {
         "client_id": FACEBOOK_APP_ID,
         "redirect_uri": INSTAGRAM_REDIRECT_URI,
-        "scope": "instagram_basic,instagram_content_publish,pages_show_list",
+        "response_type": "code",
+        "auth_type": "rerequest",
+        # Scopes required for IG Business posting via Graph API:
+        # - instagram_basic, instagram_content_publish: read profile + publish
+        # - pages_show_list, pages_read_engagement: list FB pages and read
+        #   the linked instagram_business_account field
+        # - business_management: required when the IG account belongs to a
+        #   Meta Business Suite portfolio (most real accounts do)
+        "scope": "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement,business_management",
         "state": current_user.id,
     }
 

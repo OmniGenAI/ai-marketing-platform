@@ -75,6 +75,21 @@ export function useAuth() {
     return data;
   };
 
+  const forgotPassword = async (email: string) => {
+    const baseUrl =
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      (typeof window !== "undefined" ? window.location.origin : "");
+    const redirectTo = `${baseUrl}/reset-password`;
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) throw error;
+  };
+
+  const updatePassword = async (password: string) => {
+    const { data, error } = await supabase.auth.updateUser({ password });
+    if (error) throw error;
+    return data;
+  };
+
   const logout = async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -87,5 +102,5 @@ export function useAuth() {
     await fetchBackendUser(session);
   };
 
-  return { user, supabaseUser, session, loading, login, register, logout, fetchUser };
+  return { user, supabaseUser, session, loading, login, register, logout, fetchUser, forgotPassword, updatePassword };
 }

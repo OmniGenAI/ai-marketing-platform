@@ -118,6 +118,7 @@ def create_or_update_business_config(
 def scrape_website_endpoint(
     data: ScrapeWebsiteRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
     Scrape a website using the SEO Playwright+BS4 pipeline and store enriched
@@ -140,7 +141,31 @@ def scrape_website_endpoint(
         if summary:
             context["ai_summary"] = summary
 
-        # NOTE: Not saving to DB here — user must press Save to persist
+        # Persist website + scraped context immediately so AI generators can use it
+        # even if the user navigates away before pressing Save.
+        try:
+            import json as _json
+            config = (
+                db.query(BusinessConfig)
+                .filter(BusinessConfig.user_id == current_user.id)
+                .first()
+            )
+            ctx_json = _json.dumps(context, ensure_ascii=False)
+            if config:
+                config.website = data.url
+                config.website_context = ctx_json
+            else:
+                config = BusinessConfig(
+                    user_id=current_user.id,
+                    website=data.url,
+                    website_context=ctx_json,
+                )
+                db.add(config)
+            db.commit()
+        except Exception as persist_err:
+            logger.warning("[BRAND-KIT] Failed to persist website_context: %s", persist_err)
+            db.rollback()
+
         return ScrapeWebsiteResponse(
             success=True,
             message="Website analyzed successfully",
@@ -148,6 +173,7 @@ def scrape_website_endpoint(
             summary=summary,
         )
     except Exception as e:
+        logger.exception("[BRAND-KIT] scrape-website failed: %s", e)
         return ScrapeWebsiteResponse(
             success=False,
             message=str(e),

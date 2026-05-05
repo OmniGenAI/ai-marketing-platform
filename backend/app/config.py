@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     # Pexels stock + Edge TTS instead — saves credits + minutes per reel.
     USE_AI_VIDEO: bool = False
 
+    # When true, /api/social/{facebook,instagram}/quick-connect is enabled.
+    # That endpoint attaches the operator's shared FB Page / IG Business
+    # Account (from FACEBOOK_PAGE_*, INSTAGRAM_*) to the calling user — only
+    # safe for local dev. Real users must use the per-user OAuth flow
+    # (/api/social/facebook/auth → /facebook/callback).
+    ALLOW_QUICK_CONNECT: bool = False
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
     # Comma-separated list of additional allowed origins

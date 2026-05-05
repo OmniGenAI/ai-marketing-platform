@@ -51,7 +51,7 @@ const PLATFORM_CONFIG: Record<
     label: "Instagram",
     icon: <Instagram className="h-5 w-5" />,
     iconColor: "#E4405F",
-    description: "Share to your Instagram Business account.",
+    description: "Share to your Instagram Business account. Sign in with the Facebook account that admins your linked Page.",
   },
   linkedin: {
     label: "LinkedIn",
@@ -311,12 +311,14 @@ function SettingsContent() {
                 })}
               </div>
 
-              <Separator className="my-4" />
+              {isDev && <Separator className="my-4" />}
 
               {/* Legacy quick-connect — uses pre-configured page tokens from .env.
-                  Kept for testing/dev: skips OAuth, attaches to the operator's
-                  shared FB/IG. New users should use the OAuth cards above. */}
-              <div className="space-y-2">
+                  Dev-only: skips OAuth, attaches the operator's shared FB/IG
+                  to the calling user. Hidden in prod; real users go through
+                  the OAuth cards above. Backend also gates this behind
+                  ALLOW_QUICK_CONNECT. */}
+              {isDev && <div className="space-y-2">
                 <p className="text-xs font-medium text-muted-foreground">
                   Quick Connect (testing — uses shared accounts from .env)
                 </p>
@@ -350,7 +352,7 @@ function SettingsContent() {
                     {instagramConnected ? "IG Connected" : "Quick Connect IG"}
                   </Button>
                 </div>
-              </div>
+              </div>}
 
               {/* Dev Mode Section */}
               {isDev && (

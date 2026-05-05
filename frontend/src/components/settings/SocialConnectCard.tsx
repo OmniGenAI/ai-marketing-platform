@@ -140,9 +140,61 @@ export function SocialConnectCard({
       const res = await api.get<{ auth_url: string }>(
         `/api/social/${status.platform}/auth`
       );
-      // Full-page redirect — provider's domain handles the rest, we land back
-      // on /auth/{platform}/callback which redirects to /settings?connected=...
-      window.location.href = res.data.auth_url;
+
+      // Open the provider's auth page in a centered popup. The backend
+      // callback finishes the flow and redirects the popup to
+      // /settings?connected=<platform>, at which point we detect the URL,
+      // close the popup, and refresh the accounts list in this tab.
+      const w = 600;
+      const h = 720;
+      const left = window.screenX + (window.outerWidth - w) / 2;
+      const top = window.screenY + (window.outerHeight - h) / 2;
+      const popup = window.open(
+        res.data.auth_url,
+        `${status.platform}_oauth`,
+        `width=${w},height=${h},left=${left},top=${top}`
+      );
+
+      if (!popup) {
+        toast.error("Popup blocked. Please allow popups for this site.");
+        setBusy(false);
+        return;
+      }
+
+      // Poll for: (a) user closed the popup, or (b) popup landed back on
+      // our origin with ?connected=<platform>. Cross-origin reads throw
+      // while the popup is on facebook.com — swallow and keep polling.
+      const interval = window.setInterval(() => {
+        try {
+          if (popup.closed) {
+            window.clearInterval(interval);
+            setBusy(false);
+            // Refresh accounts in case the user completed and closed manually.
+            onChanged();
+            return;
+          }
+          const href = popup.location.href;
+          if (href.includes(`connected=${status.platform}`)) {
+            window.clearInterval(interval);
+            popup.close();
+            toast.success(`${label} connected!`);
+            setBusy(false);
+            onChanged();
+          } else if (href.includes("error=") && href.includes(status.platform)) {
+            const url = new URL(href);
+            const message =
+              url.searchParams.get("message") ||
+              url.searchParams.get("error") ||
+              "Connection failed";
+            window.clearInterval(interval);
+            popup.close();
+            toast.error(message);
+            setBusy(false);
+          }
+        } catch {
+          // Cross-origin while on provider domain — ignore.
+        }
+      }, 600);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||

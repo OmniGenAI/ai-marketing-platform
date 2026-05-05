@@ -783,8 +783,29 @@ def generate_seo_brief(
     for i, s in enumerate(serp_results_raw[:5]):
         logger.info("[STEP 1/11]    %d. %s", i + 1, s.get('link', '?'))
 
-    # URLs to scrape: user-provided first, else from Serper SERP
-    urls_to_scrape = data.competitor_urls or [s["link"] for s in serp_results_raw]
+    # URLs to scrape: explicit request first, else brand-kit competitors, else Serper SERP
+    brand_competitor_urls: list[str] = []
+    try:
+        from app.models.business_config import BusinessConfig
+        bk = (
+            db.query(BusinessConfig)
+            .filter(BusinessConfig.user_id == current_user.id)
+            .first()
+        )
+        if bk and bk.competitors:
+            brand_competitor_urls = [
+                u.strip() for u in bk.competitors.replace("\n", ",").split(",") if u.strip()
+            ]
+    except Exception as e:
+        logger.warning("[BRIEF] Could not load brand-kit competitors: %s", e)
+
+    urls_to_scrape = (
+        data.competitor_urls
+        or brand_competitor_urls
+        or [s["link"] for s in serp_results_raw]
+    )
+    if brand_competitor_urls and not data.competitor_urls:
+        logger.info("[BRIEF] Using %d competitor URL(s) from brand kit", len(brand_competitor_urls))
 
     # ── Step 2+3: Scrape pages (Playwright) + Clean (BS4) ───────────────
     logger.info("[STEP 2/11] 🌐 Scraping %d URLs with Playwright + BS4...", min(len(urls_to_scrape), 5))
