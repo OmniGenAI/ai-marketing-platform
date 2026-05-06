@@ -6,6 +6,12 @@ const api = axios.create({
   // 3 minutes — image generation (planner LLM + OpenAI image + logo overlay)
   // can take 30-90s end-to-end. 60s was causing false timeouts.
   timeout: 180000,
+  // Skip the ngrok browser-warning interstitial on free tunnels — without
+  // this header ngrok serves an HTML "You are about to visit" page that
+  // breaks every API call when the backend is fronted by ngrok.
+  headers: {
+    "ngrok-skip-browser-warning": "true",
+  },
 });
 
 // Store current access token globally
