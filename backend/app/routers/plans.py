@@ -10,5 +10,12 @@ router = APIRouter(prefix="/api/plans", tags=["plans"])
 
 @router.get("", response_model=list[PlanResponse])
 def list_plans(db: Session = Depends(get_db)):
-    plans = db.query(Plan).filter(Plan.is_active == True).all()  # noqa: E712
+    # Order by price ascending so the subscription page always renders
+    # Free → Starter → Growth → Agency regardless of seed/insertion order.
+    plans = (
+        db.query(Plan)
+        .filter(Plan.is_active == True)  # noqa: E712
+        .order_by(Plan.price.asc(), Plan.name.asc())
+        .all()
+    )
     return plans

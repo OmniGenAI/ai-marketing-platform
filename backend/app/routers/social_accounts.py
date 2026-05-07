@@ -510,12 +510,16 @@ async def instagram_callback(
         token_data = token_response.json()
         access_token = token_data["access_token"]
 
-        # Get Facebook pages with Instagram accounts
+        # Get Facebook pages with Instagram accounts.
+        # `access_token` MUST be in `fields` — when `fields` is specified,
+        # Graph API only returns the listed fields (the page access token
+        # is NOT included by default), and we need the page-scoped token
+        # to call the linked Instagram Business Account endpoints.
         pages_response = await client.get(
             "https://graph.facebook.com/v18.0/me/accounts",
             params={
                 "access_token": access_token,
-                "fields": "id,name,instagram_business_account"
+                "fields": "id,name,access_token,instagram_business_account",
             }
         )
 
@@ -543,11 +547,16 @@ async def instagram_callback(
 
         instagram_account_id = instagram_page["instagram_business_account"]["id"]
 
+        # Use the page-scoped token to query the linked IG account.
+        # Fall back to the user token if the page didn't include one
+        # (shouldn't happen with the field above, but be defensive).
+        page_access_token = instagram_page.get("access_token") or access_token
+
         # Get Instagram account details
         ig_response = await client.get(
             f"https://graph.facebook.com/v18.0/{instagram_account_id}",
             params={
-                "access_token": instagram_page["access_token"],
+                "access_token": page_access_token,
                 "fields": "id,username"
             }
         )
@@ -574,14 +583,14 @@ async def instagram_callback(
 
         if existing:
             # Update existing account
-            existing.access_token = instagram_page["access_token"]
+            existing.access_token = page_access_token
             existing.page_name = ig_data.get("username", "Instagram")
         else:
             # Create new account
             social_account = SocialAccount(
                 user_id=state,
                 platform="instagram",
-                access_token=instagram_page["access_token"],
+                access_token=page_access_token,
                 page_id=instagram_account_id,
                 page_name=ig_data.get("username", "Instagram")
             )

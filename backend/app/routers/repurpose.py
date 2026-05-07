@@ -2,11 +2,11 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.business_config import BusinessConfig
 from app.models.seo_save import SeoSave
@@ -42,13 +42,168 @@ REROLL_CREDIT_COST = 1
 MAX_PATCH_PAYLOAD_BYTES = 512 * 1024
 
 
+def _mark_repurpose_failed(db: Session, save_id: str, message: str) -> None:
+    """Patch a generating repurpose save row with status=failed + error."""
+    save = db.query(SeoSave).filter(SeoSave.id == save_id).first()
+    if not save:
+        return
+    try:
+        existing = json.loads(save.data or "{}")
+    except (TypeError, json.JSONDecodeError):
+        existing = {}
+    existing["status"] = "failed"
+    existing["error"] = message
+    save.data = json.dumps(existing)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[REPURPOSE-BG] couldn't mark save {save_id} as failed: {e}")
+
+
+def _generate_repurpose_in_background(
+    save_id: str,
+    user_id: str,
+    request_dict: dict,
+    blog_title: str,
+    blog_content: str,
+    source_url: str,
+    primary_keyword: str,
+    secondary_keywords: list[str],
+    business_name: str,
+    niche: str,
+) -> None:
+    """Run the repurpose LLM pipeline off the request thread.
+
+    Updates the placeholder ``SeoSave`` row with the final formats payload
+    when complete, deducts credits, and writes the usage log. Errors are
+    surfaced via ``status="failed"`` + ``error`` on the save's data JSON.
+    """
+    db = SessionLocal()
+    try:
+        try:
+            data = RepurposeRequest.model_validate(request_dict)
+        except Exception as e:
+            logger.error(f"[REPURPOSE-BG] could not rehydrate request: {e}")
+            _mark_repurpose_failed(db, save_id, "Internal validation error.")
+            return
+
+        try:
+            formats_dict = repurpose_content(
+                blog_title=blog_title,
+                blog_content=blog_content,
+                source_url=source_url,
+                primary_keyword=primary_keyword,
+                secondary_keywords=secondary_keywords,
+                voice=data.voice.value,
+                goal=data.goal.value,
+                cta_style=data.cta_style.value,
+                platforms=data.platforms,
+                variations_per_platform=data.variations_per_platform,
+                include_hook_variations=data.include_hook_variations,
+                variations_across_voices=data.variations_across_voices,
+                business_name=business_name,
+                niche=niche,
+            )
+        except ValueError as e:
+            logger.warning(f"[REPURPOSE-BG] validation failed for save {save_id}: {e}")
+            _mark_repurpose_failed(db, save_id, str(e))
+            return
+        except Exception as e:
+            logger.error(
+                f"[REPURPOSE-BG] generation failed for save {save_id}: {e}",
+                exc_info=True,
+            )
+            _mark_repurpose_failed(db, save_id, "Repurpose failed — please retry.")
+            return
+
+        # Deduct credit (only on success).
+        wallet = db.query(Wallet).filter(Wallet.user_id == user_id).first()
+        if wallet:
+            try:
+                if wallet.balance != -1:
+                    wallet.balance -= REPURPOSE_CREDIT_COST
+                wallet.total_credits_used = (
+                    wallet.total_credits_used or 0
+                ) + REPURPOSE_CREDIT_COST
+                db.add(
+                    UsageLog(
+                        wallet_id=wallet.id,
+                        action="repurpose",
+                        credits_used=REPURPOSE_CREDIT_COST,
+                        description=(
+                            f"Repurposed blog ({data.voice.value}/{data.goal.value}, "
+                            f"{len(data.platforms)} platforms): {blog_title[:60]}"
+                        ),
+                    )
+                )
+            except Exception as e:
+                db.rollback()
+                logger.error(
+                    f"[REPURPOSE-BG] credit deduct failed for save {save_id}: {e}"
+                )
+
+        # Persist final payload.
+        save = (
+            db.query(SeoSave)
+            .filter(SeoSave.id == save_id, SeoSave.user_id == user_id)
+            .first()
+        )
+        if not save:
+            logger.warning(f"[REPURPOSE-BG] save row {save_id} disappeared mid-task")
+            return
+
+        try:
+            existing = json.loads(save.data or "{}")
+        except (TypeError, json.JSONDecodeError):
+            existing = {}
+
+        existing.update({
+            "source_url": source_url,
+            "primary_keyword": primary_keyword,
+            "secondary_keywords": secondary_keywords,
+            "blog_title": blog_title,
+            "blog_save_id": data.blog_save_id,
+            "voice": data.voice.value,
+            "goal": data.goal.value,
+            "cta_style": data.cta_style.value,
+            "platforms": data.platforms,
+            "variations_per_platform": data.variations_per_platform,
+            "variations_across_voices": data.variations_across_voices,
+            "formats": formats_dict,
+        })
+        # Ensure the placeholder markers are gone — absence ⇒ ready.
+        existing.pop("status", None)
+        existing.pop("error", None)
+
+        save.data = json.dumps(existing)
+        save.title = (blog_title or "Repurpose")[:500]
+        try:
+            db.commit()
+            logger.info(f"[REPURPOSE-BG] save={save_id} ready")
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                f"[REPURPOSE-BG] persist failed for save {save_id}: {e}",
+                exc_info=True,
+            )
+    finally:
+        db.close()
+
+
 @router.post("", response_model=RepurposeResponse)
 def create_repurpose(
     data: RepurposeRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # 1. Wallet pre-check (credit deducted only after LLM success)
+    """Kick off repurpose generation. Returns a placeholder response with
+    ``status="generating"`` and a ``save_id`` to poll. The slow LLM pipeline
+    runs in a background task to avoid tunnel / proxy idle timeouts.
+    """
+    # 1. Wallet pre-check (credit deducted only after LLM success in the
+    #    background task — see _generate_repurpose_in_background).
     wallet = db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
     has_unlimited = bool(wallet and wallet.balance == -1)
     has_credits = bool(wallet and wallet.balance >= REPURPOSE_CREDIT_COST)
@@ -58,7 +213,8 @@ def create_repurpose(
             detail="Insufficient credits. Please upgrade your plan.",
         )
 
-    # 2. Resolve source content
+    # 2. Resolve source content (must happen synchronously so we can validate
+    #    the user's input before charging / scheduling work).
     if data.blog_save_id:
         row = (
             db.query(SeoSave)
@@ -100,7 +256,7 @@ def create_repurpose(
             detail="Content too short to repurpose (needs at least 200 chars).",
         )
 
-    # 3. Backfill keywords if the raw paste didn't include them
+    # 3. Backfill keywords if the raw paste didn't include them.
     if not primary_keyword:
         try:
             kw = extract_seo_keywords(
@@ -117,7 +273,7 @@ def create_repurpose(
         except Exception as e:
             logger.warning(f"[repurpose] keyword backfill failed: {e}")
 
-    # 4. Optional business context
+    # 4. Optional business context.
     biz = (
         db.query(BusinessConfig)
         .filter(BusinessConfig.user_id == current_user.id)
@@ -126,52 +282,8 @@ def create_repurpose(
     business_name = (data.business_name or (biz.business_name if biz else "") or "").strip()
     niche = (data.niche or (biz.niche if biz else "") or "").strip()
 
-    # 5. Generate
-    try:
-        formats_dict = repurpose_content(
-            blog_title=blog_title,
-            blog_content=blog_content,
-            source_url=source_url,
-            primary_keyword=primary_keyword,
-            secondary_keywords=secondary_keywords,
-            voice=data.voice.value,
-            goal=data.goal.value,
-            cta_style=data.cta_style.value,
-            platforms=data.platforms,
-            variations_per_platform=data.variations_per_platform,
-            include_hook_variations=data.include_hook_variations,
-            variations_across_voices=data.variations_across_voices,
-            business_name=business_name,
-            niche=niche,
-        )
-    except ValueError as e:
-        # Parse / validation failures — don't charge
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-    except Exception as e:
-        logger.error(f"[repurpose] generation failed for user {current_user.id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Repurpose failed — please retry.",
-        )
-
-    # 6. Deduct credit (only on success)
-    if wallet.balance != -1:
-        wallet.balance -= REPURPOSE_CREDIT_COST
-    wallet.total_credits_used = (wallet.total_credits_used or 0) + REPURPOSE_CREDIT_COST
-    db.add(
-        UsageLog(
-            wallet_id=wallet.id,
-            action="repurpose",
-            credits_used=REPURPOSE_CREDIT_COST,
-            description=(
-                f"Repurposed blog ({data.voice.value}/{data.goal.value}, "
-                f"{len(data.platforms)} platforms): {blog_title[:60]}"
-            ),
-        )
-    )
-
-    # 7. Persist output
-    save_payload = {
+    # 5. Create the placeholder save row so the frontend has something to poll.
+    placeholder_payload = {
         "source_url": source_url,
         "primary_keyword": primary_keyword,
         "secondary_keywords": secondary_keywords,
@@ -183,17 +295,41 @@ def create_repurpose(
         "platforms": data.platforms,
         "variations_per_platform": data.variations_per_platform,
         "variations_across_voices": data.variations_across_voices,
-        "formats": formats_dict,
+        "formats": {},
+        "status": "generating",
     }
     save = SeoSave(
         user_id=current_user.id,
         type="repurpose",
         title=(blog_title or "Repurpose")[:500],
-        data=json.dumps(save_payload),
+        data=json.dumps(placeholder_payload),
     )
-    db.add(save)
-    db.commit()
-    db.refresh(save)
+    try:
+        db.add(save)
+        db.commit()
+        db.refresh(save)
+    except Exception as exc:
+        logger.warning("[repurpose] kickoff save failed: %s", exc)
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start repurpose. Please try again.",
+        )
+
+    # 6. Hand off the slow LLM step to a background task.
+    background_tasks.add_task(
+        _generate_repurpose_in_background,
+        save_id=save.id,
+        user_id=current_user.id,
+        request_dict=data.model_dump(),
+        blog_title=blog_title,
+        blog_content=blog_content,
+        source_url=source_url,
+        primary_keyword=primary_keyword,
+        secondary_keywords=secondary_keywords,
+        business_name=business_name,
+        niche=niche,
+    )
 
     keywords_used = [k for k in ([primary_keyword] + secondary_keywords) if k]
 
@@ -205,7 +341,8 @@ def create_repurpose(
         voice=data.voice,
         goal=data.goal,
         platforms=data.platforms,
-        formats=RepurposeFormats(**formats_dict),
+        formats=RepurposeFormats(),
+        status="generating",
     )
 
 
@@ -286,6 +423,8 @@ def get_repurpose_save(
         goal=goal,
         platforms=platforms,
         formats=RepurposeFormats(**(payload.get("formats") or {})),
+        status=(payload.get("status") or None),
+        error=(payload.get("error") or None),
     )
 
 

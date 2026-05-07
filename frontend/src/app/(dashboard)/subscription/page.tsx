@@ -271,17 +271,33 @@ function SubscriptionContent() {
 
   const getFeatures = (plan: Plan): string[] => {
     const credits = plan.credits === -1 ? "Unlimited" : plan.credits;
-    const baseFeatures = [`${credits} AI posts/month`];
+    const out: string[] = [`${credits} AI generations / month`];
+    const f = plan.features || {};
 
-    if (plan.features) {
-      if (plan.features.all_tones) baseFeatures.push("All tone options");
-      if (plan.features.draft_saving) baseFeatures.push("Draft saving");
-      if (plan.features.facebook_publishing) baseFeatures.push("Facebook publishing");
-      if (plan.features.instagram_publishing) baseFeatures.push("Instagram publishing");
-      if (plan.features.priority_support) baseFeatures.push("Priority support");
+    const brandCount = typeof f.brand_count === "number" ? f.brand_count : 1;
+    out.push(brandCount > 1 ? `${brandCount} brand kits` : "1 brand kit");
+
+    if (f.all_tones) out.push("All AI tone options");
+    if (f.image_generation) out.push("AI image / poster generation");
+    if (f.reel_generation) out.push("AI reel generation");
+    if (f.seo_panel) out.push("SEO insights & scoring");
+
+    const channels: string[] = [];
+    if (f.facebook_publishing) channels.push("Facebook");
+    if (f.instagram_publishing) channels.push("Instagram");
+    if (f.linkedin_publishing) channels.push("LinkedIn");
+    if (channels.length > 0) {
+      out.push(`Publish to ${channels.join(", ")}`);
+    } else {
+      out.push("Drafts only (no publishing)");
     }
 
-    return baseFeatures;
+    if (f.priority_queue) out.push("Priority generation queue");
+    if (f.priority_support) out.push("Priority support");
+    if (f.api_access) out.push("API access");
+    if (f.white_label) out.push("White-label posters");
+
+    return out;
   };
 
   const isEffectivelyActive =
@@ -315,7 +331,7 @@ function SubscriptionContent() {
       {/* Current Subscription Status */}
       {subscription && (
         <Card className={`${subscription.status === "cancelled" ? "border-yellow-500/50 bg-yellow-50/50" : "bg-primary/5 border-primary/20"}`}>
-          <CardContent className="py-4">
+          <CardContent>
             <div className="flex items-center justify-between flex-wrap gap-4">
               <div>
                 <p className="text-sm">
@@ -380,14 +396,16 @@ function SubscriptionContent() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-6 md:grid-cols-3">
+        <div className="grid gap-6 sm:grid-cols-2 md:grid-cols-4">
           {plans.map((plan) => {
             const buttonState = getButtonState(plan);
             const features = getFeatures(plan);
             const isCurrentPlan =
               (subscription?.plan_id === plan.id && isEffectivelyActive) ||
               (!isEffectivelyActive && plan.price === 0);
-            const isPopular = plan.slug === "starter" && !isCurrentPlan;
+            // Mid-tier "Growth" is the typical sweet-spot — flag it as Popular
+            // unless the user is already on it.
+            const isPopular = plan.slug === "growth" && !isCurrentPlan;
 
             return (
               <Card

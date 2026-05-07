@@ -14,74 +14,143 @@ from app.routers import auth, plans, subscription, wallet, business_config, gene
 
 
 def seed_default_plans():
-    """Seed default subscription plans if they don't exist"""
+    """Upsert subscription plans on every startup so price/credit/feature
+    edits in this list propagate without requiring a DB reset.
+    Plans are matched by slug: existing rows are updated in place,
+    missing rows are inserted. Plans not in this list are left alone."""
     if not SessionLocal:
         print("⚠️ Database not configured, skipping plan seeding")
         return
 
+    default_plans = [
+        {
+            "name": "Free",
+            "slug": "free",
+            "description": "Try the platform — drafts only, no publishing",
+            "price": 0,
+            "credits": 10,
+            "features": {
+                "basic_tones": True,
+                "draft_saving": True,
+                "all_tones": False,
+                "facebook_publishing": False,
+                "instagram_publishing": False,
+                "linkedin_publishing": False,
+                "multi_brand": False,
+                "seo_panel": False,
+                "image_generation": False,
+                "reel_generation": False,
+                "priority_queue": False,
+                "priority_support": False,
+                "api_access": False,
+                "white_label": False,
+                "brand_count": 1,
+            },
+            "is_active": True,
+        },
+        {
+            "name": "Starter",
+            "slug": "starter",
+            "description": "For solo creators and small businesses publishing weekly",
+            "price": 49,
+            "credits": 100,
+            "features": {
+                "basic_tones": True,
+                "draft_saving": True,
+                "all_tones": True,
+                "facebook_publishing": True,
+                "instagram_publishing": True,
+                "linkedin_publishing": False,
+                "multi_brand": False,
+                "seo_panel": True,
+                "image_generation": True,
+                "reel_generation": True,
+                "priority_queue": False,
+                "priority_support": False,
+                "api_access": False,
+                "white_label": False,
+                "brand_count": 1,
+            },
+            "is_active": True,
+        },
+        {
+            "name": "Growth",
+            "slug": "growth",
+            "description": "For growing brands publishing daily across multiple networks",
+            "price": 299,
+            "credits": 400,
+            "features": {
+                "basic_tones": True,
+                "draft_saving": True,
+                "all_tones": True,
+                "facebook_publishing": True,
+                "instagram_publishing": True,
+                "linkedin_publishing": True,
+                "multi_brand": True,
+                "seo_panel": True,
+                "image_generation": True,
+                "reel_generation": True,
+                "priority_queue": False,
+                "priority_support": True,
+                "api_access": False,
+                "white_label": False,
+                "brand_count": 3,
+            },
+            "is_active": True,
+        },
+        {
+            "name": "Agency",
+            "slug": "agency",
+            "description": "For agencies and teams managing many brands",
+            "price": 499,
+            "credits": -1,  # Unlimited
+            "features": {
+                "basic_tones": True,
+                "draft_saving": True,
+                "all_tones": True,
+                "facebook_publishing": True,
+                "instagram_publishing": True,
+                "linkedin_publishing": True,
+                "multi_brand": True,
+                "seo_panel": True,
+                "image_generation": True,
+                "reel_generation": True,
+                "priority_queue": True,
+                "priority_support": True,
+                "api_access": True,
+                "white_label": True,
+                "brand_count": 10,
+            },
+            "is_active": True,
+        },
+    ]
+
     db = SessionLocal()
     try:
-        # Check if plans already exist
-        existing = db.query(Plan).first()
-        if existing:
-            return
+        # Retire the legacy "Pro" slug from the previous price tiers so the
+        # subscription page doesn't show stale plans alongside the new ones.
+        legacy_pro = db.query(Plan).filter(Plan.slug == "pro").first()
+        if legacy_pro:
+            legacy_pro.is_active = False
 
-        default_plans = [
-            Plan(
-                name="Free",
-                slug="free",
-                description="Get started with basic features",
-                price=0,
-                credits=10,
-                features={
-                    "basic_tones": True,
-                    "draft_saving": True,
-                    "all_tones": False,
-                    "facebook_publishing": False,
-                    "instagram_publishing": False,
-                    "priority_support": False,
-                },
-                is_active=True,
-            ),
-            Plan(
-                name="Starter",
-                slug="starter",
-                description="Perfect for small businesses",
-                price=9,
-                credits=100,
-                features={
-                    "basic_tones": True,
-                    "draft_saving": True,
-                    "all_tones": True,
-                    "facebook_publishing": True,
-                    "instagram_publishing": False,
-                    "priority_support": False,
-                },
-                is_active=True,
-            ),
-            Plan(
-                name="Pro",
-                slug="pro",
-                description="For growing businesses",
-                price=29,
-                credits=-1,  # Unlimited
-                features={
-                    "basic_tones": True,
-                    "draft_saving": True,
-                    "all_tones": True,
-                    "facebook_publishing": True,
-                    "instagram_publishing": True,
-                    "priority_support": True,
-                },
-                is_active=True,
-            ),
-        ]
-
-        for plan in default_plans:
-            db.add(plan)
+        inserted = 0
+        updated = 0
+        for spec in default_plans:
+            existing = db.query(Plan).filter(Plan.slug == spec["slug"]).first()
+            if existing:
+                existing.name = spec["name"]
+                existing.description = spec["description"]
+                existing.price = spec["price"]
+                existing.credits = spec["credits"]
+                existing.features = spec["features"]
+                existing.is_active = spec["is_active"]
+                updated += 1
+            else:
+                db.add(Plan(**spec))
+                inserted += 1
 
         db.commit()
-        print("✅ Default plans seeded successfully")
+        print(f"✅ Plans synced: {inserted} inserted, {updated} updated")
     except Exception as e:
         print(f"❌ Error seeding plans: {e}")
         db.rollback()
@@ -283,15 +352,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration - allow localhost, *.vercel.app, *.ngrok-free.app, *.ngrok.io,
-# *.trycloudflare.com (ngrok / Cloudflare tunnels are needed for FB Login for Business
-# during local OAuth dev because Meta requires HTTPS redirect URIs).
-print("[CORS] Allowing localhost, *.vercel.app, *.ngrok-free.app, *.ngrok.io, *.trycloudflare.com")
+# CORS configuration - allow localhost, *.vercel.app, *.ngrok-free.app,
+# *.ngrok-free.dev, *.ngrok.io, *.trycloudflare.com (ngrok / Cloudflare
+# tunnels are needed for FB Login for Business during local OAuth dev
+# because Meta requires HTTPS redirect URIs).
+print("[CORS] Allowing localhost, *.vercel.app, *.ngrok-free.app, *.ngrok-free.dev, *.ngrok.io, *.trycloudflare.com")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_origin_regex=r"https://.*\.(vercel\.app|ngrok-free\.app|ngrok\.io|trycloudflare\.com)",
+    allow_origin_regex=r"https://.*\.(vercel\.app|ngrok-free\.app|ngrok-free\.dev|ngrok\.io|trycloudflare\.com)",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=["*"],

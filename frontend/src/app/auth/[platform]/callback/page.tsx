@@ -57,8 +57,10 @@ function CallbackContent() {
 
     // Forward `code` + `state` (and anything else) to the backend callback,
     // which will handle the token exchange + redirect to /settings.
-    const apiBase =
-      process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+    // Same-origin relative URL — Next.js /api rewrite proxies it to the
+    // local backend. Keeps the popup on the HTTPS origin (ngrok in dev,
+    // production domain otherwise) so we never navigate to http://localhost.
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
     const qs = search.toString();
     window.location.replace(
       `${apiBase}/api/social/${platform}/callback${qs ? `?${qs}` : ""}`

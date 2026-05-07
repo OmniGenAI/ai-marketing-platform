@@ -89,6 +89,9 @@ function GeneratePageContent() {
   const [isUploading, setIsUploading] = useState(false);
   const [aspectRatio, setAspectRatio] = useState<string>("1:1");
   const [imageHeadline, setImageHeadline] = useState<string>("");
+  // True while the backend is generating an AI image asynchronously and we
+  // are polling /api/posts/{post_id} for the final URL.
+  const [isImagePending, setIsImagePending] = useState(false);
 
   const handlePublishClick = () => {
     if (!selectedPlatform) {
@@ -265,6 +268,29 @@ function GeneratePageContent() {
     if (file) uploadFile(file);
   };
 
+  // Poll the post until the backend background task fills in image_url.
+  // Caps at ~2 min total to avoid spinning forever if the worker died.
+  const pollForImage = async (postId: string) => {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_ATTEMPTS = 40; // 40 * 3s = 120s
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await api.get<{ image_url: string | null }>(`/api/posts/${postId}`);
+        if (res.data.image_url) {
+          setGeneratedImageUrl(res.data.image_url);
+          setIsImagePending(false);
+          toast.success("Image ready!");
+          return;
+        }
+      } catch {
+        // Transient errors are fine — keep polling until the cap.
+      }
+    }
+    setIsImagePending(false);
+    toast.error("Image generation timed out. You can try regenerating.");
+  };
+
   const handleGenerate = async () => {
     if (!validateTopic()) {
       toast.error("Please enter a topic for your post");
@@ -310,7 +336,8 @@ function GeneratePageContent() {
       setGeneratedImageUrl(response.data.image_url);
       // Replace any prior draft id with the freshly-created one so subsequent
       // Save / Publish actions update this row, not the previous draft.
-      setCurrentPostId(response.data.post_id ?? null);
+      const newPostId = response.data.post_id ?? null;
+      setCurrentPostId(newPostId);
       setSeoKeywordsUsed(response.data.seo_keywords_used || []);
       toast.success(
         seoMode && (response.data.seo_keywords_used?.length ?? 0) > 0
@@ -318,6 +345,15 @@ function GeneratePageContent() {
           : "Post generated! 1 credit used."
       );
       refreshSubscription();
+
+      // AI image is generated asynchronously on the backend (to avoid tunnel
+      // / proxy idle timeouts). Poll the post until the image lands or we
+      // hit the cap.
+      if (response.data.image_pending && newPostId) {
+        setIsImagePending(true);
+        toast.info("Generating image — this can take up to a minute…");
+        void pollForImage(newPostId);
+      }
     } catch (error: unknown) {
       console.error("[Generate] Error:", error);
       const err = error as { response?: { data?: { detail?: string | { msg: string }[] }; status?: number }; message?: string };
@@ -845,15 +881,21 @@ function GeneratePageContent() {
                   </div>
                 )}
 
-                {getDisplayImageUrl() && (
+                {getDisplayImageUrl() ? (
                   <div className="rounded-lg overflow-hidden border">
                     <img
                       src={getDisplayImageUrl()!}
                       alt="Post image"
-                      className="w-full h-48 object-cover"
+                      className="w-full "
                     />
                   </div>
-                )}
+                ) : isImagePending ? (
+                  <div className="rounded-lg border bg-muted/40 h-48 flex flex-col items-center justify-center gap-2 text-muted-foreground">
+                    <RefreshCw className="h-5 w-5 animate-spin" />
+                    <p className="text-sm">Generating image…</p>
+                    <p className="text-xs">This usually takes 30–60 seconds.</p>
+                  </div>
+                ) : null}
 
                 <div className="space-y-2">
                   <Label>Content</Label>

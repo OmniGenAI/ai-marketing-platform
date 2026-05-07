@@ -159,6 +159,37 @@ function PosterNewPageInner() {
     return () => clearInterval(interval);
   }, [isGenerating, isRegenerating]);
 
+  // Poll a poster row until the backend background image task finishes.
+  // The endpoint returns immediately with status="generating"; this picks up
+  // the final ``background_image_url`` and / or soft failure note.
+  const pollPosterUntilReady = async (posterId: string) => {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_ATTEMPTS = 40; // 40 * 3s = 2 min cap
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await api.get<Poster>(`/api/posters/${posterId}`);
+        const p = res.data;
+        if (p.status !== "generating") {
+          setPoster(p);
+          if (p.error_message === "background_generation_failed" || !p.background_image_url) {
+            toast.warning(
+              "Copy is ready, but the background image failed. Try “Regenerate Background”.",
+            );
+          } else {
+            toast.success("Background image ready!");
+          }
+          return;
+        }
+        // Still generating — refresh whatever we have so the UI stays live.
+        setPoster(p);
+      } catch {
+        // transient — keep trying
+      }
+    }
+    toast.error("Background image is taking longer than expected. Refresh to retry.");
+  };
+
   const validate = (): string | null => {
     if (!title.trim()) return "Title is required.";
     return null;
@@ -193,22 +224,23 @@ function PosterNewPageInner() {
         "/api/posters/generate",
         payload,
       );
-      setPoster(res.data.poster);
-      router.replace(`/generate/poster/new?id=${res.data.poster.id}`, {
+      const created = res.data.poster;
+      setPoster(created);
+      router.replace(`/generate/poster/new?id=${created.id}`, {
         scroll: false,
       });
-      if (res.data.background_generation_failed) {
-        toast.warning(
-          "Copy generated, but the background image failed. Hit “Regenerate Background” to try again.",
-        );
-      } else {
-        toast.success(
-          `Poster generated — ${POSTER_CREDIT_COST} credit${
-            POSTER_CREDIT_COST === 1 ? "" : "s"
-          } used.`,
-        );
-      }
+      toast.success(
+        `Poster copy ready — ${POSTER_CREDIT_COST} credit${
+          POSTER_CREDIT_COST === 1 ? "" : "s"
+        } used. Generating background image…`,
+      );
       refreshSubscription();
+      // Background image is rendered asynchronously on the backend so the
+      // request doesn't time out behind the tunnel/proxy. Poll for the
+      // finished image and update the row in place.
+      if (created.status === "generating") {
+        void pollPosterUntilReady(created.id);
+      }
     } catch (error: unknown) {
       const e = error as {
         response?: { status?: number; data?: { detail?: string | { msg: string }[] } };
@@ -245,18 +277,27 @@ function PosterNewPageInner() {
       const res = await api.post<PosterGenerateResponse>(
         `/api/posters/${poster.id}/regenerate-background`,
       );
-      // Preserve user-edited text — backend only rotates the background.
+      // Backend now does the slow work in a background task; the response
+      // only confirms the row flipped to status="generating". Preserve
+      // user-edited text (headline / tagline / caption / etc) and let the
+      // poll loop fill in the new background_image_url when it lands.
       setPoster((prev) =>
         prev
           ? {
               ...prev,
-              background_image_url: res.data.poster.background_image_url,
+              status: res.data.poster.status,
+              background_image_url: null,
               error_message: null,
             }
           : res.data.poster,
       );
-      toast.success("Background regenerated — 1 credit used.");
+      toast.success(
+        `Regenerating background — ${POSTER_CREDIT_COST} credit${
+          POSTER_CREDIT_COST === 1 ? "" : "s"
+        } used.`,
+      );
       refreshSubscription();
+      void pollPosterUntilReady(poster.id);
     } catch (error: unknown) {
       const e = error as {
         response?: { status?: number; data?: { detail?: string } };
@@ -330,7 +371,11 @@ function PosterNewPageInner() {
   const showLowCredits =
     creditsRemaining !== Infinity && creditsRemaining <= 3 && creditsRemaining > 0;
   const noCredits = creditsRemaining === 0;
-  const busy = isGenerating || isRegenerating;
+  // The Generate / Regenerate buttons should remain disabled while the
+  // background task on the server is still rendering the image (status is
+  // ``generating`` until the task patches the row).
+  const isBackgroundPending = poster?.status === "generating";
+  const busy = isGenerating || isRegenerating || isBackgroundPending;
 
   return (
     <div className="relative">
@@ -710,9 +755,26 @@ function PosterNewPageInner() {
                 )}
               </div>
 
-              {/* Live preview — html-to-image captures THIS node */}
+              {/* Live preview — html-to-image captures THIS node. While the
+                  background image is rendering on the backend (status =
+                  "generating"), we keep the preview visible but mount an
+                  animated overlay so the user knows the image will pop in. */}
               <div className="rounded-xl border bg-card p-4">
-                <div className="mx-auto max-w-130">
+                <div className="relative mx-auto max-w-130">
+                  {isBackgroundPending && (
+                    <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-lg bg-background/70 backdrop-blur-sm">
+                      <div className="flex items-center gap-2 rounded-full border bg-card/95 px-4 py-2 shadow-sm">
+                        <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+                        <span className="text-sm font-medium">
+                          Generating image…
+                        </span>
+                        <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        This usually takes 30–60 seconds.
+                      </p>
+                    </div>
+                  )}
                   <PosterPreview
                     ref={previewRef}
                     template={template}

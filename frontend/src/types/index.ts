@@ -14,7 +14,9 @@ export interface Plan {
   description: string;
   price: number;
   credits: number;
-  features: Record<string, boolean>;
+  // Most flags are booleans (e.g. all_tones, facebook_publishing) but a
+  // few quota-style keys carry numeric limits (e.g. brand_count).
+  features: Record<string, boolean | number>;
   is_active: boolean;
 }
 
@@ -136,6 +138,12 @@ export interface GenerateResponse {
   seo_keywords_used?: string[];
   primary_keyword?: string | null;
   image_generation_failed?: boolean;
+  /**
+   * True when the AI image is still rendering on the backend (handed off to a
+   * background task to avoid tunnel/proxy idle timeouts). The client should
+   * poll GET /api/posts/{post_id} until image_url is populated.
+   */
+  image_pending?: boolean;
   post_id?: string | null;
 }
 
@@ -206,6 +214,12 @@ export interface RepurposeResponse {
   goal: ContentGoal;
   platforms: PlatformKey[];
   formats: RepurposeFormats;
+  /** Backend returns "generating" while a background task is still running
+   *  the LLM pipeline. The frontend polls /api/repurpose/saves/{save_id}
+   *  until status is absent (= ready) or "failed". */
+  status?: "generating" | "failed" | string | null;
+  /** Set when status === "failed". */
+  error?: string | null;
 }
 
 export type RewriteSection =
@@ -332,7 +346,7 @@ export type PosterCaptionTone =
   | "witty"
   | "casual";
 
-export type PosterStatus = "draft" | "exported";
+export type PosterStatus = "generating" | "draft" | "exported";
 
 export interface Poster {
   id: string;

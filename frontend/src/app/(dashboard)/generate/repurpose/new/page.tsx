@@ -150,21 +150,72 @@ function RepurposePageInner() {
     [savedBlogs, selectedBlogId],
   );
 
-  // Load existing repurpose save when ?id=... is in URL
+  // Poll a repurpose save row until the background LLM task finishes.
+  const pollRepurposeUntilReady = async (
+    saveId: string,
+  ): Promise<RepurposeResponse> => {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_ATTEMPTS = 40; // 2 min cap
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await api.get<RepurposeResponse>(
+          `/api/repurpose/saves/${saveId}`,
+        );
+        const d = res.data;
+        if (d.status === "failed") {
+          throw new Error(d.error || "Repurpose generation failed.");
+        }
+        if (!d.status || d.status !== "generating") {
+          return d;
+        }
+      } catch (err) {
+        const e = err as { response?: { status?: number } };
+        if (e.response?.status === 404) {
+          throw new Error("Repurpose save was deleted while generating.");
+        }
+        // transient — keep polling
+      }
+    }
+    throw new Error("Repurpose is taking longer than expected. Please try again.");
+  };
+
+  // Load existing repurpose save when ?id=... is in URL. If the row is
+  // still generating, jump straight into the polling loop instead of
+  // showing an empty placeholder.
   useEffect(() => {
     if (!urlSaveId) return;
     if (result?.save_id === urlSaveId) return;
     (async () => {
       try {
         const res = await api.get<RepurposeResponse>(`/api/repurpose/saves/${urlSaveId}`);
-        setResult(res.data);
+        const data = res.data;
+        if (data.status === "generating") {
+          setIsRepurposing(true);
+          setResult(data);
+          if (data.source_url) setSourceUrl(data.source_url);
+          if (data.voice) setVoice(data.voice as VoicePreset);
+          if (data.goal) setGoal(data.goal as ContentGoal);
+          if (data.platforms) setPlatforms(data.platforms as PlatformKey[]);
+          try {
+            const finalRes = await pollRepurposeUntilReady(urlSaveId);
+            setResult(finalRes);
+          } catch (pollErr: unknown) {
+            const m = (pollErr as { message?: string })?.message;
+            toast.error(m || "Repurpose generation failed.");
+          } finally {
+            setIsRepurposing(false);
+          }
+          return;
+        }
+        setResult(data);
         setLiIndex(0);
         setIgIndex(0);
         setFbIndex(0);
-        if (res.data.source_url) setSourceUrl(res.data.source_url);
-        if (res.data.voice) setVoice(res.data.voice as VoicePreset);
-        if (res.data.goal) setGoal(res.data.goal as ContentGoal);
-        if (res.data.platforms) setPlatforms(res.data.platforms as PlatformKey[]);
+        if (data.source_url) setSourceUrl(data.source_url);
+        if (data.voice) setVoice(data.voice as VoicePreset);
+        if (data.goal) setGoal(data.goal as ContentGoal);
+        if (data.platforms) setPlatforms(data.platforms as PlatformKey[]);
       } catch {
         toast.error("Couldn't load that repurpose. It may have been deleted.");
         router.replace("/generate/repurpose/new");
@@ -299,8 +350,30 @@ function RepurposePageInner() {
       if (res.data.save_id) {
         router.replace(`/generate/repurpose/new?id=${res.data.save_id}`, { scroll: false });
       }
-      toast.success(`Generated for ${res.data.platforms.length} platforms — 1 credit used.`);
-      refreshSubscription();
+
+      // The endpoint now returns immediately with status="generating" and
+      // hands off the LLM pipeline to a background task. Poll the save row
+      // until it lands.
+      if (res.data.status === "generating" && res.data.save_id) {
+        toast.info("Repurposing across platforms — this can take up to a minute…");
+        try {
+          const finalRes = await pollRepurposeUntilReady(res.data.save_id);
+          setResult(finalRes);
+          toast.success(
+            `Generated for ${finalRes.platforms.length} platforms — 1 credit used.`,
+          );
+          refreshSubscription();
+        } catch (pollErr: unknown) {
+          const m = (pollErr as { message?: string })?.message;
+          toast.error(m || "Repurpose generation failed.");
+        }
+      } else {
+        // Backwards-compat path — server returned a fully synchronous result.
+        toast.success(
+          `Generated for ${res.data.platforms.length} platforms — 1 credit used.`,
+        );
+        refreshSubscription();
+      }
     } catch (error: unknown) {
       const e = error as {
         response?: { status?: number; data?: { detail?: string | { msg: string }[] } };

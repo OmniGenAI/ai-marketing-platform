@@ -58,8 +58,12 @@ function InstagramCallbackContent() {
       }
 
       if (code && state) {
-        // Redirect to backend callback to complete OAuth flow
-        const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        // Redirect to backend callback to complete OAuth flow.
+        // Use a same-origin relative URL so it goes through Next.js's
+        // /api rewrite (which proxies to the local backend). This keeps
+        // the entire popup flow inside the ngrok HTTPS origin and avoids
+        // mixed-content navigations to http://localhost.
+        const backendUrl = process.env.NEXT_PUBLIC_API_URL || "";
         window.location.href = `${backendUrl}/api/social/instagram/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
       } else {
         setStatus("error");

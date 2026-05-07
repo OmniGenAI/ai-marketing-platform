@@ -248,18 +248,120 @@ export default function BrandKitPage() {
         url: config.website,
       });
       if (response.data.success) {
-        toast.success("Website analyzed!");
-        setConfig((prev) => ({
-          ...prev,
-          website_context: JSON.stringify(response.data.context),
-        }));
-        setScrapedContext(response.data.context || null);
+        const ctx = response.data.context || null;
+        let summary: {
+          business_type?: string;
+          key_offerings?: string[];
+          target_audience?: string;
+          location?: string;
+          tone?: string;
+          highlights?: string[];
+          brand_voice?: string;
+        } | null = null;
         if (response.data.summary) {
           try {
-            setWebsiteSummary(JSON.parse(response.data.summary));
+            summary = JSON.parse(response.data.summary);
           } catch {
-            setWebsiteSummary(null);
+            summary = null;
           }
+        }
+
+        setScrapedContext(ctx);
+        setWebsiteSummary(summary);
+
+        // Build a partial-config patch from the analyser output.
+        // Only fills *empty* fields so we never overwrite something the user
+        // already typed. Tone is the one exception: we replace the default
+        // "professional" if the model returned a different supported tone.
+        const patch: Partial<BrandKitState> = {
+          website_context: JSON.stringify(ctx),
+        };
+        const filled: string[] = [];
+
+        // Business Name — strip a trailing " | Site Name" / " - Tagline"
+        // off the scraped <title>.
+        if (!config.business_name && ctx?.title) {
+          const cleaned = String(ctx.title)
+            .split(/\s[|–—-]\s/)[0]
+            .trim()
+            .slice(0, 100);
+          if (cleaned) {
+            patch.business_name = cleaned;
+            filled.push("Business Name");
+          }
+        }
+
+        if (!config.niche && summary?.business_type) {
+          patch.niche = String(summary.business_type).slice(0, 120);
+          filled.push("Industry / Niche");
+        }
+
+        if (!config.location && summary?.location) {
+          patch.location = String(summary.location).slice(0, 120);
+          filled.push("Location");
+        }
+
+        // Tone — only switch off the default "professional" if the model
+        // returned a tone we support.
+        if (config.tone === "professional" && summary?.tone) {
+          const candidate = String(summary.tone).toLowerCase().trim();
+          const allowed = ["professional", "friendly", "witty", "formal", "casual"];
+          const matched = allowed.find((t) => candidate.includes(t));
+          if (matched && matched !== config.tone) {
+            patch.tone = matched;
+            filled.push("Brand Tone");
+          }
+        }
+
+        if (!config.products && Array.isArray(summary?.key_offerings) && summary.key_offerings.length) {
+          patch.products = summary.key_offerings.slice(0, 8).join(", ");
+          filled.push("Products / Services");
+        }
+
+        if (!config.target_audience && summary?.target_audience) {
+          patch.target_audience = String(summary.target_audience).slice(0, 400);
+          filled.push("Target Audience");
+        }
+
+        // Brand Voice — prefer explicit summary.brand_voice, then first
+        // highlight, then meta description.
+        if (!config.brand_voice) {
+          const voice =
+            summary?.brand_voice ||
+            (Array.isArray(summary?.highlights) && summary.highlights[0]) ||
+            ctx?.meta_description ||
+            "";
+          if (voice) {
+            patch.brand_voice = String(voice).slice(0, 400);
+            filled.push("Brand Voice");
+          }
+        }
+
+        // Hashtags — turn top_keywords into proper #tags. Strip non-alphanum,
+        // lowercase, dedupe, take 6.
+        if (!config.hashtags && Array.isArray(ctx?.top_keywords) && ctx.top_keywords.length) {
+          const seen = new Set<string>();
+          const tags: string[] = [];
+          for (const raw of ctx.top_keywords as string[]) {
+            const t = String(raw).toLowerCase().replace(/[^a-z0-9]+/g, "");
+            if (t && !seen.has(t)) {
+              seen.add(t);
+              tags.push(`#${t}`);
+              if (tags.length >= 6) break;
+            }
+          }
+          if (tags.length) {
+            patch.hashtags = tags.join(" ");
+            filled.push("Hashtags");
+          }
+        }
+
+        setConfig((prev) => ({ ...prev, ...patch }));
+
+        if (filled.length > 0) {
+          toast.success(`Autofilled: ${filled.join(", ")}`);
+        } else {
+          toast.success("Website analyzed");
         }
       } else {
         toast.error(response.data.message || "Failed to analyze website");
@@ -352,109 +454,12 @@ export default function BrandKitPage() {
           <CompletionBar config={config} />
         </div>
 
-        <div className="flex gap-4">
-        {/* SECTION 1: IDENTITY */}
+        {/* SECTION: WEBSITE ANALYSER (moved to top — primary AI context source) */}
         <Section
-          title="Identity"
-          subtitle="Core facts the AI puts in every piece of content."
+          title="Website"
+          subtitle="The single best context source — AI reads your site and treats it as the top-priority signal."
         >
-          <FieldRow icon={<Building2 className="h-4 w-4" />} label="Business Name" hint="required" iconBg="bg-blue-500/15" iconColor="text-blue-500">
-            <Input
-              placeholder="e.g., Sunrise Dental Clinic"
-              value={config.business_name}
-              onChange={(e) => handleChange("business_name", e.target.value)}
-              required
-            />
-          </FieldRow>
-
-          <FieldRow icon={<ShoppingBag className="h-4 w-4" />} label="Industry / Niche" hint="required" iconBg="bg-violet-500/15" iconColor="text-violet-500">
-            <Input
-              placeholder="e.g., Healthcare, Dental"
-              value={config.niche}
-              onChange={(e) => handleChange("niche", e.target.value)}
-              required
-            />
-          </FieldRow>
-
-          <FieldRow icon={<MapPin className="h-4 w-4" />} label="Location" hint="local SEO" iconBg="bg-rose-500/15" iconColor="text-rose-500">
-            <Input
-              placeholder="e.g., Mumbai, India"
-              value={config.location}
-              onChange={(e) => handleChange("location", e.target.value)}
-            />
-          </FieldRow>
-
-          <FieldRow icon={<Megaphone className="h-4 w-4" />} label="Brand Tone" iconBg="bg-orange-500/15" iconColor="text-orange-500">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {TONES.map((t) => (
-                <button
-                  key={t.value}
-                  type="button"
-                  onClick={() => handleChange("tone", t.value)}
-                  className={`text-left px-3 py-2 rounded-lg border text-sm transition-all ${
-                    config.tone === t.value
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-background text-muted-foreground hover:border-muted-foreground"
-                  }`}
-                >
-                  <span className="font-medium block">{t.label}</span>
-                  <span className="text-xs opacity-70">{t.desc}</span>
-                </button>
-              ))}
-            </div>
-          </FieldRow>
-        </Section>
-
-        {/* SECTION 2: CONTENT */}
-        <Section
-          title="Content Context"
-          subtitle="What the AI needs to write relevant, specific content."
-        >
-          <FieldRow icon={<ShoppingBag className="h-4 w-4" />} label="Products / Services" hint="required" iconBg="bg-emerald-500/15" iconColor="text-emerald-500">
-            <Textarea
-              placeholder="e.g., Teeth cleaning, root canal, braces, whitening, dental implants..."
-              value={config.products}
-              onChange={(e) => handleChange("products", e.target.value)}
-              rows={3}
-              className="resize-none"
-            />
-          </FieldRow>
-
-          <FieldRow icon={<Users className="h-4 w-4" />} label="Target Audience" hint="required" iconBg="bg-cyan-500/15" iconColor="text-cyan-500">
-            <Textarea
-              placeholder="e.g., Families and working professionals aged 25-50 in Mumbai looking for affordable dental care"
-              value={config.target_audience}
-              onChange={(e) => handleChange("target_audience", e.target.value)}
-              rows={2}
-              className="resize-none"
-            />
-          </FieldRow>
-
-          <FieldRow icon={<Mic2 className="h-4 w-4" />} label="Brand Voice" iconBg="bg-purple-500/15" iconColor="text-purple-500">
-            <Textarea
-              placeholder="e.g., Warm, reassuring, and educational. We make dental visits stress-free."
-              value={config.brand_voice}
-              onChange={(e) => handleChange("brand_voice", e.target.value)}
-              rows={2}
-              className="resize-none"
-            />
-          </FieldRow>
-
-          <FieldRow icon={<Hash className="h-4 w-4" />} label="Preferred Hashtags" iconBg="bg-fuchsia-500/15" iconColor="text-fuchsia-500">
-            <Input
-              placeholder="#dentalcare #healthysmile #mumbaidentist"
-              value={config.hashtags}
-              onChange={(e) => handleChange("hashtags", e.target.value)}
-            />
-          </FieldRow>
-        </Section>
-        </div>
-
-        {/* SECTION 3: SEO */}
-        <Section
-          title="SEO and Competitors"
-          subtitle="Feeds the SEO Brief generator to find gaps you can win."
-        >
+          {/* Competitor URLs — hidden for now, kept in code for future re-enable.
           <FieldRow icon={<Swords className="h-4 w-4" />} label="Competitor URLs" hint="comma-separated" iconBg="bg-red-500/15" iconColor="text-red-500">
             <Textarea
               placeholder="https://competitor1.com, https://competitor2.com"
@@ -464,6 +469,7 @@ export default function BrandKitPage() {
               className="resize-none"
             />
           </FieldRow>
+          */}
 
           <FieldRow icon={<Link2 className="h-4 w-4" />} label="Your Website" iconBg="bg-sky-500/15" iconColor="text-sky-500">
             <div className="space-y-2">
@@ -663,7 +669,103 @@ export default function BrandKitPage() {
           </FieldRow>
         </Section>
 
+        <div className="flex gap-4">
+        {/* SECTION 1: IDENTITY */}
+        <Section
+          title="Identity"
+          subtitle="Core facts the AI puts in every piece of content."
+        >
+          <FieldRow icon={<Building2 className="h-4 w-4" />} label="Business Name" hint="required" iconBg="bg-blue-500/15" iconColor="text-blue-500">
+            <Input
+              placeholder="e.g., Sunrise Dental Clinic"
+              value={config.business_name}
+              onChange={(e) => handleChange("business_name", e.target.value)}
+              required
+            />
+          </FieldRow>
 
+          <FieldRow icon={<ShoppingBag className="h-4 w-4" />} label="Industry / Niche" hint="required" iconBg="bg-violet-500/15" iconColor="text-violet-500">
+            <Input
+              placeholder="e.g., Healthcare, Dental"
+              value={config.niche}
+              onChange={(e) => handleChange("niche", e.target.value)}
+              required
+            />
+          </FieldRow>
+
+          <FieldRow icon={<MapPin className="h-4 w-4" />} label="Location" hint="local SEO" iconBg="bg-rose-500/15" iconColor="text-rose-500">
+            <Input
+              placeholder="e.g., Mumbai, India"
+              value={config.location}
+              onChange={(e) => handleChange("location", e.target.value)}
+            />
+          </FieldRow>
+
+          <FieldRow icon={<Megaphone className="h-4 w-4" />} label="Brand Tone" iconBg="bg-orange-500/15" iconColor="text-orange-500">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {TONES.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => handleChange("tone", t.value)}
+                  className={`text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                    config.tone === t.value
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-muted-foreground hover:border-muted-foreground"
+                  }`}
+                >
+                  <span className="font-medium block">{t.label}</span>
+                  <span className="text-xs opacity-70">{t.desc}</span>
+                </button>
+              ))}
+            </div>
+          </FieldRow>
+        </Section>
+
+        {/* SECTION 2: CONTENT */}
+        <Section
+          title="Content Context"
+          subtitle="What the AI needs to write relevant, specific content."
+        >
+          <FieldRow icon={<ShoppingBag className="h-4 w-4" />} label="Products / Services" hint="required" iconBg="bg-emerald-500/15" iconColor="text-emerald-500">
+            <Textarea
+              placeholder="e.g., Teeth cleaning, root canal, braces, whitening, dental implants..."
+              value={config.products}
+              onChange={(e) => handleChange("products", e.target.value)}
+              rows={3}
+              className="resize-none"
+            />
+          </FieldRow>
+
+          <FieldRow icon={<Users className="h-4 w-4" />} label="Target Audience" hint="required" iconBg="bg-cyan-500/15" iconColor="text-cyan-500">
+            <Textarea
+              placeholder="e.g., Families and working professionals aged 25-50 in Mumbai looking for affordable dental care"
+              value={config.target_audience}
+              onChange={(e) => handleChange("target_audience", e.target.value)}
+              rows={2}
+              className="resize-none"
+            />
+          </FieldRow>
+
+          <FieldRow icon={<Mic2 className="h-4 w-4" />} label="Brand Voice" iconBg="bg-purple-500/15" iconColor="text-purple-500">
+            <Textarea
+              placeholder="e.g., Warm, reassuring, and educational. We make dental visits stress-free."
+              value={config.brand_voice}
+              onChange={(e) => handleChange("brand_voice", e.target.value)}
+              rows={2}
+              className="resize-none"
+            />
+          </FieldRow>
+
+          <FieldRow icon={<Hash className="h-4 w-4" />} label="Preferred Hashtags" iconBg="bg-fuchsia-500/15" iconColor="text-fuchsia-500">
+            <Input
+              placeholder="#dentalcare #healthysmile #mumbaidentist"
+              value={config.hashtags}
+              onChange={(e) => handleChange("hashtags", e.target.value)}
+            />
+          </FieldRow>
+        </Section>
+        </div>
 
       </div>
     </form>

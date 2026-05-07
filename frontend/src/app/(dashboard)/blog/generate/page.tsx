@@ -44,6 +44,16 @@ interface BlogPrefill {
   competitor_insights?: { url: string; title: string; top_keywords: string[]; content_summary?: string; headings?: string[] }[];
   nlp_terms?: string[];
   tone?: string;
+  // Carried over from a saved SEO brief so the blog LLM matches the brief's
+  // search intent and mirrors its preferred meta-tag styling.
+  search_intent?: string;
+  meta_suggestions?: { title?: string; description?: string }[];
+  /**
+   * When true, automatically kick off blog generation as soon as the
+   * prefill loads — saves the user one click and ensures the blog is
+   * built from the full brief context end-to-end.
+   */
+  auto_generate?: boolean;
 }
 
 interface BlogResult {
@@ -55,6 +65,12 @@ interface BlogResult {
   meta_description: string;
   schema_markup: Record<string, unknown>;
   save_id?: string | null;
+  /** Backend returns "generating" while a background task is still
+   *  rendering the blog. The frontend polls /api/blog/saves/{id} until
+   *  data.status is absent (= ready) or "failed". */
+  status?: "generating" | "failed" | string | null;
+  /** Set when status === "failed" — surface to the user. */
+  error?: string | null;
 }
 
 const WORD_COUNTS = [
@@ -108,6 +124,13 @@ function BlogGenerateContent() {
   const [serpResults, setSerpResults] = useState<{ title: string; link: string; snippet: string }[]>([]);
   const [competitorInsights, setCompetitorInsights] = useState<{ url: string; title: string; top_keywords: string[] }[]>([]);
   const [nlpTerms, setNlpTerms] = useState<string[]>([]);
+  // Search intent + meta suggestions are carried over from an SEO brief
+  // and forwarded straight to the blog LLM so the generated post matches
+  // the brief's positioning. They have no UI of their own — purely state.
+  const [searchIntent, setSearchIntent] = useState<string>("");
+  const [metaSuggestions, setMetaSuggestions] = useState<
+    { title: string; description: string }[]
+  >([]);
   const [wordCount, setWordCount] = useState("1500");
   const [tone, setTone] = useState("professional");
   const [outlineText, setOutlineText] = useState("");
@@ -147,6 +170,10 @@ function BlogGenerateContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Set when ``blog_prefill`` carried ``auto_generate=true``. Triggers a
+  // single Generate call once the prefilled state has settled.
+  const autoGenerateRef = useRef(false);
+
   // Load prefill from sessionStorage (coming from SEO brief).
   // A fresh brief → fresh blog record: clear any saved-blog linkage that
   // might otherwise UPSERT the brief's new content over an unrelated blog.
@@ -163,10 +190,22 @@ function BlogGenerateContent() {
       if (prefill.serp_results?.length) setSerpResults(prefill.serp_results);
       if (prefill.competitor_insights?.length) setCompetitorInsights(prefill.competitor_insights);
       if (prefill.nlp_terms?.length) setNlpTerms(prefill.nlp_terms);
+      if (prefill.search_intent) setSearchIntent(prefill.search_intent);
+      if (prefill.meta_suggestions?.length) {
+        setMetaSuggestions(
+          prefill.meta_suggestions.map((m) => ({
+            title: m?.title || "",
+            description: m?.description || "",
+          })),
+        );
+      }
       if (prefill.tone) { setTone(prefill.tone); toneFromPrefillRef.current = true; }
       if (prefill.h2_outline?.length) {
         setOutlineText(prefill.h2_outline.map((s) => s.heading).join("\n"));
         setShowOutline(true);
+      }
+      if (prefill.auto_generate && (prefill.topic || "").trim()) {
+        autoGenerateRef.current = true;
       }
       // New brief means a new blog — disconnect from any previously loaded save.
       setCurrentSaveId(null);
@@ -185,6 +224,17 @@ function BlogGenerateContent() {
       .then((res) => {
         const d = res.data.data;
         if (d) {
+          // Don't show an empty placeholder if the row is still generating;
+          // skip straight to the polling loop instead.
+          if (d.status === "generating") {
+            setIsLoading(true);
+            pollBlogUntilReady(savedId)
+              .then((finalResult) => setResult(finalResult))
+              .catch((err) => toast.error(err?.message || "Blog generation failed."))
+              .finally(() => setIsLoading(false));
+            setCurrentSaveId(savedId);
+            return;
+          }
           setResult({
             title: d.title,
             content: d.content,
@@ -225,6 +275,36 @@ function BlogGenerateContent() {
       .map((heading) => ({ heading, notes: "" }));
   };
 
+  // Poll the SeoSave row until the background task fills in the final blog
+  // content. Returns the loaded result on success, throws on hard failure.
+  const pollBlogUntilReady = async (saveId: string): Promise<BlogResult> => {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_ATTEMPTS = 60; // ~3 minutes cap for very long blogs
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await api.get<{ id: string; title: string; data: BlogResult & { status?: string; error?: string } }>(
+          `/api/blog/saves/${saveId}`,
+        );
+        const d = res.data.data;
+        if (!d) continue;
+        if (d.status === "failed") {
+          throw new Error(d.error || "Blog generation failed.");
+        }
+        if (!d.status || d.status !== "generating") {
+          return { ...d, save_id: saveId };
+        }
+      } catch (err) {
+        const e = err as { response?: { status?: number } };
+        if (e.response?.status === 404) {
+          throw new Error("Blog save row was deleted while generating.");
+        }
+        // transient — keep polling
+      }
+    }
+    throw new Error("Blog generation timed out. Please try again.");
+  };
+
   const handleGenerate = async () => {
     if (!topic.trim()) { toast.error("Please enter a topic"); return; }
     setIsLoading(true);
@@ -242,10 +322,13 @@ function BlogGenerateContent() {
         h2_outline: parseOutline(),
         word_count: parseInt(wordCount) || 1500,
         tone,
+        // Forwarded from the SEO brief when present so the writer LLM can
+        // align with the brief's search intent + meta tag styling.
+        ...(searchIntent && { search_intent: searchIntent }),
+        ...(metaSuggestions.length && { meta_suggestions: metaSuggestions }),
         save_id: currentSaveId,          // updates in place if present
         ...(businessContext && { business_context: businessContext }),
-      }, { timeout: 120_000 });
-      setResult(res.data);
+      }, { timeout: 30_000 });
 
       const returnedId = res.data.save_id;
       if (returnedId && returnedId !== currentSaveId) {
@@ -253,11 +336,39 @@ function BlogGenerateContent() {
         // Put the id in the URL so a refresh resumes this blog.
         router.replace(`/blog/generate?id=${returnedId}`, { scroll: false });
       }
-      toast.success(
-        currentSaveId ? "Blog updated in your library" : "Saved to your library",
-        returnedId ? { description: "Find it in /blog" } : undefined,
-      );
-      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+
+      // The endpoint now returns immediately with status="generating" and
+      // hands off the slow LLM call to a background task. Poll the save
+      // row until the task completes.
+      if (res.data.status === "generating" && returnedId) {
+        toast.info("Generating blog post — this can take a minute or two…");
+        try {
+          const finalResult = await pollBlogUntilReady(returnedId);
+          setResult(finalResult);
+          toast.success(
+            currentSaveId ? "Blog updated in your library" : "Saved to your library",
+            returnedId ? { description: "Find it in /blog" } : undefined,
+          );
+          setTimeout(
+            () => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+            100,
+          );
+        } catch (pollErr: unknown) {
+          const m = (pollErr as { message?: string })?.message;
+          toast.error(m || "Blog generation failed.");
+        }
+      } else {
+        // Backwards-compat: server returned a fully synchronous response.
+        setResult(res.data);
+        toast.success(
+          currentSaveId ? "Blog updated in your library" : "Saved to your library",
+          returnedId ? { description: "Find it in /blog" } : undefined,
+        );
+        setTimeout(
+          () => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+          100,
+        );
+      }
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
       toast.error(e.response?.data?.detail || "Failed to generate blog");
@@ -265,6 +376,23 @@ function BlogGenerateContent() {
       setIsLoading(false);
     }
   };
+
+  // Auto-fire generation when navigating in from the SEO brief with
+  // ``auto_generate=true``. We wait one tick after topic populates so all
+  // sibling state setters in the prefill effect have settled, then trigger
+  // exactly once. ``handleGenerate`` reads the latest closure each render.
+  useEffect(() => {
+    if (!autoGenerateRef.current) return;
+    if (!topic.trim()) return;
+    autoGenerateRef.current = false;
+    // Give React one paint to flush state before the network call so the
+    // form visibly reflects the prefilled brief data.
+    const handle = window.setTimeout(() => {
+      void handleGenerate();
+    }, 0);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topic]);
 
   const openInEditor = () => {
     if (!result) return;

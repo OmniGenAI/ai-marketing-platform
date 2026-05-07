@@ -58,8 +58,11 @@ function FacebookCallbackContent() {
       }
 
       if (code && state) {
-        // Redirect to backend callback to complete OAuth flow
-        const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        // Redirect to backend callback to complete OAuth flow.
+        // Same-origin relative URL — relies on the Next.js /api rewrite
+        // to proxy through to the local backend. Avoids mixed-content
+        // navigations from the HTTPS ngrok origin to http://localhost.
+        const backendUrl = process.env.NEXT_PUBLIC_API_URL || "";
         window.location.href = `${backendUrl}/api/social/facebook/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
       } else {
         setStatus("error");

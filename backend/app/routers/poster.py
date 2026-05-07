@@ -1,12 +1,12 @@
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.business_config import BusinessConfig
 from app.models.poster import Poster
@@ -177,6 +177,69 @@ def _wallet_for_update(db: Session, user_id: str, cost: int) -> Wallet:
     return wallet
 
 
+def _generate_poster_background_in_task(
+    poster_id: str,
+    *,
+    title: str,
+    theme: str,
+    template_style: str,
+    aspect_ratio: str,
+    primary_color: str | None,
+    secondary_color: str | None,
+    logo_url: str | None,
+    user_id: str,
+) -> None:
+    """Background image generation: runs after the HTTP request returns.
+
+    Patches the poster row with the resulting URL (or marks the soft failure
+    via `error_message`) and flips status from ``generating`` to ``draft``
+    when done. The frontend polls /api/posters/{id} for the terminal state.
+    """
+    db = SessionLocal()
+    try:
+        try:
+            url = generate_poster_background(
+                title=title,
+                theme=theme,
+                template_style=template_style,
+                aspect_ratio=aspect_ratio,
+                primary_color=primary_color,
+                secondary_color=secondary_color,
+                logo_url=logo_url,
+                user_id=user_id,
+            )
+        except Exception as e:
+            logger.error(
+                f"[POSTER-BG] background generation failed for poster {poster_id}: {e}",
+                exc_info=True,
+            )
+            url = None
+
+        poster = db.query(Poster).filter(Poster.id == poster_id).first()
+        if not poster:
+            logger.warning(
+                f"[POSTER-BG] poster {poster_id} not found when writing background"
+            )
+            return
+
+        poster.background_image_url = url
+        poster.status = "draft"
+        poster.error_message = None if url else "background_generation_failed"
+        try:
+            db.commit()
+            logger.info(
+                f"[POSTER-BG] poster={poster_id} background={'set' if url else 'failed'}"
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                f"[POSTER-BG] persist failed for poster {poster_id}: {e}",
+                exc_info=True,
+            )
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -210,22 +273,23 @@ def get_poster(
 )
 async def generate_poster(
     data: PosterGenerateRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate a new poster: AI copy + text-free background image.
+    """Kick off poster generation: copy is rendered synchronously (fast),
+    background image is generated asynchronously (slow). Returns the
+    poster row immediately with ``status="generating"`` while the image
+    is still rendering — the frontend polls
+    /api/posters/{id} until ``status`` flips to ``draft``.
 
-    Charges `settings.POSTER_CREDIT_COST` credits. Background image failures
-    degrade gracefully — the poster row is still returned (with the AI copy)
-    and the response carries `background_generation_failed=True` so the
-    frontend can offer a "Regenerate Background" action.
+    This avoids tunnel / proxy idle timeouts on the 30–90s image step.
     """
     cost = settings.POSTER_CREDIT_COST
 
-    # 1. Lock wallet and verify credit balance.
+    # Pre-flight credit check — DON'T hold the row lock across long calls.
     wallet = _wallet_for_update(db, current_user.id, cost)
 
-    # 2. Require a configured Brand Kit (consistent with /api/generate).
     config = (
         db.query(BusinessConfig)
         .filter(BusinessConfig.user_id == current_user.id)
@@ -244,8 +308,9 @@ async def generate_poster(
         show_logo=data.show_logo,
     )
 
-    # 3. Generate copy (cheap, fast). Failures here are fatal — without copy
-    #    the poster is useless and we shouldn't charge the user.
+    # Copy generation is cheap (~2-5s) — keep it inline so users see real
+    # text immediately. Failures here are fatal: an empty poster is useless
+    # and we shouldn't charge for one.
     try:
         copy = await run_in_threadpool(
             generate_poster_copy,
@@ -271,31 +336,8 @@ async def generate_poster(
 
     brand_label = _build_brand_label(config)
 
-    # 4. Generate background (slow). Failures degrade gracefully.
-    background_image_url: str | None = None
-    background_generation_failed = False
-    try:
-        background_image_url = await run_in_threadpool(
-            generate_poster_background,
-            title=data.title,
-            theme=data.theme,
-            template_style=data.template_style,
-            aspect_ratio=data.aspect_ratio,
-            primary_color=primary_color,
-            secondary_color=secondary_color,
-            logo_url=logo_url,
-            user_id=current_user.id,
-        )
-        if not background_image_url:
-            background_generation_failed = True
-    except Exception as e:
-        logger.error(
-            f"[POSTER] background generation failed for user {current_user.id}: {e}",
-            exc_info=True,
-        )
-        background_generation_failed = True
-
-    # 5. Persist the poster + charge credits atomically.
+    # Persist the poster row with status="generating" and charge credits
+    # atomically. The background image fills in later.
     poster = Poster(
         user_id=current_user.id,
         title=data.title,
@@ -311,13 +353,12 @@ async def generate_poster(
         event_meta=copy.get("event_meta"),
         features=json.dumps(copy.get("features") or []),
         brand_label=brand_label,
-        background_image_url=background_image_url,
+        background_image_url=None,
         primary_color=primary_color,
         secondary_color=secondary_color,
         show_logo="true" if data.show_logo else "false",
-        status="draft",
-        error_message=("background_generation_failed"
-                       if background_generation_failed else None),
+        status="generating",
+        error_message=None,
     )
 
     try:
@@ -343,10 +384,25 @@ async def generate_poster(
 
     credits_remaining = wallet.balance  # may be -1 (unlimited)
 
+    # Hand off the slow image step to a background task. The HTTP request
+    # returns now; the frontend polls /api/posters/{id} for completion.
+    background_tasks.add_task(
+        _generate_poster_background_in_task,
+        poster.id,
+        title=data.title,
+        theme=data.theme,
+        template_style=data.template_style,
+        aspect_ratio=data.aspect_ratio,
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        logo_url=logo_url,
+        user_id=current_user.id,
+    )
+
     return PosterGenerateResponse(
         poster=PosterResponse.model_validate(poster),
         credits_remaining=credits_remaining,
-        background_generation_failed=background_generation_failed,
+        background_generation_failed=False,
     )
 
 
@@ -356,6 +412,7 @@ async def generate_poster(
 )
 async def regenerate_background(
     poster_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -364,6 +421,10 @@ async def regenerate_background(
     Costs another `POSTER_CREDIT_COST` credit. Reuses every previously-saved
     field (title / theme / template_style / colors / logo opt-in). The user's
     edited text (headline / tagline / cta / caption) is preserved.
+
+    Like ``/generate``, the slow image step runs in a background task; the
+    request returns immediately with ``status="generating"`` and the frontend
+    polls /api/posters/{id} for completion.
     """
     cost = settings.POSTER_CREDIT_COST
 
@@ -385,38 +446,11 @@ async def regenerate_background(
         except (json.JSONDecodeError, TypeError):
             pass
 
-    background_image_url: str | None = None
-    background_generation_failed = False
+    # Charge credits up-front and flip the row to ``generating``. If the
+    # background task fails, the row's error_message will surface that and
+    # the frontend can offer another retry.
     try:
-        background_image_url = await run_in_threadpool(
-            generate_poster_background,
-            title=poster.title,
-            theme=poster.theme,
-            template_style=poster.template_style,
-            aspect_ratio=poster.aspect_ratio,
-            primary_color=poster.primary_color,
-            secondary_color=poster.secondary_color,
-            logo_url=logo_url,
-            user_id=current_user.id,
-        )
-        if not background_image_url:
-            background_generation_failed = True
-    except Exception as e:
-        logger.error(
-            f"[POSTER] regenerate background failed for user {current_user.id}: {e}",
-            exc_info=True,
-        )
-        background_generation_failed = True
-
-    # Don't charge if the background totally failed — user gets nothing new.
-    if background_generation_failed:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to regenerate background. Please try again.",
-        )
-
-    try:
-        poster.background_image_url = background_image_url
+        poster.status = "generating"
         poster.error_message = None
         _charge_credits(
             db,
@@ -429,13 +463,26 @@ async def regenerate_background(
     except Exception as e:
         db.rollback()
         logger.error(
-            f"[POSTER] persist regenerated bg failed for user {current_user.id}: {e}",
+            f"[POSTER] charge for regenerate failed for user {current_user.id}: {e}",
             exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save regenerated background.",
+            detail="Failed to start background regeneration.",
         )
+
+    background_tasks.add_task(
+        _generate_poster_background_in_task,
+        poster.id,
+        title=poster.title,
+        theme=poster.theme,
+        template_style=poster.template_style,
+        aspect_ratio=poster.aspect_ratio,
+        primary_color=poster.primary_color,
+        secondary_color=poster.secondary_color,
+        logo_url=logo_url,
+        user_id=current_user.id,
+    )
 
     return PosterGenerateResponse(
         poster=PosterResponse.model_validate(poster),

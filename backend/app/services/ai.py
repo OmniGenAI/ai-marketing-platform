@@ -289,6 +289,7 @@ def _build_image_prompt(
     reserve_logo_corner: bool = False,
     aspect_ratio: str | None = None,
     overlay_text: str | None = None,
+    use_logo_as_reference: bool = False,
 ) -> str:
     """Build a marketing image prompt with optional brand colors and logo safe-zone.
 
@@ -298,6 +299,9 @@ def _build_image_prompt(
 
     If ``overlay_text`` is provided, that exact phrase is allowed to appear as
     a single rendered headline in the image (and only that phrase).
+    If ``use_logo_as_reference`` is True the prompt instructs the model to
+    treat the attached reference image as visual inspiration for palette /
+    mood / style only — never to redraw it.
     """
     overlay = (overlay_text or "").strip()
 
@@ -312,6 +316,15 @@ def _build_image_prompt(
         "bottom-right corner separately."
         
     ]
+
+    if use_logo_as_reference:
+        parts.append(
+            "A reference logo image is attached as visual inspiration for the "
+            "brand identity. Match the overall color palette, mood, and "
+            "stylistic feel of that logo, but DO NOT copy, redraw, render, or "
+            "include the logo, its glyphs, or any of its letters anywhere in "
+            "the output image. The logo will be composited separately."
+        )
 
     if primary_color or secondary_color:
         bits: list[str] = []
@@ -357,24 +370,106 @@ def _build_image_prompt(
 
 
 # Aspect-ratio mapping tables.
-# OpenAI gpt-image-1 / dall-e-3 only accept a fixed enum of sizes — pick the
-# closest match per requested ratio. Gemini accepts an explicit aspectRatio
-# string in its imageConfig.
-_OPENAI_SIZE_BY_RATIO: dict[str, str] = {
+# OpenAI gpt-image-1 currently accepts: 1024x1024, 1024x1536, 1536x1024, auto.
+# (dall-e-3 used 1024x1792 / 1792x1024 — kept here as a fallback for legacy
+# OPENAI_IMAGE_MODEL configs, picked when the configured model starts with
+# "dall-e".) For ratios that don't match exactly we always pick the closest
+# *larger* canvas so the post-generation center-crop can trim down to the
+# precise ratio without upscaling.
+_OPENAI_SIZE_BY_RATIO_GPT_IMAGE: dict[str, str] = {
     "1:1":    "1024x1024",
-    "4:5":    "1024x1024",   # closest available; true 4:5 isn't supported
-    "9:16":   "1024x1792",   # portrait
-    "16:9":   "1792x1024",   # landscape
-    "1.91:1": "1792x1024",   # landscape (FB/LinkedIn link preview)
+    "4:5":    "1024x1536",   # taller than 4:5 — crop top/bottom
+    "9:16":   "1024x1536",   # taller than 16:9 portrait, crop top/bottom
+    "16:9":   "1536x1024",
+    "1.91:1": "1536x1024",   # slightly wider than target — crop top/bottom
+}
+
+_OPENAI_SIZE_BY_RATIO_DALLE: dict[str, str] = {
+    "1:1":    "1024x1024",
+    "4:5":    "1024x1792",
+    "9:16":   "1024x1792",
+    "16:9":   "1792x1024",
+    "1.91:1": "1792x1024",
+}
+
+# Numeric (height/width) target for each supported ratio. Used by the
+# post-generation crop to enforce the exact aspect requested.
+_RATIO_HEIGHT_OVER_WIDTH: dict[str, float] = {
+    "1:1": 1.0,
+    "4:5": 5 / 4,
+    "9:16": 16 / 9,
+    "16:9": 9 / 16,
+    "1.91:1": 1 / 1.91,
 }
 
 _GEMINI_RATIO_WHITELIST = {"1:1", "3:4", "4:3", "9:16", "16:9", "4:5", "5:4", "1.91:1"}
 
 
 def _openai_size_for_ratio(ratio: str | None) -> str:
+    """Pick the closest OpenAI-supported canvas size for the requested ratio.
+
+    The size enum differs per model:
+      • gpt-image-1: 1024x1024, 1024x1536, 1536x1024, auto
+      • dall-e-3:    1024x1024, 1024x1792, 1792x1024
+    """
+    table = (
+        _OPENAI_SIZE_BY_RATIO_DALLE
+        if settings.OPENAI_IMAGE_MODEL.startswith("dall-e")
+        else _OPENAI_SIZE_BY_RATIO_GPT_IMAGE
+    )
     if not ratio:
         return settings.OPENAI_IMAGE_SIZE
-    return _OPENAI_SIZE_BY_RATIO.get(ratio, settings.OPENAI_IMAGE_SIZE)
+    return table.get(ratio, settings.OPENAI_IMAGE_SIZE)
+
+
+def _crop_image_bytes_to_ratio(image_bytes: bytes, ratio: str | None) -> bytes:
+    """Center-crop ``image_bytes`` to the exact aspect ratio ``ratio``.
+
+    OpenAI image endpoints only accept a fixed enum of sizes, so 4:5 and
+    1.91:1 requests are generated on the closest larger canvas and then
+    trimmed to the precise ratio here. Returns the original bytes on any
+    failure or when the image already matches the requested ratio.
+    """
+    if not ratio:
+        return image_bytes
+    target = _RATIO_HEIGHT_OVER_WIDTH.get(ratio)
+    if target is None:
+        return image_bytes
+    try:
+        from PIL import Image
+        import io
+
+        img = Image.open(io.BytesIO(image_bytes))
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return image_bytes
+        current = h / w
+        # Within ~1% of the target — leave it alone (avoid pointless re-encode).
+        if abs(current - target) / target < 0.01:
+            return image_bytes
+
+        if current > target:
+            # Image is taller than target — trim the height.
+            new_h = max(1, int(round(w * target)))
+            top = max(0, (h - new_h) // 2)
+            box = (0, top, w, top + new_h)
+        else:
+            # Image is wider than target — trim the width.
+            new_w = max(1, int(round(h / target)))
+            left = max(0, (w - new_w) // 2)
+            box = (left, 0, left + new_w, h)
+
+        cropped = img.crop(box)
+        # Preserve the original mode (RGBA for transparency, RGB otherwise).
+        out = io.BytesIO()
+        save_format = "PNG" if (img.format or "").upper() == "PNG" or cropped.mode == "RGBA" else "JPEG"
+        if save_format == "JPEG" and cropped.mode == "RGBA":
+            cropped = cropped.convert("RGB")
+        cropped.save(out, format=save_format, quality=92, optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        logger.warning(f"[IMAGE] aspect crop to {ratio} failed, using original: {e}")
+        return image_bytes
 
 
 def _generate_image_gemini(prompt: str, aspect_ratio: str | None = None) -> str | None:
@@ -437,6 +532,129 @@ def _generate_image_gemini(prompt: str, aspect_ratio: str | None = None) -> str 
 
             except Exception as e:
                 logger.exception(f"Gemini image unexpected error: {e}")
+                return None
+
+    return None
+
+
+def _fetch_logo_bytes(logo_url: str) -> bytes | None:
+    """Resolve a logo (http(s) URL or data URI) to raw bytes for upload.
+
+    Returns None on any failure — callers fall back to text-only image gen.
+    """
+    try:
+        if logo_url.startswith("data:"):
+            _, b64 = logo_url.split(",", 1)
+            return base64.b64decode(b64)
+        with httpx.Client(timeout=20.0, follow_redirects=True, verify=False) as c:
+            r = c.get(logo_url)
+            r.raise_for_status()
+            return r.content
+    except Exception as e:
+        logger.warning(f"Failed to fetch logo bytes from {logo_url[:80]}: {e}")
+        return None
+
+
+def _generate_image_openai_with_reference(
+    prompt: str,
+    reference_image_bytes: bytes,
+    aspect_ratio: str | None = None,
+) -> str | None:
+    """Call OpenAI /v1/images/edits with a reference image (gpt-image-1 only).
+
+    The model conditions the generated image on the reference (palette, mood,
+    style). The deterministic PIL logo composite still runs afterwards so the
+    final visible logo is always crisp and correctly placed.
+
+    Only ``gpt-image-1`` supports this multipart edits flow — for other
+    configured models we return None and the caller falls back to the
+    text-only generations endpoint.
+    """
+    if not settings.OPENAI_API_KEY:
+        logger.info("OpenAI image (edits): API key missing")
+        return None
+
+    if not settings.OPENAI_IMAGE_MODEL.startswith("gpt-image"):
+        logger.info(
+            f"OpenAI image (edits): model {settings.OPENAI_IMAGE_MODEL} does not "
+            "support image-conditioned generation, skipping"
+        )
+        return None
+
+    api_url = "https://api.openai.com/v1/images/edits"
+    headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
+    files = {"image": ("reference.png", reference_image_bytes, "image/png")}
+    data: dict[str, str] = {
+        "model": settings.OPENAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": "1",
+        "size": _openai_size_for_ratio(aspect_ratio),
+    }
+
+    max_retries = 2
+    with httpx.Client(timeout=120.0) as client:
+        for attempt in range(max_retries):
+            try:
+                response = client.post(api_url, headers=headers, files=files, data=data)
+
+                if response.status_code in (401, 403):
+                    try:
+                        body = response.json()
+                        msg = (body.get("error") or {}).get("message", response.text[:300])
+                    except Exception:
+                        msg = response.text[:300]
+                    logger.error(
+                        f"OpenAI image (edits) auth error {response.status_code}: {msg}"
+                    )
+                    return None
+
+                if response.status_code == 429:
+                    wait_time = (2 ** attempt) * 2
+                    logger.warning(
+                        f"OpenAI image (edits) rate limited (429). Waiting {wait_time}s "
+                        f"before retry {attempt + 1}/{max_retries}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+
+                if response.status_code == 400:
+                    # Bad request usually means the reference image was rejected
+                    # (wrong format, too large, disallowed content). Let the
+                    # caller fall back to text-only generation.
+                    try:
+                        body = response.json()
+                        msg = (body.get("error") or {}).get("message", response.text[:300])
+                    except Exception:
+                        msg = response.text[:300]
+                    logger.warning(f"OpenAI image (edits) 400: {msg}")
+                    return None
+
+                response.raise_for_status()
+                items = response.json().get("data", [])
+                if items:
+                    item = items[0]
+                    b64 = item.get("b64_json") or item.get("b64")
+                    if b64:
+                        return f"data:image/png;base64,{b64}"
+                    url = item.get("url")
+                    if url:
+                        return url
+
+                logger.error("OpenAI image (edits): response had no image data")
+                return None
+
+            except httpx.HTTPError as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                logger.error(
+                    f"OpenAI image (edits) HTTP {status_code} attempt {attempt + 1}: {e}"
+                )
+                if status_code in (500, 502, 503) and attempt < max_retries - 1:
+                    time.sleep((2 ** attempt) * 2)
+                    continue
+                return None
+
+            except Exception as e:
+                logger.exception(f"OpenAI image (edits) unexpected error: {e}")
                 return None
 
     return None
@@ -559,6 +777,13 @@ def generate_image_from_prompt(
         upload_bytes_to_supabase,
     )
 
+    # Pre-fetch logo bytes once: we want to feed them to the model as a
+    # reference image AND keep them in memory for the deterministic PIL
+    # composite step at the end. If the fetch fails we fall back gracefully.
+    logo_bytes: bytes | None = None
+    if logo_url:
+        logo_bytes = _fetch_logo_bytes(logo_url)
+
     prompt = _build_image_prompt(
         topic, business_name, niche,
         primary_color=primary_color,
@@ -566,13 +791,26 @@ def generate_image_from_prompt(
         reserve_logo_corner=bool(logo_url),
         aspect_ratio=aspect_ratio,
         overlay_text=overlay_text,
+        use_logo_as_reference=bool(logo_bytes),
     )
 
     logger.info(
         f"[IMAGE] generating — colors=({primary_color}, {secondary_color}) "
-        f"logo={'yes' if logo_url else 'no'}"
+        f"logo={'yes' if logo_url else 'no'} "
+        f"logo_ref={'yes' if logo_bytes else 'no'}"
     )
-    image = _generate_image_openai(prompt, aspect_ratio=aspect_ratio)
+
+    image: str | None = None
+    if logo_bytes:
+        image = _generate_image_openai_with_reference(
+            prompt, logo_bytes, aspect_ratio=aspect_ratio
+        )
+        if not image:
+            logger.info("[IMAGE] edits path failed, falling back to text-only generation")
+
+    if not image:
+        image = _generate_image_openai(prompt, aspect_ratio=aspect_ratio)
+
     if not image:
         logger.error("Image generation failed (OpenAI)")
         return None
@@ -591,6 +829,17 @@ def generate_image_from_prompt(
     except Exception as e:
         logger.warning(f"Failed to materialize AI image bytes ({e}); returning raw response")
         return image
+
+    # Crop to the exact aspect ratio the caller asked for. OpenAI only
+    # offers 1024x1024 / 1024x1792 / 1792x1024, so 4:5, 1.91:1 etc. need a
+    # post-generation trim or the frontend ends up letterboxing them.
+    if aspect_ratio:
+        before = len(img_bytes)
+        img_bytes = _crop_image_bytes_to_ratio(img_bytes, aspect_ratio)
+        if len(img_bytes) != before:
+            logger.info(
+                f"[IMAGE] cropped to aspect {aspect_ratio} ({before} → {len(img_bytes)} bytes)"
+            )
 
     if logo_url:
         try:
@@ -762,10 +1011,13 @@ def generate_poster_background(
         f"colors=({primary_color}, {secondary_color}) logo={'yes' if logo_url else 'no'}"
     )
 
-    image = _generate_image_gemini(prompt, aspect_ratio=aspect_ratio)
+    # Prefer OpenAI (gpt-image-1) — better text-free background quality and
+    # aspect-ratio handling for posters. Fall back to Gemini if OpenAI is
+    # missing keys or hits an outage.
+    image = _generate_image_openai(prompt, aspect_ratio=aspect_ratio)
     if not image:
-        logger.warning("[POSTER-IMAGE] Gemini failed; falling back to OpenAI")
-        image = _generate_image_openai(prompt, aspect_ratio=aspect_ratio)
+        logger.warning("[POSTER-IMAGE] OpenAI failed; falling back to Gemini")
+        image = _generate_image_gemini(prompt, aspect_ratio=aspect_ratio)
     if not image:
         logger.error("[POSTER-IMAGE] all providers failed")
         return None
@@ -784,6 +1036,18 @@ def generate_poster_background(
     except Exception as e:
         logger.warning(f"[POSTER-IMAGE] failed to materialize bytes ({e}); returning raw")
         return image
+
+    # Enforce the requested aspect ratio. OpenAI only offers a fixed enum of
+    # sizes, and Gemini sometimes returns slightly off ratios, so center-
+    # crop here so the frontend never has to letterbox the result.
+    if aspect_ratio:
+        before = len(img_bytes)
+        img_bytes = _crop_image_bytes_to_ratio(img_bytes, aspect_ratio)
+        if len(img_bytes) != before:
+            logger.info(
+                f"[POSTER-IMAGE] cropped to aspect {aspect_ratio} "
+                f"({before} → {len(img_bytes)} bytes)"
+            )
 
     if logo_url:
         try:

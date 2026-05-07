@@ -179,6 +179,12 @@ class RepurposeResponse(BaseModel):
     goal: ContentGoal = ContentGoal.authority
     platforms: list[str] = Field(default_factory=lambda: list(ALL_PLATFORMS))
     formats: RepurposeFormats
+    # ``status`` is "generating" while a background task is still running
+    # the repurpose pipeline. The frontend polls
+    # /api/repurpose/saves/{save_id} until the field disappears (= ready)
+    # or becomes "failed".
+    status: str | None = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------

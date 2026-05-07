@@ -2,9 +2,10 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -115,20 +116,26 @@ class SerpResult(BaseModel):
 class SEOBriefResponse(BaseModel):
     topic: str
     search_intent: str = ""               # informational / commercial / transactional / navigational
-    primary_keyword: str
-    secondary_keywords: list[str]
+    primary_keyword: str = ""
+    secondary_keywords: list[str] = []
     nlp_terms: list[str] = []             # semantic / NLP terms for topic coverage
-    keyword_data: list[KeywordVolume]
+    keyword_data: list[KeywordVolume] = []
     serp_results: list[SerpResult] = []   # raw SERP titles/snippets from Serper
-    competitor_insights: list[CompetitorInsight]
+    competitor_insights: list[CompetitorInsight] = []
     content_gaps: list[str] = []          # what competitors missed
-    h2_outline: list[H2Section]
-    meta_suggestions: list[MetaSuggestion]
-    schema_markup: dict
-    serp_preview: dict
-    recommendations: list[str]
+    h2_outline: list[H2Section] = []
+    meta_suggestions: list[MetaSuggestion] = []
+    schema_markup: dict = {}
+    serp_preview: dict = {}
+    recommendations: list[str] = []
     draft_score: DraftScore | None = None  # present only when content_draft was supplied
     save_id: str | None = None  # id of the row this brief was persisted to (for UPSERT)
+    # ``status`` is "generating" while a background task is still running the
+    # full SERP-scrape + LLM-analysis pipeline. The frontend polls
+    # /api/seo/saves/{save_id} until the field disappears (= ready) or
+    # becomes "failed".
+    status: str | None = None
+    error: str | None = None
 
 
 class SEOScoreRequest(BaseModel):
@@ -752,15 +759,17 @@ def _keyword_volumes_mock(keywords: list[str]) -> list[dict]:
 # POST /api/seo/brief  — Serper → Playwright+BS4 → Aggregate → Gemini
 # ---------------------------------------------------------------------------
 
-@router.post("/brief", response_model=SEOBriefResponse)
-def generate_seo_brief(
+def _run_seo_brief_pipeline(
     data: SEOBriefRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if not data.topic.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
+    db: Session,
+    current_user: User,
+) -> SEOBriefResponse:
+    """Run the full SEO-brief pipeline (SERP fetch → scrape → LLM → meta /
+    schema / draft scoring) and return a populated ``SEOBriefResponse``.
 
+    Side-effect: also UPSERTs the result into the ``seo_saves`` table.
+    Caller is responsible for transaction lifecycle.
+    """
     brief_start = time.time()
     logger.info("="*60)
     logger.info("[BRIEF] 🚀 Starting SEO brief for: '%s'", data.topic)
@@ -1006,6 +1015,174 @@ def generate_seo_brief(
 
     # ── Return ──────────────────────────────────────────────────────────
     return result
+
+
+def _generate_seo_brief_in_background(
+    save_id: str,
+    user_id: str,
+    request_dict: dict,
+) -> None:
+    """Run the full SEO brief pipeline off the request thread.
+
+    The frontend polled placeholder save row gets overwritten with the final
+    payload here. Errors are surfaced by setting ``status="failed"`` +
+    ``error`` on the save's data JSON so the UI can show them.
+    """
+    db = SessionLocal()
+    try:
+        from app.models.user import User as UserModel
+
+        user = db.query(UserModel).filter(UserModel.id == user_id).first()
+        if not user:
+            logger.warning(f"[BRIEF-BG] user {user_id} disappeared mid-task")
+            return
+
+        try:
+            data = SEOBriefRequest.model_validate(request_dict)
+        except Exception as e:
+            logger.error(f"[BRIEF-BG] could not rehydrate request: {e}")
+            _mark_brief_failed(db, save_id, "Internal validation error.")
+            return
+
+        # Force the pipeline to UPSERT into THIS save row.
+        data.save_id = save_id
+
+        try:
+            result = _run_seo_brief_pipeline(data, db, user)
+        except Exception as e:
+            logger.error(f"[BRIEF-BG] pipeline failed for save {save_id}: {e}", exc_info=True)
+            _mark_brief_failed(db, save_id, "SEO brief generation failed. Please try again.")
+            return
+
+        # _run_seo_brief_pipeline already wrote the final payload via UPSERT,
+        # but it doesn't know to clear our placeholder ``status="generating"``
+        # marker (the SEOBriefResponse default leaves status=None which IS
+        # what the frontend treats as "ready", so the existing UPSERT in the
+        # pipeline already does the right thing). Belt-and-braces: ensure
+        # the row reflects status absent.
+        save = db.query(SeoSave).filter(SeoSave.id == save_id).first()
+        if save:
+            try:
+                payload = json.loads(save.data or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = result.model_dump()
+            payload.pop("status", None)
+            payload.pop("error", None)
+            save.data = json.dumps(payload)
+            try:
+                db.commit()
+                logger.info(f"[BRIEF-BG] save={save_id} ready")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"[BRIEF-BG] persist failed for save {save_id}: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
+def _mark_brief_failed(db: Session, save_id: str, message: str) -> None:
+    """Patch a generating brief save row with status=failed + error message."""
+    save = db.query(SeoSave).filter(SeoSave.id == save_id).first()
+    if not save:
+        return
+    try:
+        existing = json.loads(save.data or "{}")
+    except (TypeError, json.JSONDecodeError):
+        existing = {}
+    existing["status"] = "failed"
+    existing["error"] = message
+    save.data = json.dumps(existing)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[BRIEF-BG] couldn't mark save {save_id} as failed: {e}")
+
+
+@router.post("/brief", response_model=SEOBriefResponse)
+def generate_seo_brief(
+    data: SEOBriefRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kick off SEO brief generation. Returns a placeholder
+    ``SEOBriefResponse`` with ``status="generating"`` and the ``save_id`` to
+    poll. The full pipeline (SERP fetch + competitor scraping + LLM) runs in
+    a background task to avoid tunnel / proxy idle timeouts on the 20-60s
+    pipeline.
+    """
+    if not data.topic.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
+
+    placeholder_title = data.topic.strip() or "Untitled"
+    placeholder_payload = {
+        "topic": data.topic,
+        "primary_keyword": data.topic,
+        "secondary_keywords": [],
+        "nlp_terms": [],
+        "keyword_data": [],
+        "serp_results": [],
+        "competitor_insights": [],
+        "content_gaps": [],
+        "h2_outline": [],
+        "meta_suggestions": [],
+        "schema_markup": {},
+        "serp_preview": {},
+        "recommendations": [],
+        "draft_score": None,
+        "status": "generating",
+    }
+
+    save_id_out: str | None = None
+    try:
+        existing = None
+        if data.save_id:
+            existing = (
+                db.query(SeoSave)
+                .filter(
+                    SeoSave.id == data.save_id,
+                    SeoSave.user_id == current_user.id,
+                    SeoSave.type == "brief",
+                )
+                .first()
+            )
+        if existing:
+            existing.title = placeholder_title
+            existing.data = json.dumps(placeholder_payload)
+            db.commit()
+            save_id_out = existing.id
+        else:
+            save = SeoSave(
+                user_id=current_user.id,
+                type="brief",
+                title=placeholder_title,
+                data=json.dumps(placeholder_payload),
+            )
+            db.add(save)
+            db.commit()
+            db.refresh(save)
+            save_id_out = save.id
+    except Exception as exc:
+        logger.warning("[BRIEF] kickoff save failed: %s", exc)
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start SEO brief. Please try again.",
+        )
+
+    background_tasks.add_task(
+        _generate_seo_brief_in_background,
+        save_id=save_id_out,
+        user_id=current_user.id,
+        request_dict=data.model_dump(),
+    )
+
+    return SEOBriefResponse(
+        topic=data.topic,
+        primary_keyword=data.topic,
+        save_id=save_id_out,
+        status="generating",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1892,3 +2069,293 @@ def delete_seo_save(
         raise HTTPException(status_code=404, detail="Save not found")
     db.delete(save)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Content Status — per-item SEO snapshot across posts / posters / reels
+# ---------------------------------------------------------------------------
+#
+# This endpoint powers the "SEO Status" panel on the SEO hub. It walks the
+# user's generated content, computes a lightweight SEO score for each piece,
+# and returns a sortable feed plus aggregate stats. Until real publishing
+# analytics are wired up, we expose this as the demo-friendly proxy for
+# "how well will this content perform in search".
+
+
+class ContentStatusItem(BaseModel):
+    id: str
+    kind: str                  # "post" | "poster" | "reel"
+    title: str
+    primary_keyword: str
+    seo_score: int             # 0-100 overall
+    keyword_density: float     # %
+    keyword_density_status: str
+    readability_score: float   # Flesch reading ease
+    readability_status: str
+    word_count: int
+    projected_search_volume: str
+    projected_reach: int       # monthly impressions estimate
+    status: str                # "draft" | "published"
+    published_at: str | None
+    created_at: str
+
+
+class ContentStatusAggregate(BaseModel):
+    total_items: int
+    avg_seo_score: int
+    items_optimised: int       # score >= 70
+    items_needs_work: int      # score < 45
+    total_projected_reach: int
+    top_keywords: list[dict]   # [{keyword, count}]
+
+
+class ContentStatusResponse(BaseModel):
+    items: list[ContentStatusItem]
+    aggregate: ContentStatusAggregate
+
+
+_VOLUME_BANDS = [
+    (50, "100K+ / mo"),
+    (20, "10K–100K / mo"),
+    (8,  "1K–10K / mo"),
+    (3,  "100–1K / mo"),
+    (0,  "<100 / mo"),
+]
+
+
+def _projected_volume_band(keyword: str, score: int) -> tuple[str, int]:
+    """Return (display_band, monthly_reach_estimate) for a keyword.
+
+    No live SERP API call — heuristic uses keyword length + SEO score so
+    the demo number is internally consistent across re-renders. Short
+    keywords (1-2 words) read as higher-volume head terms; long-tail
+    phrases drop into lower bands. Multiplied by quality (SEO score).
+    """
+    if not keyword:
+        return ("<100 / mo", 0)
+    word_count = len(keyword.split())
+    if word_count <= 1:
+        base_band_idx = 1
+    elif word_count == 2:
+        base_band_idx = 2
+    elif word_count == 3:
+        base_band_idx = 3
+    else:
+        base_band_idx = 4
+    band = _VOLUME_BANDS[base_band_idx][1]
+    # Reach estimate: scale midpoint of band by score quality
+    midpoints = [200_000, 50_000, 5_000, 500, 50]
+    midpoint = midpoints[base_band_idx]
+    reach = int(midpoint * (score / 100.0) * 0.02)  # CTR proxy: 2% of band volume
+    return (band, max(reach, 0))
+
+
+def _score_one_item(text: str, keyword: str) -> dict:
+    """Compute SEO metrics for a single content item.
+
+    Returns: dict with seo_score, keyword_density, kd_status,
+    readability_score, readability_status, word_count.
+    """
+    text = text or ""
+    word_count = len(re.findall(r"\b[a-zA-Z]+\b", text))
+
+    # Keyword fallback: if no explicit primary_keyword, pick the top-frequency
+    # term from the content itself.
+    if not keyword and text.strip():
+        kws = extract_keywords_from_text(text, top_n=1)
+        keyword = kws[0]["keyword"] if kws else ""
+
+    density_data = analyse_keyword_density(text, keyword) if keyword else {
+        "density": 0.0, "occurrences": 0, "status": "missing"
+    }
+    readability = score_readability(text)
+
+    # Composite score: weight readability heavier for short social copy where
+    # keyword density alone is unreliable. Range 0-100.
+    has_keyword = bool(keyword)
+    has_min_words = word_count >= 30
+    kd_score = {
+        "optimal": 100, "under": 60, "over": 40,
+        "missing": 20 if has_keyword else 0, "no_content": 0,
+    }.get(density_data.get("status", "no_content"), 0)
+    read_score = float(readability.get("flesch_score") or 0)
+    length_score = min(100, (word_count / 100.0) * 100) if word_count else 0
+    structure_score = 50 if has_keyword and has_min_words else 30
+
+    seo_score = int(round(
+        (kd_score * 0.30) +
+        (read_score * 0.30) +
+        (length_score * 0.20) +
+        (structure_score * 0.20)
+    ))
+    seo_score = max(0, min(100, seo_score))
+
+    return {
+        "seo_score": seo_score,
+        "keyword": keyword,
+        "keyword_density": float(density_data.get("density", 0.0)),
+        "kd_status": density_data.get("status", "missing"),
+        "readability_score": read_score,
+        "readability_status": readability.get("status", "no_content"),
+        "word_count": word_count,
+    }
+
+
+@router.get("/content-status", response_model=ContentStatusResponse)
+def get_content_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Per-item SEO snapshot across the user's generated posts, posters,
+    and reels — feeds the SEO Status panel on /seo."""
+    from app.models.post import Post
+    from app.models.reel import Reel
+    from app.models.poster import Poster
+
+    items: list[ContentStatusItem] = []
+    keyword_freq: Counter[str] = Counter()
+    total_reach = 0
+    score_sum = 0
+    optimised = 0
+    needs_work = 0
+
+    # ----- Posts -----
+    posts = (
+        db.query(Post)
+        .filter(Post.user_id == current_user.id)
+        .order_by(Post.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    for p in posts:
+        text = (p.content or "") + "\n" + (p.hashtags or "")
+        scored = _score_one_item(text, "")
+        title = (p.content or "Untitled post").strip().split("\n")[0][:80] or "Untitled post"
+        band, reach = _projected_volume_band(scored["keyword"], scored["seo_score"])
+        if scored["keyword"]:
+            keyword_freq[scored["keyword"]] += 1
+        total_reach += reach
+        score_sum += scored["seo_score"]
+        if scored["seo_score"] >= 70:
+            optimised += 1
+        elif scored["seo_score"] < 45:
+            needs_work += 1
+        items.append(ContentStatusItem(
+            id=p.id,
+            kind="post",
+            title=title,
+            primary_keyword=scored["keyword"],
+            seo_score=scored["seo_score"],
+            keyword_density=round(scored["keyword_density"], 2),
+            keyword_density_status=scored["kd_status"],
+            readability_score=round(scored["readability_score"], 1),
+            readability_status=scored["readability_status"],
+            word_count=scored["word_count"],
+            projected_search_volume=band,
+            projected_reach=reach,
+            status="published" if p.published_at else (p.status or "draft"),
+            published_at=p.published_at.isoformat() if p.published_at else None,
+            created_at=p.created_at.isoformat(),
+        ))
+
+    # ----- Reels -----
+    reels = (
+        db.query(Reel)
+        .filter(Reel.user_id == current_user.id)
+        .order_by(Reel.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    for r in reels:
+        text = (r.script or "") + "\n" + (r.hashtags or "")
+        scored = _score_one_item(text, r.primary_keyword or "")
+        title = (r.topic or "Untitled reel")[:80]
+        band, reach = _projected_volume_band(scored["keyword"], scored["seo_score"])
+        if scored["keyword"]:
+            keyword_freq[scored["keyword"]] += 1
+        total_reach += reach
+        score_sum += scored["seo_score"]
+        if scored["seo_score"] >= 70:
+            optimised += 1
+        elif scored["seo_score"] < 45:
+            needs_work += 1
+        items.append(ContentStatusItem(
+            id=r.id,
+            kind="reel",
+            title=title,
+            primary_keyword=scored["keyword"],
+            seo_score=scored["seo_score"],
+            keyword_density=round(scored["keyword_density"], 2),
+            keyword_density_status=scored["kd_status"],
+            readability_score=round(scored["readability_score"], 1),
+            readability_status=scored["readability_status"],
+            word_count=scored["word_count"],
+            projected_search_volume=band,
+            projected_reach=reach,
+            status="published" if r.published_at else (r.status or "draft"),
+            published_at=r.published_at.isoformat() if r.published_at else None,
+            created_at=r.created_at.isoformat(),
+        ))
+
+    # ----- Posters -----
+    posters = (
+        db.query(Poster)
+        .filter(Poster.user_id == current_user.id)
+        .order_by(Poster.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    for ps in posters:
+        text_parts = [
+            ps.title or "", ps.headline or "", ps.tagline or "",
+            ps.caption or "", ps.cta or "", ps.features or "",
+        ]
+        text = "\n".join(t for t in text_parts if t)
+        scored = _score_one_item(text, "")
+        title = (ps.title or "Untitled poster")[:80]
+        band, reach = _projected_volume_band(scored["keyword"], scored["seo_score"])
+        if scored["keyword"]:
+            keyword_freq[scored["keyword"]] += 1
+        total_reach += reach
+        score_sum += scored["seo_score"]
+        if scored["seo_score"] >= 70:
+            optimised += 1
+        elif scored["seo_score"] < 45:
+            needs_work += 1
+        items.append(ContentStatusItem(
+            id=ps.id,
+            kind="poster",
+            title=title,
+            primary_keyword=scored["keyword"],
+            seo_score=scored["seo_score"],
+            keyword_density=round(scored["keyword_density"], 2),
+            keyword_density_status=scored["kd_status"],
+            readability_score=round(scored["readability_score"], 1),
+            readability_status=scored["readability_status"],
+            word_count=scored["word_count"],
+            projected_search_volume=band,
+            projected_reach=reach,
+            status=ps.status or "draft",
+            published_at=None,
+            created_at=ps.created_at.isoformat(),
+        ))
+
+    # Sort: best-scoring first, then most recent.
+    items.sort(key=lambda x: (-x.seo_score, x.created_at), reverse=False)
+    items.sort(key=lambda x: (x.seo_score, x.created_at), reverse=True)
+
+    total = len(items)
+    avg_score = int(round(score_sum / total)) if total else 0
+    top_keywords = [{"keyword": k, "count": c} for k, c in keyword_freq.most_common(8)]
+
+    return ContentStatusResponse(
+        items=items,
+        aggregate=ContentStatusAggregate(
+            total_items=total,
+            avg_seo_score=avg_score,
+            items_optimised=optimised,
+            items_needs_work=needs_work,
+            total_projected_reach=total_reach,
+            top_keywords=top_keywords,
+        ),
+    )

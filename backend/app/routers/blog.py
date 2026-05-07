@@ -4,12 +4,12 @@ import re
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.seo_save import SeoSave
 from app.models.user import User
@@ -52,6 +52,11 @@ class CompetitorInsight(BaseModel):
     headings: list[str] = []
 
 
+class MetaSuggestionInput(BaseModel):
+    title: str = ""
+    description: str = ""
+
+
 class BlogGenerateRequest(BaseModel):
     topic: str
     primary_keyword: str = ""
@@ -62,6 +67,11 @@ class BlogGenerateRequest(BaseModel):
     seo_recommendations: list[str] = []
     serp_results: list[SerpResult] = []
     competitor_insights: list[CompetitorInsight] = []
+    # Optional fields carried over from a fully-rendered SEO brief — give the
+    # writer LLM extra context so the blog matches the search intent and
+    # mirrors the brief's preferred meta tags.
+    search_intent: str = ""  # informational / commercial / transactional / navigational
+    meta_suggestions: list[MetaSuggestionInput] = []
     word_count: int = 1500
     tone: str = "professional"
     business_context: BusinessContext | None = None
@@ -79,6 +89,11 @@ class BlogGenerateResponse(BaseModel):
     meta_description: str
     schema_markup: dict
     save_id: str | None = None
+    # ``status`` is "generating" while a background task is still rendering
+    # the blog. The frontend polls /api/blog/saves/{save_id} until the
+    # status disappears (= ready) or becomes "failed". On the completed
+    # /api/blog/saves/{id} response the value is read out of ``data.status``.
+    status: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +244,38 @@ def _build_blog_prompt(data: BlogGenerateRequest) -> str:
             kw_block += f"Secondary Keywords: {', '.join(data.secondary_keywords[:6])}\n"
         kw_block += "\n"
 
+    # Search intent block — when carried in from an SEO brief this drives
+    # angle / tone (e.g. "commercial" implies CTA-heavy, "informational"
+    # implies how-to / explainer).
+    intent_block = ""
+    if data.search_intent:
+        intent_block = (
+            "=== SEARCH INTENT ===\n"
+            f"Resolve content for the **{data.search_intent}** search intent.\n\n"
+        )
+
+    # Meta suggestions block — example title / description pairs from the
+    # brief LLM. Helps the writer LLM align meta tags with the brief.
+    meta_block = ""
+    if data.meta_suggestions:
+        meta_lines = []
+        for i, m in enumerate(data.meta_suggestions[:3], 1):
+            t = (m.title or "").strip()
+            d = (m.description or "").strip()
+            if t or d:
+                meta_lines.append(f"{i}. Title: {t}\n   Description: {d}")
+        if meta_lines:
+            meta_block = (
+                "=== META TAG SUGGESTIONS FROM SEO BRIEF (align tone, do not copy verbatim) ===\n"
+                + "\n".join(meta_lines) + "\n\n"
+            )
+
     target_sections = max(3, data.word_count // 300)
     words_per_section = data.word_count // max(1, len(data.h2_outline) or target_sections)
 
     prompt = f"""You are an expert SEO content writer. Write a complete, publish-ready blog post.
 
-{biz_block}{kw_block}{serp_block}{comp_block}{nlp_block}{gaps_block}{recs_block}{outline_block}Topic: {data.topic}
+{biz_block}{kw_block}{intent_block}{serp_block}{comp_block}{nlp_block}{gaps_block}{recs_block}{meta_block}{outline_block}Topic: {data.topic}
 Target word count: {data.word_count} words
 Tone: {data.tone}
 Minimum H2 sections: {target_sections}
@@ -271,128 +312,248 @@ Return ONLY a JSON object (no markdown fences):
     return prompt
 
 
-@router.post("/generate", response_model=BlogGenerateResponse)
-def generate_blog(
-    data: BlogGenerateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if not data.topic.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
-
-    logger.info("[BLOG] Generating blog for topic: %r  keyword: %r  words: %d",
-                data.topic, data.primary_keyword, data.word_count)
-    t0 = time.time()
-
-    prompt = _build_blog_prompt(data)
-    raw = _llm_call(prompt, max_retries=3)
-    logger.info("[BLOG] LLM raw response (%d chars): %s", len(raw) if raw else 0, (raw or "")[:2000])
-
-    if not raw:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI generation failed. Please try again.",
-        )
-
-    parsed = _parse_blog_response(raw, data.topic)
-    if not parsed:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to parse AI response. Please try again.",
-        )
-
-    content: str = parsed.get("content", "")
-    title: str = parsed.get("title", data.topic)
-    meta_title: str = parsed.get("meta_title", title[:60])
-    meta_description: str = parsed.get("meta_description", "")
-
-    # Word count from content
-    word_count = len(content.split())
-
-    # Build a complete Article schema that actually validates in Rich Results
+def _build_article_schema(
+    *,
+    title: str,
+    meta_description: str,
+    primary_keyword: str,
+    secondary_keywords: list[str],
+    business_context: BusinessContext | None,
+    author_fallback: str,
+) -> dict:
+    """Construct the Schema.org Article JSON for the blog."""
     now_iso = datetime.now(timezone.utc).isoformat()
     author_name = (
-        data.business_context.business_name
-        if data.business_context and data.business_context.business_name
-        else current_user.name or current_user.email or "Author"
+        business_context.business_name
+        if business_context and business_context.business_name
+        else author_fallback
     )
-    schema_markup = {
+    schema_markup: dict = {
         "@context": "https://schema.org",
         "@type": "Article",
         "headline": title[:110],
         "description": meta_description,
-        "keywords": ", ".join(k for k in ([data.primary_keyword] + data.secondary_keywords[:5]) if k),
+        "keywords": ", ".join(k for k in ([primary_keyword] + secondary_keywords[:5]) if k),
         "datePublished": now_iso,
         "dateModified": now_iso,
         "author": {
-            "@type": "Person" if not (data.business_context and data.business_context.business_name) else "Organization",
+            "@type": "Person" if not (business_context and business_context.business_name) else "Organization",
             "name": author_name,
         },
-        "image": None,                                    # user fills on publish
-        "mainEntityOfPage": {
-            "@type": "WebPage",
-            "@id": "",                                    # user fills with canonical URL
-        },
-        "articleSection": data.business_context.niche if data.business_context and data.business_context.niche else None,
+        "image": None,
+        "mainEntityOfPage": {"@type": "WebPage", "@id": ""},
+        "articleSection": business_context.niche if business_context and business_context.niche else None,
     }
-    # Drop null-valued keys for cleanliness
-    schema_markup = {k: v for k, v in schema_markup.items() if v is not None}
+    return {k: v for k, v in schema_markup.items() if v is not None}
 
-    logger.info("[BLOG] Done in %.1fs — %d words, title=%r", time.time() - t0, word_count, title[:50])
 
-    # Persist with UPSERT semantics: update existing save if `save_id` was
-    # provided and belongs to the user, else create a new one.
-    save_id_out: str | None = None
-    payload = {
-        "title": title,
-        "content": content,
-        "word_count": word_count,
+def _generate_blog_in_background(
+    save_id: str,
+    user_id: str,
+    request_dict: dict,
+    author_fallback: str,
+) -> None:
+    """Run LLM blog generation off the request thread.
+
+    Updates the ``SeoSave`` row's ``data`` JSON with the final blog content
+    when complete, or with ``status="failed"`` + ``error`` on hard failure.
+    The HTTP request returns the placeholder ``save_id`` immediately, and the
+    frontend polls /api/blog/saves/{save_id} to pick up the result.
+    """
+    db = SessionLocal()
+    try:
+        # Reconstruct the typed request from the dict snapshot. Pydantic's
+        # model_validate walks nested models for us.
+        try:
+            data = BlogGenerateRequest.model_validate(request_dict)
+        except Exception as e:
+            logger.error(f"[BLOG-BG] could not rehydrate request for save {save_id}: {e}")
+            _mark_blog_failed(db, save_id, "Internal validation error.")
+            return
+
+        t0 = time.time()
+        try:
+            prompt = _build_blog_prompt(data)
+            raw = _llm_call(prompt, max_retries=3)
+        except Exception as e:
+            logger.error(f"[BLOG-BG] LLM call failed for save {save_id}: {e}", exc_info=True)
+            _mark_blog_failed(db, save_id, "AI generation failed. Please try again.")
+            return
+
+        if not raw:
+            _mark_blog_failed(db, save_id, "AI generation returned no content.")
+            return
+
+        parsed = _parse_blog_response(raw, data.topic)
+        if not parsed:
+            _mark_blog_failed(db, save_id, "Failed to parse AI response.")
+            return
+
+        content: str = parsed.get("content", "")
+        title: str = parsed.get("title", data.topic)
+        meta_title: str = parsed.get("meta_title", title[:60])
+        meta_description: str = parsed.get("meta_description", "")
+        word_count = len(content.split())
+
+        schema_markup = _build_article_schema(
+            title=title,
+            meta_description=meta_description,
+            primary_keyword=data.primary_keyword or data.topic,
+            secondary_keywords=data.secondary_keywords,
+            business_context=data.business_context,
+            author_fallback=author_fallback,
+        )
+
+        payload = {
+            "title": title,
+            "content": content,
+            "word_count": word_count,
+            "primary_keyword": data.primary_keyword or data.topic,
+            "meta_title": meta_title,
+            "meta_description": meta_description,
+            "schema_markup": schema_markup,
+            "topic": data.topic,
+            "secondary_keywords": data.secondary_keywords,
+            "tone": data.tone,
+            # status absent ⇒ ready. We deliberately don't write status="ready"
+            # so existing readers that ignore the field continue to work.
+        }
+
+        save = (
+            db.query(SeoSave)
+            .filter(SeoSave.id == save_id, SeoSave.user_id == user_id)
+            .first()
+        )
+        if not save:
+            logger.warning(f"[BLOG-BG] save row {save_id} disappeared mid-task")
+            return
+
+        save.title = title
+        save.data = json.dumps(payload)
+        try:
+            db.commit()
+            logger.info(
+                "[BLOG-BG] save=%s ready in %.1fs — %d words, title=%r",
+                save_id, time.time() - t0, word_count, title[:50],
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[BLOG-BG] persist failed for save {save_id}: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
+def _mark_blog_failed(db: Session, save_id: str, message: str) -> None:
+    """Patch a generating blog save row with status=failed + error message."""
+    save = db.query(SeoSave).filter(SeoSave.id == save_id).first()
+    if not save:
+        return
+    try:
+        existing = json.loads(save.data or "{}")
+    except (TypeError, json.JSONDecodeError):
+        existing = {}
+    existing["status"] = "failed"
+    existing["error"] = message
+    save.data = json.dumps(existing)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[BLOG-BG] couldn't mark save {save_id} as failed: {e}")
+
+
+@router.post("/generate", response_model=BlogGenerateResponse)
+def generate_blog(
+    data: BlogGenerateRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kick off blog generation. Returns a placeholder ``BlogGenerateResponse``
+    with ``status="generating"`` and the ``save_id`` to poll. The actual LLM
+    call runs in a background task to avoid tunnel / proxy idle timeouts on
+    the 30-120s blog rendering.
+    """
+    if not data.topic.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
+
+    logger.info(
+        "[BLOG] Kickoff for topic=%r keyword=%r words=%d",
+        data.topic, data.primary_keyword, data.word_count,
+    )
+
+    placeholder_title = (data.topic or "Untitled blog").strip()[:160]
+    placeholder = {
+        "title": placeholder_title,
+        "content": "",
+        "word_count": 0,
         "primary_keyword": data.primary_keyword or data.topic,
-        "meta_title": meta_title,
-        "meta_description": meta_description,
-        "schema_markup": schema_markup,
+        "meta_title": placeholder_title[:60],
+        "meta_description": "",
+        "schema_markup": {},
         "topic": data.topic,
         "secondary_keywords": data.secondary_keywords,
         "tone": data.tone,
+        "status": "generating",
     }
+
+    save_id_out: str | None = None
     try:
         existing = None
         if data.save_id:
-            existing = db.query(SeoSave).filter(
-                SeoSave.id == data.save_id,
-                SeoSave.user_id == current_user.id,
-                SeoSave.type == "blog",
-            ).first()
-
+            existing = (
+                db.query(SeoSave)
+                .filter(
+                    SeoSave.id == data.save_id,
+                    SeoSave.user_id == current_user.id,
+                    SeoSave.type == "blog",
+                )
+                .first()
+            )
         if existing:
-            existing.title = title
-            existing.data = json.dumps(payload)
+            existing.title = placeholder_title
+            existing.data = json.dumps(placeholder)
             db.commit()
             save_id_out = existing.id
         else:
             save = SeoSave(
                 user_id=current_user.id,
                 type="blog",
-                title=title,
-                data=json.dumps(payload),
+                title=placeholder_title,
+                data=json.dumps(placeholder),
             )
             db.add(save)
             db.commit()
             db.refresh(save)
             save_id_out = save.id
     except Exception as exc:
-        logger.warning("[BLOG] Save failed: %s", exc)
+        logger.warning("[BLOG] kickoff save failed: %s", exc)
         db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start blog generation. Please try again.",
+        )
+
+    author_fallback = current_user.name or current_user.email or "Author"
+
+    background_tasks.add_task(
+        _generate_blog_in_background,
+        save_id=save_id_out,
+        user_id=current_user.id,
+        request_dict=data.model_dump(),
+        author_fallback=author_fallback,
+    )
 
     return BlogGenerateResponse(
-        title=title,
-        content=content,
-        word_count=word_count,
+        title=placeholder_title,
+        content="",
+        word_count=0,
         primary_keyword=data.primary_keyword or data.topic,
-        meta_title=meta_title,
-        meta_description=meta_description,
-        schema_markup=schema_markup,
+        meta_title=placeholder_title[:60],
+        meta_description="",
+        schema_markup={},
         save_id=save_id_out,
+        status="generating",
     )
 
 

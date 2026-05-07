@@ -240,14 +240,18 @@ def generate_video(
             detail=f"Insufficient credits. Video generation requires {REEL_CREDIT_COST} credits.",
         )
 
-    # Atomic idempotency guard: only transition from script_ready/failed → generating_audio
-    # in a single UPDATE so a double-click can't spawn two pipelines or double-charge.
+    # Atomic idempotency guard: only transition from a terminal-ish status
+    # (script_ready / failed / ready / published) into generating_audio in a
+    # single UPDATE so a double-click can't spawn two pipelines or
+    # double-charge. ``ready`` and ``published`` are included so users can
+    # explicitly regenerate a finished reel (e.g. when stock fallback was
+    # used and they want to retry the AI path).
     transition = db.execute(
         update(Reel)
         .where(and_(
             Reel.id == reel_id,
             Reel.user_id == current_user.id,
-            Reel.status.in_(("script_ready", "failed")),
+            Reel.status.in_(("script_ready", "failed", "ready", "published")),
         ))
         .values(status="generating_audio", error_message=None)
     )
@@ -255,7 +259,7 @@ def generate_video(
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"Video generation already in progress or completed (status: {reel.status}).",
+            detail=f"Video generation already in progress (status: {reel.status}).",
         )
 
     config = (

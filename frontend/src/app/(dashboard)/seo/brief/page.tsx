@@ -117,6 +117,12 @@ interface SEOBriefResponse {
   recommendations: string[];
   draft_score?: DraftScore;
   save_id?: string | null;
+  /** Backend returns "generating" while a background task is still running
+   *  the SERP-scrape + LLM pipeline. Frontend polls
+   *  /api/seo/saves/{save_id} until status is absent (= ready) or
+   *  "failed". */
+  status?: "generating" | "failed" | string | null;
+  error?: string | null;
 }
 
 const WORD_COUNT_OPTIONS = [
@@ -346,21 +352,73 @@ function SEOBriefContent() {
   const [showAllNlp, setShowAllNlp] = useState(false);
   const resultsRef = useRef<HTMLDivElement>(null);
 
-  // Load saved brief if ID is in query params
+  // Poll an /api/seo/saves/{id} row until the background brief task finishes.
+  // Resolves with the populated brief, rejects on hard failure / timeout.
+  const pollBriefUntilReady = async (saveId: string): Promise<SEOBriefResponse> => {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_ATTEMPTS = 60; // 3 min cap
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await api.get<{
+          id: string;
+          data: SEOBriefResponse;
+        }>(`/api/seo/saves/${saveId}`);
+        const d = res.data.data;
+        if (!d) continue;
+        if (d.status === "failed") {
+          throw new Error(d.error || "SEO brief generation failed.");
+        }
+        if (!d.status || d.status !== "generating") {
+          return { ...d, save_id: saveId };
+        }
+      } catch (err) {
+        const e = err as { response?: { status?: number } };
+        if (e.response?.status === 404) {
+          throw new Error("SEO brief save row was deleted while generating.");
+        }
+        // transient — keep polling
+      }
+    }
+    throw new Error("SEO brief is taking longer than expected. Please try again.");
+  };
+
+  // Load saved brief if ID is in query params. If the save row is still
+  // generating (background task running), kick off the polling loop so the
+  // user lands on the live progress view rather than an empty placeholder.
   useEffect(() => {
     if (!savedBriefId) return;
     setIsLoading(true);
     api.get<{ id: string; type: string; title: string; data: SEOBriefResponse }>(`/api/seo/saves/${savedBriefId}`)
       .then((res) => {
         const briefData = res.data.data as SEOBriefResponse;
-        setBrief(briefData);
-        setTopic(briefData.topic || "");
         setCurrentSaveId(res.data.id);
+        setTopic(briefData.topic || "");
+        if (briefData.status === "generating") {
+          pollBriefUntilReady(res.data.id)
+            .then((finalBrief) => {
+              setBrief(finalBrief);
+              setActiveTab(finalBrief.draft_score ? "draft" : "outline");
+              setTimeout(
+                () => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+                100,
+              );
+            })
+            .catch((err) => toast.error(err?.message || "SEO brief generation failed."))
+            .finally(() => setIsLoading(false));
+          return;
+        }
+        setBrief(briefData);
         setActiveTab(briefData.draft_score ? "draft" : "outline");
         setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
       })
       .catch(() => toast.error("Failed to load saved brief"))
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        // Polling branch above handles its own loading flag; the success
+        // branch falls through here and clears it.
+        setIsLoading((prev) => prev);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedBriefId]);
 
   // Silently load brand kit context on mount
@@ -405,17 +463,42 @@ function SEOBriefContent() {
         content_draft: "",
         ...(businessContext && { business_context: businessContext }),
         ...(currentSaveId ? { save_id: currentSaveId } : {}),
-      }, { timeout: 180_000 }); // 3 min — scraping + AI takes time
-      setBrief(res.data);
-      setActiveTab(res.data.draft_score ? "draft" : "outline");
-      // Persist the id in the URL so reloads / "open" from list land back here.
-      if (res.data.save_id && res.data.save_id !== savedBriefId) {
-        setCurrentSaveId(res.data.save_id);
-        router.replace(`/seo/brief?id=${res.data.save_id}`, { scroll: false });
-      } else if (res.data.save_id) {
-        setCurrentSaveId(res.data.save_id);
+      }, { timeout: 30_000 });
+
+      const returnedId = res.data.save_id;
+      if (returnedId && returnedId !== savedBriefId) {
+        setCurrentSaveId(returnedId);
+        router.replace(`/seo/brief?id=${returnedId}`, { scroll: false });
+      } else if (returnedId) {
+        setCurrentSaveId(returnedId);
       }
-      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+
+      // The endpoint now returns immediately with status="generating" while
+      // a background task runs the SERP-scrape + LLM pipeline. Poll until
+      // the save row carries the finished brief.
+      if (res.data.status === "generating" && returnedId) {
+        toast.info("Generating SEO brief — scraping competitors + LLM analysis…");
+        try {
+          const finalBrief = await pollBriefUntilReady(returnedId);
+          setBrief(finalBrief);
+          setActiveTab(finalBrief.draft_score ? "draft" : "outline");
+          setTimeout(
+            () => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+            100,
+          );
+        } catch (pollErr: unknown) {
+          const m = (pollErr as { message?: string })?.message;
+          toast.error(m || "SEO brief generation failed.");
+        }
+      } else {
+        // Backwards-compat: server returned a fully synchronous brief.
+        setBrief(res.data);
+        setActiveTab(res.data.draft_score ? "draft" : "outline");
+        setTimeout(
+          () => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+          100,
+        );
+      }
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
       toast.error(e.response?.data?.detail || "Failed to generate SEO brief");
@@ -1103,6 +1186,17 @@ function SEOBriefContent() {
                           headings: c.headings || [],
                         })),
                         nlp_terms: brief.nlp_terms || [],
+                        // New: forward search intent + meta suggestions so the
+                        // blog LLM aligns with the brief end-to-end, and
+                        // auto-fire generation as soon as the page loads.
+                        search_intent: brief.search_intent || "",
+                        meta_suggestions: (brief.meta_suggestions || [])
+                          .slice(0, 3)
+                          .map((m) => ({
+                            title: m.title || "",
+                            description: m.description || "",
+                          })),
+                        auto_generate: true,
                       }));
                       router.push("/blog/generate");
                     }}

@@ -23,6 +23,14 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
   Film,
@@ -137,6 +145,9 @@ export default function ReelsPage() {
   const [publishingReelId, setPublishingReelId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
+  // Reel pending confirmation in the regenerate modal. Storing the reel
+  // (rather than just an id) lets us show topic/details in the dialog body.
+  const [regenerateTarget, setRegenerateTarget] = useState<Reel | null>(null);
 
   // Fetch available voices
   useEffect(() => {
@@ -173,19 +184,26 @@ export default function ReelsPage() {
     fetchReels();
   }, []);
 
-  // Poll for updates only while at least one reel is still processing
+  // Poll for updates only while at least one reel is still processing.
+  // The "recently active" gate uses max(created_at, updated_at) so that a
+  // regenerate on an old reel (which keeps its original created_at but
+  // updates updated_at when the pipeline ticks) still triggers polling.
   useEffect(() => {
     const TERMINAL = ["script_ready", "ready", "published", "failed", "publish_failed"];
-    const POLL_WINDOW_MS = 30 * 60 * 1000; // only poll reels created within last 30 minutes
-    const now = Date.now();
+    const POLL_WINDOW_MS = 30 * 60 * 1000; // only poll reels active within last 30 minutes
 
-    const hasRecentlyProcessing = reels.some(r => {
+    const lastActiveTs = (r: Reel): number => {
+      const created = new Date(r.created_at).getTime();
+      const updated = r.updated_at ? new Date(r.updated_at).getTime() : 0;
+      return Math.max(created, updated);
+    };
+
+    const isRecentlyProcessing = (r: Reel, now: number): boolean => {
       if (TERMINAL.includes(r.status)) return false;
-      const age = now - new Date(r.created_at).getTime();
-      return age < POLL_WINDOW_MS;
-    });
+      return now - lastActiveTs(r) < POLL_WINDOW_MS;
+    };
 
-    if (!hasRecentlyProcessing) return;
+    if (!reels.some(r => isRecentlyProcessing(r, Date.now()))) return;
 
     const interval = setInterval(async () => {
       try {
@@ -196,12 +214,9 @@ export default function ReelsPage() {
           if (!prev) return prev;
           return fetched.find(r => r.id === prev.id) ?? prev;
         });
-        const stillProcessing = fetched.some(r => {
-          if (TERMINAL.includes(r.status)) return false;
-          const age = Date.now() - new Date(r.created_at).getTime();
-          return age < POLL_WINDOW_MS;
-        });
-        if (!stillProcessing) clearInterval(interval);
+        if (!fetched.some(r => isRecentlyProcessing(r, Date.now()))) {
+          clearInterval(interval);
+        }
       } catch {
         clearInterval(interval);
       }
@@ -275,6 +290,40 @@ export default function ReelsPage() {
         toast.error("Not enough credits! Upgrade your plan to continue.");
       } else {
         toast.error(err.response?.data?.detail || "Failed to start video generation");
+      }
+    } finally {
+      setIsGeneratingVideo(false);
+    }
+  };
+
+  // Open the in-app confirmation dialog instead of using window.confirm.
+  const requestRegenerateVideo = (reel: Reel) => {
+    if (!canUseCredits(REEL_CREDIT_COST)) {
+      toast.error(`Not enough credits! Regenerating requires ${REEL_CREDIT_COST} credits.`);
+      return;
+    }
+    setRegenerateTarget(reel);
+  };
+
+  const confirmRegenerateVideo = async () => {
+    const reel = regenerateTarget;
+    if (!reel) return;
+    setRegenerateTarget(null);
+    setIsGeneratingVideo(true);
+    try {
+      const response = await api.post<Reel>(`/api/reels/${reel.id}/generate-video`);
+      setReels((prev) => prev.map((r) => (r.id === reel.id ? response.data : r)));
+      if (selectedReel?.id === reel.id) setSelectedReel(response.data);
+      toast.success(`Regeneration started. ${REEL_CREDIT_COST} credits used.`);
+      refreshSubscription();
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string }; status?: number } };
+      if (err.response?.status === 402) {
+        toast.error("Not enough credits! Upgrade your plan to continue.");
+      } else if (err.response?.status === 409) {
+        toast.error("A render is already in progress for this reel.");
+      } else {
+        toast.error(err.response?.data?.detail || "Failed to start regeneration");
       }
     } finally {
       setIsGeneratingVideo(false);
@@ -711,9 +760,20 @@ export default function ReelsPage() {
                       </div>
                     )}
 
-                    {/* Error message */}
+                    {/* Error / soft-warning message. When the reel is in a
+                        terminal-success state (ready / published) treat the
+                        message as an informational note rather than an error
+                        — the pipeline used a fallback (e.g. AI video was
+                        moderated and stock footage was used instead). */}
                     {selectedReel.error_message && (
-                      <Alert variant="destructive">
+                      <Alert
+                        variant={
+                          ["ready", "published"].includes(selectedReel.status)
+                            ? "default"
+                            : "destructive"
+                        }
+                      >
+                        <AlertTriangle className="h-4 w-4" />
                         <AlertDescription>{selectedReel.error_message}</AlertDescription>
                       </Alert>
                     )}
@@ -853,6 +913,22 @@ export default function ReelsPage() {
                           )}
                         </Button>
                       )}
+                      {(selectedReel.status === "ready" || selectedReel.status === "published") && (
+                        <Button
+                          variant="outline"
+                          onClick={() => requestRegenerateVideo(selectedReel)}
+                          disabled={isGeneratingVideo || creditsRemaining < REEL_CREDIT_COST}
+                          className="gap-2"
+                          title={`Re-render the video (charges ${REEL_CREDIT_COST} credits)`}
+                        >
+                          {isGeneratingVideo ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-4 w-4" />
+                          )}
+                          Regenerate ({REEL_CREDIT_COST})
+                        </Button>
+                      )}
                       <Button
                         variant="outline"
                         onClick={() => handleDelete(selectedReel)}
@@ -985,6 +1061,60 @@ export default function ReelsPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* In-app confirmation modal — replaces window.confirm() so it inherits
+          the app's styling and is consistent with the rest of the UI. */}
+      <Dialog
+        open={regenerateTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRegenerateTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Regenerate this reel?</DialogTitle>
+            <DialogDescription>
+              This will replace the current video and charge{" "}
+              <strong>{REEL_CREDIT_COST} credits</strong>. The previous video
+              cannot be recovered.
+            </DialogDescription>
+          </DialogHeader>
+          {regenerateTarget && (
+            <div className="text-sm text-muted-foreground border rounded-md p-3 bg-muted/30">
+              <p className="font-medium text-foreground line-clamp-2">
+                {regenerateTarget.topic}
+              </p>
+              <p className="mt-1">{regenerateTarget.duration_target}s reel</p>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRegenerateTarget(null)}
+              disabled={isGeneratingVideo}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={confirmRegenerateVideo}
+              disabled={isGeneratingVideo}
+              className="gap-2"
+            >
+              {isGeneratingVideo ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Starting...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-4 w-4" />
+                  Regenerate ({REEL_CREDIT_COST} credits)
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

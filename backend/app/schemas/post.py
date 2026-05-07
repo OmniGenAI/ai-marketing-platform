@@ -78,4 +78,5 @@ class GenerateResponse(BaseModel):
     seo_keywords_used: list[str] = []
     primary_keyword: str | None = None
     image_generation_failed: bool = False  # True if AI image was requested but failed
+    image_pending: bool = False  # True if AI image is generating asynchronously; poll the post for completion
     post_id: str | None = None  # ID of the auto-saved draft Post row
