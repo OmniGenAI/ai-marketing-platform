@@ -385,9 +385,9 @@ export default function BlogPage() {
                 onOpenChange={(o) => !o && setPublishingSave(null)}
                 onPublished={(info) => {
                     if (!publishingSave) return;
-                    // Optimistically merge the new published metadata into local state
-                    // so the badge appears without a full refetch.
-                    setSaves((prev) =>
+                    // Optimistically merge the new published metadata into the
+                    // React Query cache so the badge appears without a refetch.
+                    qc.setQueryData<BlogSaveItem[]>(QUERY_KEYS.blogSaves, (prev = []) =>
                         prev.map((s) =>
                             s.id === publishingSave.id
                                 ? {

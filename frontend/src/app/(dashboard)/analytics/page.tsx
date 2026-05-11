@@ -89,7 +89,7 @@ export default function AnalyticsPage() {
     if (sites.length && !activeSiteId) setActiveSiteId(sites[0].id);
   }, [sites, activeSiteId]);
 
-  const { data: summary, isLoading: loadingSummary } = useQuery<Summary>({
+  const { data: summary, isLoading: loadingSummary, refetch: loadSummary } = useQuery<Summary>({
     queryKey: ["analytics-summary", activeSiteId, range],
     queryFn: async () => {
       const res = await api.get<Summary>(
@@ -150,7 +150,7 @@ export default function AnalyticsPage() {
             onDeleted={async (id) => {
               if (activeSiteId === id) setActiveSiteId(null);
               await loadSites();
-              setSummary(null);
+              // summary auto-clears: query is disabled when activeSiteId is null
             }}
           />
 
@@ -170,7 +170,7 @@ export default function AnalyticsPage() {
               </Select>
                 {activeSiteId && <LiveBadge siteId={activeSiteId} />}
               </div>
-              <Button variant="outline" size="sm" onClick={loadSummary} disabled={loadingSummary}>
+              <Button variant="outline" size="sm" onClick={() => loadSummary()} disabled={loadingSummary}>
                 <RefreshCw className={`mr-2 h-3.5 w-3.5 ${loadingSummary ? "animate-spin" : ""}`} />
                 Refresh
               </Button>

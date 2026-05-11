@@ -192,7 +192,12 @@ function SettingsContent() {
     setDisconnecting(accountId);
     try {
       await api.delete(`/api/social/accounts/${accountId}`);
-      setAccounts(accounts.filter((acc) => acc.id !== accountId));
+      // Optimistically drop the disconnected account from the cached list so
+      // the UI updates instantly; React Query refetches on next focus anyway.
+      qc.setQueryData<SocialAccount[]>(QUERY_KEYS.socialAccounts, (prev = []) =>
+        prev.filter((acc) => acc.id !== accountId)
+      );
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.socialProviders });
       toast.success("Account disconnected successfully");
     } catch {
       toast.error("Failed to disconnect account");
