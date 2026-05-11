@@ -3,6 +3,10 @@ from datetime import datetime
 from pydantic import BaseModel, field_validator
 
 
+# Valid post statuses — used by PostCreate, PostUpdate, and the scheduler.
+POST_STATUSES = {"draft", "scheduled", "published", "failed"}
+
+
 class PostCreate(BaseModel):
     content: str
     hashtags: str = ""
@@ -11,6 +15,8 @@ class PostCreate(BaseModel):
     platform: str = "facebook"
     tone: str = "professional"
     status: str = "draft"
+    # ISO-8601 datetime (UTC) — required when status == "scheduled".
+    scheduled_at: datetime | None = None
 
 
 class PostUpdate(BaseModel):
@@ -19,6 +25,7 @@ class PostUpdate(BaseModel):
     image_url: str | None = None
     image_option: str | None = None
     status: str | None = None
+    scheduled_at: datetime | None = None
 
 
 class PostResponse(BaseModel):
@@ -34,6 +41,7 @@ class PostResponse(BaseModel):
     # Platform-issued post ID (set after successful publish). Used by the
     # analytics endpoint to fetch live engagement metrics.
     external_post_id: str | None = None
+    scheduled_at: datetime | None = None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -43,7 +51,9 @@ class PostResponse(BaseModel):
 
 class GenerateRequest(BaseModel):
     platform: str = "facebook"
-    tone: str = "professional"
+    tone: str = "professional"            # Backwards-compat single tone
+    tones: list[str] | None = None        # New: multi-tone list (overrides `tone` if provided)
+    variations: int = 1                   # 1 = one caption, 2+ = multiple variations to choose from
     topic: str
     image_option: str = "none"  # none, business, ai, upload
     business_image_id: str | None = None
@@ -80,3 +90,6 @@ class GenerateResponse(BaseModel):
     image_generation_failed: bool = False  # True if AI image was requested but failed
     image_pending: bool = False  # True if AI image is generating asynchronously; poll the post for completion
     post_id: str | None = None  # ID of the auto-saved draft Post row
+    # When `variations > 1`, this list contains all generated captions (incl. content)
+    # ordered from variation 1 .. N. Each item: { content, hashtags }.
+    variations: list[dict] = []

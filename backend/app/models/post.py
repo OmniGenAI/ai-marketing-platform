@@ -30,6 +30,10 @@ class Post(Base):
     #   reddit    -> fullname ("t3_xxxxx")
     # Stored opaquely; each provider's analytics fetcher knows how to parse it.
     external_post_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # When status == "scheduled", the background scheduler publishes at this time (UTC).
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

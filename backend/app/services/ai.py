@@ -132,6 +132,8 @@ def generate_social_post(
     seo_keywords: list[str] | None = None,
     primary_keyword: str = "",
     blog_url: str = "",
+    tones: list[str] | None = None,
+    variations: int = 1,
 ) -> dict:
     """
     Generate a social media post using Google Gemini AI via direct REST API.
@@ -198,13 +200,45 @@ def generate_social_post(
             "Example CTA styles: 'Read more →', 'Full guide:', 'Learn more:'.\n"
         )
 
+    # Build tone descriptor — multi-tone blends them, single tone uses one
+    if tones and len(tones) > 1:
+        tone_descriptor = (
+            f"BLEND these tones: {', '.join(tones)}. "
+            "Combine their qualities into one cohesive voice (don't list them — embody them)."
+        )
+    else:
+        tone_descriptor = tones[0] if tones else tone
+
+    # Variations directive — when variations > 1, ask for N distinct captions
+    variations = max(1, min(int(variations or 1), 5))  # clamp 1..5
+
+    if variations == 1:
+        format_block = """Respond in this exact format:
+CONTENT:
+[Your post content here]
+
+HASHTAGS:
+[Your hashtags here, including any preferred: """ + hashtags + """]"""
+    else:
+        variation_blocks = []
+        for i in range(1, variations + 1):
+            variation_blocks.append(
+                f"VARIATION {i} CONTENT:\n[Caption variation {i} — distinct angle/hook, same core message]\n\n"
+                f"VARIATION {i} HASHTAGS:\n[Hashtags for variation {i}]"
+            )
+        format_block = (
+            f"Generate {variations} DISTINCT caption variations of the same post — different hooks, "
+            f"different opening lines, but same core message and CTA. Use the EXACT format:\n\n"
+            + "\n\n".join(variation_blocks)
+        )
+
     prompt = f"""You are a social media marketing expert. Generate a {platform} post for the following business.
 
 CRITICAL: If website information is provided below, YOU MUST incorporate relevant details from it into the post content.
 
 Business Name: {business_name}
 Industry/Niche: {niche}
-Tone: {tone}
+Tone: {tone_descriptor}
 Products/Services: {products}
 Brand Voice: {brand_voice}
 Target Audience: {target_audience}
@@ -225,19 +259,39 @@ INSTRUCTIONS:
 - Generate post content and relevant hashtags separately
 - If SEO keywords are provided, weave them into the CONTENT naturally and include them as hashtags
 
-Respond in this exact format:
-CONTENT:
-[Your post content here]
-
-HASHTAGS:
-[Your hashtags here, including any preferred: {hashtags}]
+{format_block}
 """
 
     def _parse(text: str) -> tuple[str, str]:
+        """Parse a single CONTENT/HASHTAGS block."""
         if "CONTENT:" in text and "HASHTAGS:" in text:
             parts = text.split("HASHTAGS:")
             return parts[0].replace("CONTENT:", "").strip(), parts[1].strip()
         return text.strip(), ""
+
+    def _parse_variations(text: str, n: int) -> list[tuple[str, str]]:
+        """Parse N variation blocks. Falls back to single _parse if format mismatches."""
+        import re
+        results: list[tuple[str, str]] = []
+        for i in range(1, n + 1):
+            content_match = re.search(
+                rf"VARIATION\s*{i}\s*CONTENT\s*:\s*(.+?)(?=VARIATION\s*{i}\s*HASHTAGS\s*:)",
+                text, re.DOTALL | re.IGNORECASE,
+            )
+            hashtag_match = re.search(
+                rf"VARIATION\s*{i}\s*HASHTAGS\s*:\s*(.+?)(?=VARIATION\s*{i + 1}\s*CONTENT|$)",
+                text, re.DOTALL | re.IGNORECASE,
+            )
+            if content_match:
+                results.append((
+                    content_match.group(1).strip(),
+                    (hashtag_match.group(1).strip() if hashtag_match else ""),
+                ))
+        # Fallback: if regex couldn't parse, treat entire text as one variation
+        if not results:
+            c, h = _parse(text)
+            return [(c, h)] * n if c else []
+        return results
 
     def _post_process(content: str, generated_hashtags: str) -> dict:
         if blog_url and blog_url not in content:
@@ -266,13 +320,24 @@ HASHTAGS:
         logger.error(f"All LLM providers failed for {business_name}: {e}")
         raise Exception(f"Failed to generate content: {e}")
 
-    content, generated_hashtags = _parse(text)
-    if not content.strip():
-        raise Exception("LLM returned empty content")
-    result = _post_process(content, generated_hashtags)
+    if variations > 1:
+        parsed_variations = _parse_variations(text, variations)
+        if not parsed_variations:
+            raise Exception("LLM returned empty variations")
+        # Build a list of {content, hashtags} dicts; first one is the "primary" returned at top level
+        all_variations = [_post_process(c, h) for (c, h) in parsed_variations]
+        primary = all_variations[0]
+        result = {**primary, "variations": all_variations}
+    else:
+        content, generated_hashtags = _parse(text)
+        if not content.strip():
+            raise Exception("LLM returned empty content")
+        result = _post_process(content, generated_hashtags)
+
     logger.info(
         f"Successfully generated {platform} post for {business_name} "
-        f"(website_context: {bool(has_website_context)}, seo_mode: {bool(seo_keywords or primary_keyword)})"
+        f"(website_context: {bool(has_website_context)}, seo_mode: {bool(seo_keywords or primary_keyword)}, "
+        f"variations: {variations}, tones: {tones or [tone]})"
     )
     return result
 

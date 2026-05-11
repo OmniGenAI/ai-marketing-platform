@@ -137,14 +137,30 @@ async def publish_to_facebook(
             # Try to parse error details
             try:
                 error_json = response.json()
-                error_msg = error_json.get("error", {}).get("message", "Unknown error")
-                error_code = error_json.get("error", {}).get("code", "N/A")
+                err = error_json.get("error", {})
+                error_msg = err.get("error_user_msg") or err.get("message") or "Unknown error"
+                error_code = err.get("code")
+                error_subcode = err.get("error_subcode")
                 print(f"❌ Error Code: {error_code}, Message: {error_msg}")
+
+                # Auth / token errors → tell user to reconnect
+                if 400 <= response.status_code < 500 and (
+                    error_code in (190, 102, 463, 467) or error_subcode in (458, 460, 463, 467)
+                ):
+                    raise RuntimeError(
+                        "Facebook session expired. Please go to Settings → Integrations and reconnect Facebook to refresh access."
+                    )
 
                 # If image URL error, suggest using feed endpoint instead
                 if "url" in error_msg.lower() or "image" in error_msg.lower():
                     print("💡 Tip: Image URL might not be publicly accessible. Try using 'published=false' or upload directly.")
-            except:
+
+                # Surface a clean 4xx error to the caller
+                if 400 <= response.status_code < 500:
+                    raise RuntimeError(f"Facebook rejected the post: {error_msg}")
+            except RuntimeError:
+                raise
+            except Exception:
                 pass
 
         response.raise_for_status()
@@ -276,6 +292,24 @@ async def publish_to_instagram(
                 if container_response.status_code != 200:
                     error_detail = container_response.text
                     print(f"❌ Instagram API Error: {error_detail}")
+                    # For 4xx errors, surface Instagram's real message instead of generic httpx text
+                    if 400 <= container_response.status_code < 500:
+                        try:
+                            err_json = container_response.json().get("error", {})
+                            msg = err_json.get("error_user_msg") or err_json.get("message") or error_detail
+                            code = err_json.get("code")
+                            subcode = err_json.get("error_subcode")
+                            # Auth / token errors → tell user to reconnect
+                            if code in (190, 102, 463, 467) or subcode in (458, 460, 463, 467):
+                                raise RuntimeError(
+                                    "Facebook/Instagram session expired. Please go to Settings → Integrations and reconnect Facebook to refresh access."
+                                )
+                            extra = f" (code {code}{f'/{subcode}' if subcode else ''})" if code else ""
+                            raise RuntimeError(f"Instagram rejected the image: {msg}{extra}")
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            raise RuntimeError(f"Instagram rejected the request (400): {error_detail[:500]}")
 
                 container_response.raise_for_status()
                 creation_id = container_response.json()["id"]
@@ -308,6 +342,15 @@ async def publish_to_instagram(
         if publish_response.status_code not in [200, 201]:
             error_detail = publish_response.text
             print(f"❌ Instagram Publish Error ({publish_response.status_code}): {error_detail}")
+            if 400 <= publish_response.status_code < 500:
+                try:
+                    err_json = publish_response.json().get("error", {})
+                    msg = err_json.get("error_user_msg") or err_json.get("message") or error_detail
+                    raise RuntimeError(f"Instagram publish failed: {msg}")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    raise RuntimeError(f"Instagram publish failed (400): {error_detail[:500]}")
 
         publish_response.raise_for_status()
         result = publish_response.json()
@@ -478,3 +521,506 @@ async def publish_to_instagram_carousel(
 
     print(f"✅ Published carousel to Instagram: {len(image_urls)} images, Media ID {result.get('id')}")
     return result
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn
+# ---------------------------------------------------------------------------
+async def publish_to_linkedin(
+    member_urn: str,
+    access_token: str,
+    content: str,
+    image_url: Optional[str] = None,
+) -> dict:
+    """
+    Publish a post to LinkedIn via the UGC Posts API.
+
+    If `image_url` is provided, runs the 3-step LinkedIn image flow:
+      1. POST /assets?action=registerUpload   → get upload URL + asset URN
+      2. PUT bytes to the upload URL          → uploads image
+      3. POST /ugcPosts with shareMediaCategory=IMAGE referencing the asset
+
+    Falls back to a text-only post if image upload fails.
+
+    Args:
+        member_urn: LinkedIn member URN (urn:li:person:{id}) stored as page_id
+        access_token: OAuth 2.0 access token with w_member_social scope
+        content: Post body text (max ~3000 visible chars)
+        image_url: Optional image — public http URL or data:image/... data URL
+
+    Returns:
+        dict with 'id' of the created UGC post
+    """
+    headers_json = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json",
+    }
+
+    asset_urn: Optional[str] = None
+
+    # ─── Step 1+2: Image upload (only if image_url provided) ───
+    if image_url:
+        try:
+            # Fetch image bytes (support both public http URL and base64 data URL)
+            if _is_data_url(image_url):
+                image_bytes, _, _ = _decode_data_url_image(image_url)
+            else:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    img_res = await client.get(image_url)
+                    img_res.raise_for_status()
+                    image_bytes = img_res.content
+
+            # Step 1: register upload
+            register_payload = {
+                "registerUploadRequest": {
+                    "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+                    "owner": member_urn,
+                    "serviceRelationships": [
+                        {"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}
+                    ],
+                }
+            }
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                reg_res = await client.post(
+                    "https://api.linkedin.com/v2/assets?action=registerUpload",
+                    json=register_payload,
+                    headers=headers_json,
+                )
+                reg_res.raise_for_status()
+                reg_data = reg_res.json()
+
+            upload_url = (
+                reg_data.get("value", {})
+                .get("uploadMechanism", {})
+                .get("com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest", {})
+                .get("uploadUrl")
+            )
+            asset_urn = reg_data.get("value", {}).get("asset")
+
+            if not upload_url or not asset_urn:
+                raise ValueError("LinkedIn registerUpload did not return upload URL / asset")
+
+            # Step 2: PUT image bytes to the upload URL
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                up_res = await client.put(
+                    upload_url,
+                    content=image_bytes,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                if up_res.status_code not in (200, 201):
+                    raise ValueError(f"LinkedIn image upload failed: {up_res.status_code}")
+
+            print(f"🖼️  Uploaded image to LinkedIn: {asset_urn}")
+        except Exception as e:
+            print(f"⚠️  LinkedIn image upload failed, falling back to text-only: {e}")
+            asset_urn = None
+
+    # ─── Step 3: Create the UGC post ───
+    if asset_urn:
+        share_content = {
+            "shareCommentary": {"text": content},
+            "shareMediaCategory": "IMAGE",
+            "media": [
+                {
+                    "status": "READY",
+                    "description": {"text": ""},
+                    "media": asset_urn,
+                    "title": {"text": ""},
+                }
+            ],
+        }
+    else:
+        share_content = {
+            "shareCommentary": {"text": content},
+            "shareMediaCategory": "NONE",
+        }
+
+    payload = {
+        "author": member_urn,
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {"com.linkedin.ugc.ShareContent": share_content},
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            "https://api.linkedin.com/v2/ugcPosts",
+            json=payload,
+            headers=headers_json,
+        )
+        r.raise_for_status()
+        data = r.json() if r.text.strip() else {}
+        post_id = data.get("id") or r.headers.get("x-restli-id", "")
+
+    print(f"✅ Published to LinkedIn: {post_id}")
+    return {"id": post_id}
+
+
+# ---------------------------------------------------------------------------
+# Reddit
+# ---------------------------------------------------------------------------
+async def publish_to_reddit(
+    username: str,
+    access_token: str,
+    content: str,
+    subreddit: str = "",
+    image_url: Optional[str] = None,
+) -> dict:
+    """
+    Submit a post to Reddit. If `image_url` is provided, posts as a link to
+    the image (Reddit's `link` kind) — full image upload requires Reddit's
+    media upload API which needs additional scopes/permissions.
+
+    Args:
+        username: Reddit username (stored as page_id in SocialAccount)
+        access_token: OAuth 2.0 access token with submit scope
+        content: Full post body
+        subreddit: Target subreddit without `r/` prefix.
+                   Defaults to the user's own profile page (u/{username}).
+        image_url: Optional public image URL — submitted as a link post
+
+    Returns:
+        dict with 'id' (fullname like "t3_abc123") and 'url'
+    """
+    sr = subreddit.strip() if subreddit.strip() else f"u_{username}"
+
+    # Reddit title is required and capped at 300 chars; derive from first line.
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    title = lines[0][:300] if lines else content[:300]
+
+    # If an image is provided AND it's a public http URL, submit as a link post.
+    # Data URLs and private URLs fall back to self/text post.
+    if image_url and _is_public_http_url(image_url):
+        submit_data = {
+            "api_type": "json",
+            "kind": "link",
+            "sr": sr,
+            "title": title,
+            "url": image_url,
+            "nsfw": "false",
+            "spoiler": "false",
+            "resubmit": "true",
+        }
+        print(f"🖼️  Posting image link to Reddit r/{sr}")
+    else:
+        submit_data = {
+            "api_type": "json",
+            "kind": "self",
+            "sr": sr,
+            "title": title,
+            "text": content,
+            "nsfw": "false",
+            "spoiler": "false",
+            "resubmit": "true",
+        }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            "https://oauth.reddit.com/api/submit",
+            data=submit_data,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": settings.REDDIT_USER_AGENT,
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    errors = (data.get("json") or {}).get("errors") or []
+    if errors:
+        raise ValueError(f"Reddit submission error: {errors}")
+
+    post_data = ((data.get("json") or {}).get("data") or {})
+    post_id = post_data.get("name") or post_data.get("id") or ""
+    url = post_data.get("url") or ""
+
+    print(f"✅ Published to Reddit r/{sr}: {post_id}")
+    return {"id": post_id, "url": url}
+
+
+# ---------------------------------------------------------------------------
+# Video publish — Facebook Reel
+# ---------------------------------------------------------------------------
+async def publish_to_facebook_reel(
+    page_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+) -> dict:
+    """
+    Publish a Reel to a Facebook Page using the Reels API.
+    Flow: start upload session → upload by file_url → finish.
+
+    Args:
+        page_id: Facebook Page ID
+        access_token: Page access token with `pages_manage_posts`
+        video_url: Public mp4 URL (must be downloadable by Facebook)
+        caption: Post description (content + hashtags)
+    """
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        # Step 1: Start upload session
+        start_res = await client.post(
+            f"https://graph.facebook.com/v19.0/{page_id}/video_reels",
+            data={"upload_phase": "start", "access_token": access_token},
+        )
+        start_res.raise_for_status()
+        video_id = start_res.json().get("video_id")
+        if not video_id:
+            raise ValueError("Facebook did not return a video_id")
+        print(f"📤 Started Facebook Reel upload session: {video_id}")
+
+        # Step 2: Upload by file_url (Facebook downloads from this URL)
+        upload_res = await client.post(
+            f"https://rupload.facebook.com/video-upload/v19.0/{video_id}",
+            headers={
+                "Authorization": f"OAuth {access_token}",
+                "file_url": video_url,
+            },
+        )
+        upload_res.raise_for_status()
+        print(f"📦 Facebook uploaded reel video from URL")
+
+        # Step 3: Finish — publish the reel
+        finish_res = await client.post(
+            f"https://graph.facebook.com/v19.0/{page_id}/video_reels",
+            params={
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "video_state": "PUBLISHED",
+                "description": caption,
+                "access_token": access_token,
+            },
+        )
+        finish_res.raise_for_status()
+        result = finish_res.json()
+
+    print(f"✅ Published to Facebook Reel: {video_id}")
+    return {"id": video_id, **result}
+
+
+# ---------------------------------------------------------------------------
+# Video publish — LinkedIn (UGC video post)
+# ---------------------------------------------------------------------------
+async def publish_to_linkedin_video(
+    member_urn: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+) -> dict:
+    """
+    Publish a video post to LinkedIn via the UGC + Assets APIs.
+    3-step flow: registerUpload → PUT bytes → create ugcPost with video media.
+
+    Args:
+        member_urn: LinkedIn member URN (urn:li:person:{id})
+        access_token: OAuth token with w_member_social
+        video_url: Public mp4 URL — must be downloadable to upload bytes
+        caption: Post body text
+    """
+    headers_json = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1: register upload
+    register_payload = {
+        "registerUploadRequest": {
+            "recipes": ["urn:li:digitalmediaRecipe:feedshare-video"],
+            "owner": member_urn,
+            "serviceRelationships": [
+                {"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}
+            ],
+        }
+    }
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        reg_res = await client.post(
+            "https://api.linkedin.com/v2/assets?action=registerUpload",
+            json=register_payload,
+            headers=headers_json,
+        )
+        reg_res.raise_for_status()
+        reg_data = reg_res.json()
+
+    upload_url = (
+        reg_data.get("value", {})
+        .get("uploadMechanism", {})
+        .get("com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest", {})
+        .get("uploadUrl")
+    )
+    asset_urn = reg_data.get("value", {}).get("asset")
+    if not upload_url or not asset_urn:
+        raise ValueError("LinkedIn registerUpload did not return upload URL / asset")
+
+    # Step 2: download video and PUT to LinkedIn
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        vid_res = await client.get(video_url)
+        vid_res.raise_for_status()
+        video_bytes = vid_res.content
+
+        up_res = await client.put(
+            upload_url,
+            content=video_bytes,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if up_res.status_code not in (200, 201):
+            raise ValueError(f"LinkedIn video upload failed: {up_res.status_code}")
+    print(f"🎬 LinkedIn video uploaded: {asset_urn}")
+
+    # Step 3: create UGC post with video media
+    payload = {
+        "author": member_urn,
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {"text": caption},
+                "shareMediaCategory": "VIDEO",
+                "media": [{
+                    "status": "READY",
+                    "description": {"text": ""},
+                    "media": asset_urn,
+                    "title": {"text": ""},
+                }],
+            }
+        },
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            "https://api.linkedin.com/v2/ugcPosts",
+            json=payload,
+            headers=headers_json,
+        )
+        r.raise_for_status()
+        data = r.json() if r.text.strip() else {}
+        post_id = data.get("id") or r.headers.get("x-restli-id", "")
+
+    print(f"✅ Published video to LinkedIn: {post_id}")
+    return {"id": post_id}
+
+
+# ---------------------------------------------------------------------------
+# Video publish — YouTube Short
+# ---------------------------------------------------------------------------
+async def publish_to_youtube_short(
+    access_token: str,
+    video_url: str,
+    title: str,
+    description: str,
+    tags: list[str] | None = None,
+) -> dict:
+    """
+    Upload a YouTube Short via the YouTube Data API v3.
+    Flow: download video → resumable upload → set metadata.
+
+    Args:
+        access_token: OAuth token with youtube.upload scope
+        video_url: Public mp4 URL
+        title: Video title (max 100 chars)
+        description: Video description (max 5000 chars)
+        tags: Optional list of YouTube tags
+    """
+    metadata = {
+        "snippet": {
+            "title": (title or "")[:100],
+            "description": (description or "")[:5000],
+            "tags": (tags or [])[:30],
+            "categoryId": "22",  # People & Blogs — safe default
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        # Step 1: download video
+        vid_res = await client.get(video_url)
+        vid_res.raise_for_status()
+        video_bytes = vid_res.content
+        print(f"📥 Downloaded YouTube Short video ({len(video_bytes)} bytes)")
+
+        # Step 2: initiate resumable upload
+        init_res = await client.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": "snippet,status"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "X-Upload-Content-Type": "video/mp4",
+                "X-Upload-Content-Length": str(len(video_bytes)),
+            },
+            json=metadata,
+        )
+        init_res.raise_for_status()
+        upload_url = init_res.headers.get("Location")
+        if not upload_url:
+            raise ValueError("YouTube did not return resumable upload URL")
+
+        # Step 3: PUT the bytes
+        up_res = await client.put(
+            upload_url,
+            content=video_bytes,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "video/mp4",
+            },
+        )
+        up_res.raise_for_status()
+        result = up_res.json()
+
+    video_id = result.get("id", "")
+    print(f"✅ Published YouTube Short: {video_id}")
+    return {"id": video_id, "url": f"https://youtube.com/shorts/{video_id}" if video_id else ""}
+
+
+# ---------------------------------------------------------------------------
+# Video publish — Reddit (as link post to video URL)
+# ---------------------------------------------------------------------------
+async def publish_to_reddit_video(
+    username: str,
+    access_token: str,
+    video_url: str,
+    caption: str,
+    subreddit: str = "",
+) -> dict:
+    """
+    Submit a video to Reddit as a link post (uses video_url directly).
+    Native video upload requires reddit's media API which needs extra scopes;
+    link-post fallback works in all subs that allow link posts.
+    """
+    sr = subreddit.strip() if subreddit.strip() else f"u_{username}"
+    lines = [ln.strip() for ln in caption.splitlines() if ln.strip()]
+    title = lines[0][:300] if lines else (caption[:300] or "Video")
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            "https://oauth.reddit.com/api/submit",
+            data={
+                "api_type": "json",
+                "kind": "link",
+                "sr": sr,
+                "title": title,
+                "url": video_url,
+                "nsfw": "false",
+                "spoiler": "false",
+                "resubmit": "true",
+            },
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": settings.REDDIT_USER_AGENT,
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    errors = (data.get("json") or {}).get("errors") or []
+    if errors:
+        raise ValueError(f"Reddit video submission error: {errors}")
+
+    post_data = ((data.get("json") or {}).get("data") or {})
+    post_id = post_data.get("name") or post_data.get("id") or ""
+    url = post_data.get("url") or ""
+    print(f"✅ Published video link to Reddit r/{sr}: {post_id}")
+    return {"id": post_id, "url": url}

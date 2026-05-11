@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -47,6 +48,12 @@ import {
   Copy,
   Check,
   Link2,
+  Facebook,
+  Instagram,
+  Linkedin,
+  Youtube,
+  MessageSquare,
+  AlertCircle,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import api from "@/lib/api";
@@ -139,15 +146,36 @@ export default function ReelsPage() {
 
   // Data state
   const [voices, setVoices] = useState<VoiceOption[]>([]);
-  const [reels, setReels] = useState<Reel[]>([]);
-  const [loadingReels, setLoadingReels] = useState(true);
+  const qc = useQueryClient();
+  const { data: reels = [], isLoading: loadingReels, refetch: refetchReels } = useQuery<Reel[]>({
+    queryKey: ["reels"],
+    queryFn: async () => (await api.get<Reel[]>("/api/reels")).data,
+    staleTime: 15 * 1000,  // reels update frequently while generating
+    refetchOnWindowFocus: true,
+  });
   const [selectedReel, setSelectedReel] = useState<Reel | null>(null);
   const [publishingReelId, setPublishingReelId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  // Publish-to-platforms dialog
+  const [publishDialogReel, setPublishDialogReel] = useState<Reel | null>(null);
+  const [publishPlatforms, setPublishPlatforms] = useState<string[]>(["instagram"]);
+  // Connected social providers — used to render the publish platform list
+  const { data: providers = [] } = useQuery<{ platform: string; configured: boolean; connected: boolean; page_name: string | null }[]>({
+    queryKey: ["social-providers"],
+    queryFn: async () => (await api.get("/api/social/providers")).data,
+    staleTime: 60 * 1000,
+    enabled: !!publishDialogReel,
+  });
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  // Reel pending confirmation in the regenerate modal. Storing the reel
-  // (rather than just an id) lets us show topic/details in the dialog body.
   const [regenerateTarget, setRegenerateTarget] = useState<Reel | null>(null);
+
+  // Keep selectedReel in sync when query data refreshes
+  useEffect(() => {
+    if (selectedReel) {
+      const fresh = reels.find(r => r.id === selectedReel.id);
+      if (fresh) setSelectedReel(fresh);
+    }
+  }, [reels]);
 
   // Fetch available voices
   useEffect(() => {
@@ -155,34 +183,16 @@ export default function ReelsPage() {
       try {
         const response = await api.get<VoicesResponse>("/api/reels/voices");
         setVoices(response.data.voices);
-      } catch {
-        console.error("Failed to load voices");
+      } catch (err) {
+        const e = err as { response?: { status?: number; data?: unknown }; message?: string };
+        console.error("Failed to load voices:", e.response?.status, e.response?.data ?? e.message);
       }
     }
     fetchVoices();
   }, []);
 
-  // Fetch user's reels
-  const fetchReels = useCallback(async () => {
-    setLoadingReels(true);
-    try {
-      const response = await api.get<Reel[]>("/api/reels");
-      setReels(response.data);
-      // Update selected reel without adding it as a dependency
-      setSelectedReel(prev => {
-        if (!prev) return prev;
-        return response.data.find(r => r.id === prev.id) ?? prev;
-      });
-    } catch {
-      toast.error("Failed to load reels");
-    } finally {
-      setLoadingReels(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchReels();
-  }, []);
+  // fetchReels alias for places that trigger a refresh after mutations
+  const fetchReels = () => { qc.invalidateQueries({ queryKey: ["reels"] }); };
 
   // Poll for updates only while at least one reel is still processing.
   // The "recently active" gate uses max(created_at, updated_at) so that a
@@ -207,14 +217,8 @@ export default function ReelsPage() {
 
     const interval = setInterval(async () => {
       try {
-        const response = await api.get<Reel[]>("/api/reels");
-        const fetched = response.data;
-        setReels(fetched);
-        setSelectedReel(prev => {
-          if (!prev) return prev;
-          return fetched.find(r => r.id === prev.id) ?? prev;
-        });
-        if (!fetched.some(r => isRecentlyProcessing(r, Date.now()))) {
+        await refetchReels();
+        if (!reels.some(r => isRecentlyProcessing(r, Date.now()))) {
           clearInterval(interval);
         }
       } catch {
@@ -255,7 +259,7 @@ export default function ReelsPage() {
         ...(seoSaveId ? { seo_save_id: seoSaveId } : {}),
       });
 
-      setReels(prev => [response.data, ...prev]);
+      qc.invalidateQueries({ queryKey: ["reels"] });
       setSelectedReel(response.data);
       setTopic("");
       setDescription("");
@@ -280,7 +284,7 @@ export default function ReelsPage() {
     setIsGeneratingVideo(true);
     try {
       const response = await api.post<Reel>(`/api/reels/${reel.id}/generate-video`);
-      setReels(prev => prev.map(r => r.id === reel.id ? response.data : r));
+      qc.invalidateQueries({ queryKey: ["reels"] });
       if (selectedReel?.id === reel.id) setSelectedReel(response.data);
       toast.success(`Video generation started. ${REEL_CREDIT_COST} credits used.`);
       refreshSubscription();
@@ -312,7 +316,7 @@ export default function ReelsPage() {
     setIsGeneratingVideo(true);
     try {
       const response = await api.post<Reel>(`/api/reels/${reel.id}/generate-video`);
-      setReels((prev) => prev.map((r) => (r.id === reel.id ? response.data : r)));
+      qc.invalidateQueries({ queryKey: ["reels"] });
       if (selectedReel?.id === reel.id) setSelectedReel(response.data);
       toast.success(`Regeneration started. ${REEL_CREDIT_COST} credits used.`);
       refreshSubscription();
@@ -330,19 +334,25 @@ export default function ReelsPage() {
     }
   };
 
-  const handlePublish = async (reel: Reel) => {
+  const handlePublish = async (reel: Reel, platforms: string[] = ["instagram"]) => {
+    if (platforms.length === 0) { toast.error("Select at least one platform"); return; }
     setPublishingReelId(reel.id);
     try {
       const captionOverride = seoCaptions[reel.id]?.caption || undefined;
       const response = await api.post<Reel>(
         `/api/reels/${reel.id}/publish`,
-        captionOverride ? { caption_override: captionOverride } : {},
+        {
+          platforms,
+          ...(captionOverride ? { caption_override: captionOverride } : {}),
+        },
       );
-      setReels(prev => prev.map(r => r.id === reel.id ? response.data : r));
-      if (selectedReel?.id === reel.id) {
-        setSelectedReel(response.data);
-      }
-      toast.success("Reel published to Instagram!");
+      qc.invalidateQueries({ queryKey: ["reels"] });
+      if (selectedReel?.id === reel.id) setSelectedReel(response.data);
+      const label = platforms.length === 1
+        ? platforms[0].charAt(0).toUpperCase() + platforms[0].slice(1)
+        : `${platforms.length} platforms`;
+      toast.success(`Reel published to ${label}!`);
+      setPublishDialogReel(null);
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to publish reel");
@@ -351,13 +361,18 @@ export default function ReelsPage() {
     }
   };
 
+  const openPublishDialog = (reel: Reel) => {
+    setPublishPlatforms([reel.platform || "instagram"]);
+    setPublishDialogReel(reel);
+  };
+
   const handleDelete = async (reel: Reel) => {
     if (!confirm("Are you sure you want to delete this reel?")) return;
 
     setIsDeleting(true);
     try {
       await api.delete(`/api/reels/${reel.id}`);
-      setReels(prev => prev.filter(r => r.id !== reel.id));
+      qc.invalidateQueries({ queryKey: ["reels"] });
       if (selectedReel?.id === reel.id) setSelectedReel(null);
       toast.success("Reel deleted");
     } catch {
@@ -896,7 +911,7 @@ export default function ReelsPage() {
                       )}
                       {selectedReel.status === "ready" && (
                         <Button
-                          onClick={() => handlePublish(selectedReel)}
+                          onClick={() => openPublishDialog(selectedReel)}
                           disabled={publishingReelId === selectedReel.id}
                           className="flex-1 gap-2"
                         >
@@ -908,7 +923,7 @@ export default function ReelsPage() {
                           ) : (
                             <>
                               <Send className="h-4 w-4" />
-                              Publish to Instagram
+                              Publish
                             </>
                           )}
                         </Button>
@@ -1034,7 +1049,7 @@ export default function ReelsPage() {
                               className="w-full gap-2 mt-2"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handlePublish(reel);
+                                openPublishDialog(reel);
                               }}
                               disabled={publishingReelId === reel.id}
                             >
@@ -1111,6 +1126,106 @@ export default function ReelsPage() {
                   Regenerate ({REEL_CREDIT_COST} credits)
                 </>
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Publish Reel — multi-platform selection */}
+      <Dialog open={!!publishDialogReel} onOpenChange={(o) => { if (!o) setPublishDialogReel(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Send className="h-4 w-4" /> Publish Reel
+            </DialogTitle>
+            <DialogDescription>
+              Select where to publish the video. Each platform needs to be connected in Settings.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2 py-1">
+            {(() => {
+              const VIDEO_PLATFORMS: Record<string, { label: string; icon: React.ReactNode; bg: string }> = {
+                instagram: { label: "Instagram Reels",  icon: <Instagram className="h-4 w-4" />,    bg: "bg-[#E4405F]" },
+                facebook:  { label: "Facebook Reel",    icon: <Facebook className="h-4 w-4" />,     bg: "bg-[#1877F2]" },
+                youtube:   { label: "YouTube Short",    icon: <Youtube className="h-4 w-4" />,      bg: "bg-[#FF0000]" },
+                linkedin:  { label: "LinkedIn Video",   icon: <Linkedin className="h-4 w-4" />,     bg: "bg-[#0A66C2]" },
+                reddit:    { label: "Reddit (link)",    icon: <MessageSquare className="h-4 w-4" />, bg: "bg-[#FF4500]" },
+              };
+              const videoProviders = providers.filter(p => VIDEO_PLATFORMS[p.platform]);
+              if (videoProviders.length === 0) {
+                return (
+                  <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    No video-capable platforms connected.
+                    <button
+                      className="underline hover:text-foreground ml-auto shrink-0"
+                      onClick={() => { setPublishDialogReel(null); router.push("/settings"); }}
+                    >
+                      Connect in Settings
+                    </button>
+                  </div>
+                );
+              }
+              return (
+                <div className="grid grid-cols-2 gap-2">
+                  {videoProviders.map(p => {
+                    const cfg = VIDEO_PLATFORMS[p.platform]!;
+                    const selected = publishPlatforms.includes(p.platform);
+                    return (
+                      <button
+                        key={p.platform}
+                        type="button"
+                        onClick={() => setPublishPlatforms(prev =>
+                          prev.includes(p.platform) ? prev.filter(x => x !== p.platform) : [...prev, p.platform]
+                        )}
+                        className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
+                          selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted/50"
+                        }`}
+                      >
+                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white ${cfg.bg}`}>
+                          {cfg.icon}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium">{cfg.label}</p>
+                          {p.page_name && <p className="text-[11px] text-muted-foreground truncate">{p.page_name}</p>}
+                        </div>
+                        {selected ? (
+                          <CheckCircle2 className="h-4 w-4 text-primary shrink-0" />
+                        ) : !p.connected ? (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); setPublishDialogReel(null); router.push("/settings"); }}
+                            className="text-[11px] font-medium text-amber-600 hover:underline shrink-0 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 cursor-pointer"
+                          >
+                            Connect
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+            {publishPlatforms.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {publishPlatforms.length} platform{publishPlatforms.length > 1 ? "s" : ""} selected
+              </p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPublishDialogReel(null)}>Cancel</Button>
+            <Button
+              onClick={() => publishDialogReel && handlePublish(publishDialogReel, publishPlatforms)}
+              disabled={publishPlatforms.length === 0 || !!publishingReelId}
+              className="gap-1.5"
+            >
+              {publishingReelId
+                ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Publishing…</>
+                : <><Send className="h-3.5 w-3.5" /> Publish Now</>
+              }
             </Button>
           </DialogFooter>
         </DialogContent>

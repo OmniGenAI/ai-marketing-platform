@@ -1854,33 +1854,86 @@ def apply_seo_tips(
         f"[{i}] ({t.category}, {t.priority}) {t.tip}" for i, t in enumerate(tips)
     )
 
-    prompt = f"""You are an expert SEO editor applying improvements to a draft in a single pass.
+    # Derive the categories the user actually selected so we can enforce
+    # a strict edit scope. A Meta-only batch must NOT touch the body HTML;
+    # a Length tip must NOT rewrite the meta fields; etc.
+    selected_categories = {t.category for t in tips}
+    can_edit_meta_title = ("Meta" in selected_categories) and any(
+        "title" in t.tip.lower() for t in tips if t.category == "Meta"
+    )
+    can_edit_meta_desc = ("Meta" in selected_categories) and any(
+        "description" in t.tip.lower() or "desc" in t.tip.lower() for t in tips if t.category == "Meta"
+    )
+    # Body-affecting categories — anything that changes the HTML body.
+    body_categories = {"Keyword", "Readability", "Structure", "Coverage", "Links", "Length", "Content"}
+    can_edit_body = bool(selected_categories & body_categories)
+
+    # Hard, computed facts about current state vs. SEO targets. The LLM has
+    # a habit of fabricating "already within limits" excuses — surfacing the
+    # raw numbers prevents that.
+    title_len = len(data.meta_title)
+    desc_len = len(data.meta_description)
+    title_target_min, title_target_max = 10, 60
+    desc_target_min, desc_target_max = 50, 155
+    title_in_range = title_target_min <= title_len <= title_target_max
+    desc_in_range = desc_target_min <= desc_len <= desc_target_max
+
+    facts_lines: list[str] = []
+    if can_edit_meta_title:
+        facts_lines.append(
+            f"- Meta title is {title_len} chars (target {title_target_min}-{title_target_max}). "
+            + ("IN RANGE" if title_in_range else f"OUT OF RANGE - REWRITE to fit {title_target_min}-{title_target_max} chars.")
+        )
+    if can_edit_meta_desc:
+        facts_lines.append(
+            f"- Meta description is {desc_len} chars (target {desc_target_min}-{desc_target_max}). "
+            + ("IN RANGE" if desc_in_range else f"OUT OF RANGE - REWRITE to fit {desc_target_min}-{desc_target_max} chars.")
+        )
+    facts_block = "\n".join(facts_lines) if facts_lines else ""
+
+    scope_lines: list[str] = []
+    scope_lines.append(f"- Meta title:       {'EDITABLE' if can_edit_meta_title else 'FROZEN - return the input value unchanged'}")
+    scope_lines.append(f"- Meta description: {'EDITABLE' if can_edit_meta_desc else 'FROZEN - return the input value unchanged'}")
+    scope_lines.append(f"- Body HTML:        {'EDITABLE - but ONLY the minimum needed for the tips below' if can_edit_body else 'FROZEN - return the input HTML byte-for-byte unchanged'}")
+    edit_scope_block = "\n".join(scope_lines)
+
+    facts_section = f"\nFACTS (computed — do NOT contradict):\n{facts_block}\n" if facts_block else ""
+
+    prompt = f"""You are an expert SEO editor applying SPECIFIC improvements to a draft in a single pass.
 
 PRIMARY KEYWORD: "{data.primary_keyword or 'not set'}"
 RELATED KEYWORDS: {data.related_keywords or 'none'}
 TARGET WORD COUNT: {data.target_word_count}
-CURRENT META TITLE ({len(data.meta_title)} chars): {data.meta_title or '(empty)'}
-CURRENT META DESCRIPTION ({len(data.meta_description)} chars): {data.meta_description or '(empty)'}
+CURRENT META TITLE ({title_len} chars): {data.meta_title or '(empty)'}
+CURRENT META DESCRIPTION ({desc_len} chars): {data.meta_description or '(empty)'}
 
 TIPS TO APPLY (indexed):
 {tips_block}
 
+EDIT SCOPE - STRICT (do not violate):
+{edit_scope_block}
+{facts_section}
 CURRENT HTML:
 ---
 {html_in}
 ---
 
 RULES:
-1. Preserve the author's voice, factual claims, existing examples, and all correct information. Do NOT invent statistics, quotes, names, or URLs.
-2. Do NOT delete existing content unless a tip explicitly requires removal. Prefer adding or rewriting in place.
-3. Skip (do not apply) any tip that requires data you don't have:
-   - Links tips that don't include a specific URL
+1. CRITICAL - MINIMUM-EDIT PRINCIPLE: Touch ONLY what the selected tips above require. Do NOT make any other improvements you might notice. Every untouched sentence, heading, list item, link, and paragraph MUST come back byte-for-byte identical to the input. This is non-negotiable.
+2. Honour the EDIT SCOPE block above. If a field is FROZEN, return its input value unchanged in the output (so the user sees zero diff for that field).
+3. Trust the FACTS block. If it says a field is OUT OF RANGE, you MUST rewrite it to fit. Do NOT claim a field is "already within limits" when the FACTS say otherwise.
+4. When a Meta tip is EDITABLE and OUT OF RANGE, your `applied` array MUST include that tip's index AND the returned value MUST fit the target length. Returning the unchanged value is failure.
+5. Preserve the author's voice, factual claims, existing examples, names, links, and ALL correct information. Do NOT invent statistics, quotes, names, or URLs.
+6. Do NOT delete existing content unless a tip explicitly requires removal.
+7. Skip (do not apply) any tip that requires data you don't have:
+   - Links tips without a specific URL
    - Tips that reference external facts, testimonials, or citations
-   For each skipped tip, include its index and a one-line reason.
-4. Output MUST be valid HTML using only these tags: <h1>, <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <a href>, <br>. Close every tag.
-5. Integrate the primary keyword naturally; keep density between 1–3%. Never keyword-stuff.
-6. Meta title: 10–60 chars. Meta description: 50–155 chars. Include the primary keyword in both when a Meta tip is applied.
-7. Keep headings meaningful. Exactly one <h1>. At least two <h2>s if adding structure. Break paragraphs longer than ~150 words.
+   For each skipped tip, include its index and a one-line reason in `skipped`.
+8. Output HTML uses only these tags: <h1>, <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <a href>, <br>. Close every tag.
+9. Meta title 10-60 chars, meta description 50-155 chars; include the primary keyword ONLY when a Meta tip applies.
+10. Keep exactly one <h1>; do not re-arrange section order unless a Structure tip says so.
+
+The user is reviewing your output as an inline diff. The more unrelated edits you make, the worse their experience. Stay surgical.
 
 Return ONLY this JSON object (no markdown, no commentary):
 {{
@@ -1934,10 +1987,25 @@ Return ONLY this JSON object (no markdown, no commentary):
     applied_raw = parsed.get("applied") or []
     applied = [i for i in applied_raw if isinstance(i, int) and 0 <= i < len(tips)]
 
+    # Enforce edit scope server-side. Even if the LLM ignored the prompt's
+    # FROZEN directives, we restore the original value for any field outside
+    # the selected tip categories. This guarantees a "Meta description" tip
+    # never produces body-text drift in the diff preview.
+    final_html = parsed["html"]
+    final_meta_title = parsed.get("meta_title") or data.meta_title
+    final_meta_desc = parsed.get("meta_description") or data.meta_description
+
+    if not can_edit_body:
+        final_html = data.html
+    if not can_edit_meta_title:
+        final_meta_title = data.meta_title
+    if not can_edit_meta_desc:
+        final_meta_desc = data.meta_description
+
     return SEOApplyTipsResponse(
-        html=parsed["html"],
-        meta_title=parsed.get("meta_title") or data.meta_title,
-        meta_description=parsed.get("meta_description") or data.meta_description,
+        html=final_html,
+        meta_title=final_meta_title,
+        meta_description=final_meta_desc,
         applied=applied,
         skipped=_coerce_skipped(parsed.get("skipped") or []),
         changes_summary=(parsed.get("changes_summary") or "").strip(),
@@ -1997,8 +2065,11 @@ def list_seo_saves(
 ):
     saves = (
         db.query(SeoSave)
-        .filter(SeoSave.user_id == current_user.id, SeoSave.type != "blog")
-        .order_by(SeoSave.created_at.desc())
+        .filter(
+            SeoSave.user_id == current_user.id,
+            SeoSave.type.in_(["brief", "draft"]),  # exclude blog, repurpose, etc.
+        )
+        .order_by(SeoSave.updated_at.desc())
         .limit(50)
         .all()
     )

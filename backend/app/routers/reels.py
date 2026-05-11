@@ -35,7 +35,13 @@ from app.services.reel_service import (
 from app.routers.seo import extract_seo_keywords, _slug_to_hashtag
 from app.models.seo_save import SeoSave
 import json as _json
-from app.services.social import publish_to_instagram_reels
+from app.services.social import (
+    publish_to_instagram_reels,
+    publish_to_facebook_reel,
+    publish_to_linkedin_video,
+    publish_to_youtube_short,
+    publish_to_reddit_video,
+)
 
 router = APIRouter(prefix="/api/reels", tags=["reels"])
 
@@ -393,7 +399,55 @@ def get_reel(
 
 
 class PublishReelRequest(BaseModel):
-    caption_override: str | None = None  # SEO caption built on the frontend
+    caption_override: str | None = None       # SEO caption built on the frontend
+    platforms: list[str] | None = None        # Multi-platform: instagram, facebook, linkedin, youtube, reddit
+
+
+# Map platform key → (publish function, social account platform name to look up)
+# Each entry receives the resolved SocialAccount and Reel and returns the dict result.
+async def _publish_reel_to_platform(
+    platform: str, account: SocialAccount, reel: Reel, caption: str
+) -> dict:
+    if platform == "instagram":
+        return await publish_to_instagram_reels(
+            instagram_account_id=account.page_id,
+            access_token=account.access_token,
+            video_url=reel.video_url,
+            caption=caption,
+            thumbnail_url=reel.thumbnail_url,
+        )
+    if platform == "facebook":
+        return await publish_to_facebook_reel(
+            page_id=account.page_id,
+            access_token=account.access_token,
+            video_url=reel.video_url,
+            caption=caption,
+        )
+    if platform == "linkedin":
+        return await publish_to_linkedin_video(
+            member_urn=account.page_id,
+            access_token=account.access_token,
+            video_url=reel.video_url,
+            caption=caption,
+        )
+    if platform == "youtube":
+        # Tags derived from the reel's hashtags (#tag → tag)
+        tags = [t.lstrip("#") for t in (reel.hashtags or "").split() if t.startswith("#")][:30]
+        return await publish_to_youtube_short(
+            access_token=account.access_token,
+            video_url=reel.video_url,
+            title=(reel.topic or "Reel")[:100],
+            description=caption,
+            tags=tags,
+        )
+    if platform == "reddit":
+        return await publish_to_reddit_video(
+            username=account.page_id,
+            access_token=account.access_token,
+            video_url=reel.video_url,
+            caption=caption,
+        )
+    raise ValueError(f"Unsupported platform for reel publish: {platform}")
 
 
 @router.post("/{reel_id}/publish", response_model=ReelResponse)
@@ -403,18 +457,14 @@ async def publish_reel(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Publish a reel to Instagram."""
-    # Get the reel
+    """Publish a reel to one or more platforms (instagram, facebook, linkedin, youtube, reddit)."""
     reel = (
         db.query(Reel)
         .filter(Reel.id == reel_id, Reel.user_id == current_user.id)
         .first()
     )
     if not reel:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Reel not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reel not found")
 
     if reel.status != "ready":
         raise HTTPException(
@@ -428,21 +478,16 @@ async def publish_reel(
             detail="Reel has no video URL",
         )
 
-    # Get Instagram account
-    instagram_account = (
-        db.query(SocialAccount)
-        .filter(
-            SocialAccount.user_id == current_user.id,
-            SocialAccount.platform == "instagram",
-        )
-        .first()
-    )
+    # Resolve target platforms: payload override → reel.platform → instagram default
+    if payload and payload.platforms:
+        targets = [p.lower() for p in payload.platforms if p]
+    else:
+        targets = [(reel.platform or "instagram").lower()]
 
-    if not instagram_account:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No Instagram account connected. Please connect your Instagram account first.",
-        )
+    if not targets:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No platforms selected")
+
+    # Build caption (override or default content+hashtags)
     if payload and payload.caption_override and payload.caption_override.strip():
         caption = payload.caption_override.strip()
     else:
@@ -450,33 +495,57 @@ async def publish_reel(
         if reel.hashtags:
             caption = f"{caption}\n\n{reel.hashtags}"
 
-    try:
-        # Publish to Instagram Reels
-        result = await publish_to_instagram_reels(
-            instagram_account_id=instagram_account.page_id,
-            access_token=instagram_account.access_token,
-            video_url=reel.video_url,
-            caption=caption,
-            thumbnail_url=reel.thumbnail_url,
+    # Lookup connected accounts for each platform up-front
+    accounts: dict[str, SocialAccount] = {}
+    for plat in targets:
+        acct = (
+            db.query(SocialAccount)
+            .filter(
+                SocialAccount.user_id == current_user.id,
+                SocialAccount.platform == plat,
+            )
+            .first()
         )
+        if not acct:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No {plat} account connected. Please connect it in Settings.",
+            )
+        accounts[plat] = acct
 
-        # Update reel status
-        reel.status = "published"
-        reel.published_at = datetime.now(timezone.utc)
-        reel.instagram_media_id = result.get("id")
-        db.commit()
-        db.refresh(reel)
+    # Publish to each — track per-platform results
+    results: dict[str, dict] = {}
+    failures: dict[str, str] = {}
+    for plat in targets:
+        try:
+            results[plat] = await _publish_reel_to_platform(plat, accounts[plat], reel, caption)
+        except Exception as e:
+            logger.exception(f"Failed to publish reel {reel_id} to {plat}")
+            failures[plat] = str(e)
 
-        return reel
-
-    except Exception as e:
+    # All failed → mark publish_failed and raise
+    if not results:
         reel.status = "publish_failed"
-        reel.error_message = str(e)
+        reel.error_message = "; ".join(f"{p}: {e}" for p, e in failures.items())
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to publish reel: {str(e)}",
+            detail=f"Failed to publish reel: {reel.error_message}",
         )
+
+    # At least one succeeded — mark published
+    reel.status = "published"
+    reel.published_at = datetime.now(timezone.utc)
+    # If Instagram is one of the successful platforms, persist its media_id (legacy column)
+    if "instagram" in results:
+        reel.instagram_media_id = results["instagram"].get("id")
+    if failures:
+        reel.error_message = "Partial failure: " + "; ".join(f"{p}: {e}" for p, e in failures.items())
+    else:
+        reel.error_message = None
+    db.commit()
+    db.refresh(reel)
+    return reel
 
 
 @router.delete("/{reel_id}", status_code=status.HTTP_204_NO_CONTENT)

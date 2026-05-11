@@ -185,6 +185,8 @@ async def generate_post(
             business_name=config.business_name,
             niche=config.niche,
             tone=data.tone,
+            tones=data.tones,
+            variations=data.variations,
             products=config.products,
             brand_voice=config.brand_voice,
             target_audience=config.target_audience,
@@ -348,4 +350,5 @@ async def generate_post(
         image_generation_failed=image_generation_failed,
         image_pending=image_pending,
         post_id=post_id,
+        variations=result.get("variations", []),
     )

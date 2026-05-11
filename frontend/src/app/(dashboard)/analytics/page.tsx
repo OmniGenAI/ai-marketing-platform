@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,54 +70,36 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function AnalyticsPage() {
-  const [sites, setSites] = useState<Site[]>([]);
-  const [loadingSites, setLoadingSites] = useState(true);
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
   const [range, setRange] = useState<"24h" | "7d" | "30d" | "90d">("7d");
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [loadingSummary, setLoadingSummary] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState<Site | null>(null);
 
-  const loadSites = useCallback(async () => {
-    setLoadingSites(true);
-    try {
+  const { data: sites = [], isLoading: loadingSites, refetch: loadSites } = useQuery<Site[]>({
+    queryKey: ["analytics-sites"],
+    queryFn: async () => {
       const res = await api.get<Site[]>("/api/analytics/sites");
-      setSites(res.data);
-      if (res.data.length && !activeSiteId) {
-        setActiveSiteId(res.data[0].id);
-      }
-    } catch (e) {
-      console.error(e);
-      toast.error("Could not load sites");
-    } finally {
-      setLoadingSites(false);
-    }
-  }, [activeSiteId]);
+      return res.data;
+    },
+    staleTime: 60 * 1000,
+  });
 
+  // Auto-select first site
   useEffect(() => {
-    loadSites();
-  }, [loadSites]);
+    if (sites.length && !activeSiteId) setActiveSiteId(sites[0].id);
+  }, [sites, activeSiteId]);
 
-  const loadSummary = useCallback(async () => {
-    if (!activeSiteId) return;
-    setLoadingSummary(true);
-    try {
+  const { data: summary, isLoading: loadingSummary } = useQuery<Summary>({
+    queryKey: ["analytics-summary", activeSiteId, range],
+    queryFn: async () => {
       const res = await api.get<Summary>(
         `/api/analytics/site/${activeSiteId}/summary?range=${range}`
       );
-      setSummary(res.data);
-    } catch (e) {
-      console.error(e);
-      toast.error("Could not load summary");
-    } finally {
-      setLoadingSummary(false);
-    }
-  }, [activeSiteId, range]);
-
-  useEffect(() => {
-    loadSummary();
-  }, [loadSummary]);
+      return res.data;
+    },
+    enabled: !!activeSiteId,
+    staleTime: 60 * 1000,
+  });
 
   return (
     <div className="space-y-6 p-6">

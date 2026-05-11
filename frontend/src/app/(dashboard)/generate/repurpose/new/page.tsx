@@ -255,6 +255,24 @@ function RepurposePageInner() {
     })();
   }, []);
 
+  // Pre-fill from SEO Editor "Repurpose" shortcut — reads sessionStorage once on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = sessionStorage.getItem("repurpose_prefill");
+    if (!raw) return;
+    sessionStorage.removeItem("repurpose_prefill");
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.content === "string" && parsed.content.trim()) {
+        setSourceMode("paste");
+        setPastedContent(parsed.content.trim());
+      }
+      if (typeof parsed.source_url === "string" && parsed.source_url.trim()) {
+        setSourceUrl(parsed.source_url.trim());
+      }
+    } catch { /* ignore malformed */ }
+  }, []);
+
   // Persist source URL
   useEffect(() => {
     const saved =

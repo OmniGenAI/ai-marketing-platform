@@ -98,25 +98,11 @@ def get_instagram_compatible_aspect_ratio(width: int, height: int) -> Tuple[floa
 
 async def resize_for_instagram(image_url: str, max_size: int = 1080) -> bytes:
     """
-    Download and resize/crop an image to meet Instagram requirements.
-
-    Instagram requirements:
-    - Aspect ratio: 0.8:1 to 1.91:1
-    - Recommended width: 1080px
-    - Format: JPEG or PNG
-
-    Args:
-        image_url: Public URL of the image to process
-        max_size: Maximum width/height (default 1080px)
-
-    Returns:
-        bytes: JPEG image data ready for upload
-
-    Raises:
-        httpx.RequestError: If image download fails
-        PIL.UnidentifiedImageError: If image format is invalid
+    Download an image and prepare it for Instagram while preserving the
+    original dimensions. Padding (white letterbox/pillarbox) is added only
+    when the aspect ratio falls outside Instagram's supported window
+    (0.8:1 to 1.91:1) — the original pixels are never cropped.
     """
-    # Download the image
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(image_url)
         response.raise_for_status()
@@ -125,68 +111,107 @@ async def resize_for_instagram(image_url: str, max_size: int = 1080) -> bytes:
     return resize_for_instagram_bytes(image_data=image_data, max_size=max_size)
 
 
-def resize_for_instagram_bytes(image_data: bytes, max_size: int = 1080) -> bytes:
+def resize_for_instagram_bytes(
+    image_data: bytes,
+    max_size: int = 1080,  # kept for backward compatibility; ignored when preserving originals
+    *,
+    preserve_original: bool = True,
+    pad_color: Tuple[int, int, int] = (255, 255, 255),
+) -> bytes:
     """
-    Resize/crop image bytes to Instagram-compatible dimensions.
+    Prepare image bytes for Instagram while preserving the original image fully.
+
+    Strategy (preserve_original=True, default):
+    - Never crop. Keep every pixel of the original.
+    - If the aspect ratio is already inside Instagram's 0.8:1 – 1.91:1 window,
+      return the original unchanged (re-encoded as JPEG).
+    - If outside the window, **letterbox/pillarbox-pad** with `pad_color`
+      (default white) to the nearest supported aspect ratio (4:5 portrait or
+      1.91:1 landscape). The full original image is centred on the new canvas
+      so nothing is lost.
+    - Cap the longest side at Instagram's hard upper limit (1440 px wide for
+      feed images per Meta's published spec) only if it exceeds that limit.
 
     Args:
         image_data: Raw image bytes
-        max_size: Maximum width/height (default 1080px)
+        max_size: Legacy resize cap. Ignored when preserve_original is True.
+        preserve_original: When True (default), no cropping or downscaling
+            below Meta's hard limits.
+        pad_color: RGB tuple used to pad letterbox/pillarbox bars.
 
     Returns:
         bytes: JPEG image data ready for upload
     """
-    # Open image with PIL
     img = Image.open(io.BytesIO(image_data))
 
-    # Convert to RGB if necessary (handles RGBA, P, etc.)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
+    if img.mode != "RGB":
+        img = img.convert("RGB")
 
     width, height = img.size
     current_ratio = width / height
-
     print(f"📐 Original image: {width}x{height} (ratio: {current_ratio:.2f}:1)")
 
-    # Check if resize/crop is needed
-    if 0.8 <= current_ratio <= 1.91:
-        # Already compatible, just resize if too large
-        if width > max_size or height > max_size:
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-            print(f"✂️  Resized to: {img.size[0]}x{img.size[1]}")
-    else:
-        # Need to crop to fit Instagram's aspect ratio
-        target_ratio, format_name = get_instagram_compatible_aspect_ratio(width, height)
+    if not preserve_original:
+        # Legacy behaviour: crop to fit, downscale to max_size
+        if not (0.8 <= current_ratio <= 1.91):
+            target_ratio, format_name = get_instagram_compatible_aspect_ratio(width, height)
+            if current_ratio < 0.8:
+                new_height = int(width / target_ratio)
+                new_width = width
+            else:
+                new_width = int(height * target_ratio)
+                new_height = height
+            left = (width - new_width) // 2
+            top = (height - new_height) // 2
+            img = img.crop((left, top, left + new_width, top + new_height))
+            print(f"✂️  Cropped to {format_name}: {img.size[0]}x{img.size[1]}")
 
-        # Calculate new dimensions
-        if current_ratio < 0.8:
-            # Too tall, crop height
-            new_height = int(width / target_ratio)
-            new_width = width
-        else:
-            # Too wide, crop width
-            new_width = int(height * target_ratio)
-            new_height = height
-
-        # Center crop
-        left = (width - new_width) // 2
-        top = (height - new_height) // 2
-        right = left + new_width
-        bottom = top + new_height
-
-        img = img.crop((left, top, right, bottom))
-        print(f"✂️  Cropped to {format_name}: {img.size[0]}x{img.size[1]} (ratio: {target_ratio}:1)")
-
-        # Resize if still too large
         if img.size[0] > max_size or img.size[1] > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
             print(f"📏 Final size: {img.size[0]}x{img.size[1]}")
+    else:
+        # Preserve every pixel of the original.
+        # 1. Pad with `pad_color` only if outside Instagram's aspect window.
+        if 0.8 <= current_ratio <= 1.91:
+            print("✅ Original aspect ratio is Instagram-compatible — no padding needed.")
+        else:
+            if current_ratio < 0.8:
+                # Too tall → pillarbox: widen canvas to ratio 0.8 (4:5 portrait)
+                target_ratio = 0.8
+                new_width = int(round(height * target_ratio))
+                new_height = height
+                paste_x = (new_width - width) // 2
+                paste_y = 0
+                fmt = "portrait (pillarboxed)"
+            else:
+                # Too wide → letterbox: tall canvas to ratio 1.91:1
+                target_ratio = 1.91
+                new_width = width
+                new_height = int(round(width / target_ratio))
+                paste_x = 0
+                paste_y = (new_height - height) // 2
+                fmt = "landscape (letterboxed)"
 
-    # Convert to JPEG bytes
+            canvas = Image.new("RGB", (new_width, new_height), pad_color)
+            canvas.paste(img, (paste_x, paste_y))
+            img = canvas
+            print(
+                f"🖼️  Padded to {fmt}: {img.size[0]}x{img.size[1]} "
+                f"(ratio: {target_ratio}:1, original preserved)"
+            )
+
+        # 2. Only downscale if exceeding Meta's hard upper limit.
+        #    Feed image max recommended is 1440px on the long side; the API
+        #    itself rejects images > 8192px. Cap at 1440 to be safe.
+        IG_MAX_LONG_SIDE = 1440
+        long_side = max(img.size)
+        if long_side > IG_MAX_LONG_SIDE:
+            img.thumbnail((IG_MAX_LONG_SIDE, IG_MAX_LONG_SIDE), Image.Resampling.LANCZOS)
+            print(f"📏 Downscaled to Meta cap: {img.size[0]}x{img.size[1]}")
+
     output = io.BytesIO()
-    img.save(output, format='JPEG', quality=95, optimize=True)
+    img.save(output, format="JPEG", quality=95, optimize=True)
     output.seek(0)
-
     return output.read()
 
 

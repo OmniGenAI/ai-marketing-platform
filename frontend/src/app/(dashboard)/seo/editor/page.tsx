@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
@@ -8,10 +8,45 @@ import { RichEditor } from "@/components/ui/rich-editor";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import Link from "next/dist/client/link";
-import { ArrowLeft, PenLine } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft, PenLine, Send, Code2, Loader2, Linkedin, CheckCircle2, Recycle, AlertCircle, Check, X, Undo2, Sparkles, RotateCw } from "lucide-react";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+    DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { PublishToDevToDialog } from "@/components/blog/PublishToDevToDialog";
 
 const MIN_WORDS_FOR_TIPS = 100;
 const AUTOSAVE_DEBOUNCE_MS = 2000;
+const TIPS_GENERATE_COOLDOWN_MS = 5_000;       // throttle Generate clicks
+const UNDO_STACK_LIMIT = 10;                    // bound memory growth
+const APPLY_MIN_WORDS_RATIO = 0.5;              // local guard: reject if applied output < 50% words
+
+// Stable hash for a tip's identity (category + tip text) so dismissed tips
+// don't reappear after a regenerate. Cheap, deterministic, collision-tolerant
+// for our use case (small set per draft).
+function hashTip(t: Tip): string {
+    const s = `${t.category}::${t.tip}`;
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return `t${(h >>> 0).toString(36)}`;
+}
+
+// Stable hash for the analysis input. Used to cache /api/seo/tips responses
+// so re-clicking Generate without edits returns instantly with no API call.
+function hashInput(parts: Array<string | number>): string {
+    const s = parts.map(String).join("|");
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+    return (h >>> 0).toString(36);
+}
 
 type AutoSaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -45,7 +80,7 @@ const STATUS_COLORS: Record<string, string> = {
     no_content: "text-zinc-400",
 };
 
-// Target-word-count progress bar colors — mirror the ContentLengthStatus
+// Target-word-count progress bar colors � mirror the ContentLengthStatus
 // bands from seo-analysis.ts so the bar color always matches the status.
 const LENGTH_BAR_BG: Record<string, string> = {
     optimal: "bg-emerald-500",
@@ -55,7 +90,7 @@ const LENGTH_BAR_BG: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Score ring — large, used for Overall
+// Score ring � large, used for Overall
 // ---------------------------------------------------------------------------
 
 function ScoreRing({ value, label }: { value: number; label: string }) {
@@ -97,7 +132,7 @@ function StatRow({ label, value, highlight }: { label: string; value: string; hi
 }
 
 // ---------------------------------------------------------------------------
-// Score bar — used in 7-component breakdown
+// Score bar � used in 7-component breakdown
 // ---------------------------------------------------------------------------
 
 function ScoreBar({ label, score, weight }: { label: string; score: number; weight: string }) {
@@ -143,11 +178,288 @@ function PlacementRow({ label, ok }: { label: string; ok: boolean }) {
     return (
         <div className="flex items-center justify-between py-1">
             <span className="text-xs text-muted-foreground">{label}</span>
-            <span className={cn("text-xs font-bold", ok ? "text-emerald-500" : "text-red-500")}>
-                {ok ? "✓" : "✗"}
+            <span className={cn("inline-flex items-center justify-center h-4 w-4 rounded-full", ok ? "bg-emerald-100 text-emerald-600" : "bg-red-100 text-red-600")}>
+                {ok ? <Check className="h-3 w-3" strokeWidth={3} /> : <X className="h-3 w-3" strokeWidth={3} />}
             </span>
         </div>
     );
+}
+
+// ---------------------------------------------------------------------------
+// Word-level diff — small LCS-based implementation (no external dep).
+// Returns segments of `{ type: "equal" | "add" | "remove", text }` suitable
+// for inline rendering. Operates on tokens that include trailing whitespace
+// so the output reflows naturally.
+// ---------------------------------------------------------------------------
+
+type DiffSegment = { type: "equal" | "add" | "remove"; text: string };
+
+function tokenize(s: string): string[] {
+    // Splits text into words + whitespace runs, preserving order so we can
+    // rejoin without spacing artefacts.
+    return s.match(/\S+\s*|\s+/g) ?? [];
+}
+
+function diffWords(oldStr: string, newStr: string): DiffSegment[] {
+    const a = tokenize(oldStr);
+    const b = tokenize(newStr);
+    const m = a.length;
+    const n = b.length;
+
+    // Compute LCS lengths via DP. For long inputs we trim to a safe ceiling.
+    const MAX_TOKENS = 2000;
+    if (m > MAX_TOKENS || n > MAX_TOKENS) {
+        // Fall back to "remove all then add all" for huge diffs to avoid stalling the tab.
+        return [
+            { type: "remove", text: oldStr },
+            { type: "add", text: newStr },
+        ];
+    }
+
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+
+    const out: DiffSegment[] = [];
+    const push = (type: DiffSegment["type"], text: string) => {
+        const last = out[out.length - 1];
+        if (last && last.type === type) last.text += text;
+        else out.push({ type, text });
+    };
+
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+        if (a[i] === b[j]) { push("equal", a[i]); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { push("remove", a[i]); i++; }
+        else { push("add", b[j]); j++; }
+    }
+    while (i < m) { push("remove", a[i++]); }
+    while (j < n) { push("add", b[j++]); }
+    return out;
+}
+
+// Strip tags to plain text for body diffs — diffing raw HTML is too noisy.
+function htmlToPlain(html: string): string {
+    return html
+        .replace(/<\/(?:p|div|h[1-6]|li|tr|td|th|blockquote|section|article)>/gi, "$&\n")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[ \t]+/g, " ")
+        .trim();
+}
+
+function DiffView({ before, after }: { before: string; after: string }) {
+    const segments = diffWords(before, after);
+    if (segments.every(s => s.type === "equal")) {
+        return <p className="text-xs text-muted-foreground italic">No changes</p>;
+    }
+    return (
+        <div className="text-xs leading-relaxed whitespace-pre-wrap font-mono">
+            {segments.map((seg, i) => {
+                if (seg.type === "equal") return <span key={i} className="text-muted-foreground">{seg.text}</span>;
+                if (seg.type === "add") return <span key={i} className="bg-emerald-100 text-emerald-800 rounded px-0.5">{seg.text}</span>;
+                return <span key={i} className="bg-red-100 text-red-800 line-through rounded px-0.5">{seg.text}</span>;
+            })}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HTML diff — produces a single HTML string that preserves the block
+// structure (headings, paragraphs, lists) and wraps word-level changes in
+// <ins>/<del> tags. Rendered inside the RichEditor's prose canvas so the
+// diff looks visually identical to the actual editor.
+// ---------------------------------------------------------------------------
+
+function escapeHtml(s: string): string {
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+// Render diff segments back to HTML using <ins>/<del>/plain spans.
+function segmentsToHtml(segs: DiffSegment[]): string {
+    return segs.map(s => {
+        const txt = escapeHtml(s.text);
+        if (s.type === "add") return `<ins>${txt}</ins>`;
+        if (s.type === "remove") return `<del>${txt}</del>`;
+        return txt;
+    }).join("");
+}
+
+// Rich-token: a chunk of inline content that knows its plain text (for
+// diffing) and its HTML (for emitting). Inline marks like <strong>, <em>,
+// <a> are wrapped around the original text — so equal tokens emit the
+// fully-formatted HTML and only the changed words drop their marks.
+type RichToken = { text: string; html: string };
+
+const INLINE_TAGS = new Set(["STRONG", "B", "EM", "I", "U", "S", "CODE", "A", "MARK", "SPAN", "SUP", "SUB"]);
+
+// Build the opening/closing pair for an inline element while keeping its
+// safe attributes (href on <a>, etc.).
+function inlineWrappers(el: Element): { open: string; close: string } {
+    const tag = el.tagName.toLowerCase();
+    let attrs = "";
+    if (tag === "a") {
+        const href = el.getAttribute("href");
+        if (href) attrs += ` href="${escapeHtml(href)}"`;
+        const target = el.getAttribute("target");
+        if (target) attrs += ` target="${escapeHtml(target)}"`;
+        const rel = el.getAttribute("rel");
+        if (rel) attrs += ` rel="${escapeHtml(rel)}"`;
+    }
+    return { open: `<${tag}${attrs}>`, close: `</${tag}>` };
+}
+
+// Walk an element's children and emit rich tokens for inline content.
+function tokenizeBlock(el: Element): RichToken[] {
+    const tokens: RichToken[] = [];
+    const pushText = (text: string, wrap?: { open: string; close: string }) => {
+        const parts = text.match(/\S+\s*|\s+/g) ?? [];
+        for (const p of parts) {
+            const escaped = escapeHtml(p);
+            tokens.push({
+                text: p,
+                html: wrap ? `${wrap.open}${escaped}${wrap.close}` : escaped,
+            });
+        }
+    };
+    const walk = (node: Node, wrap?: { open: string; close: string }) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            pushText(node.textContent ?? "", wrap);
+            return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const e = node as Element;
+        if (INLINE_TAGS.has(e.tagName)) {
+            const w = inlineWrappers(e);
+            // Compose with parent wrapper if nested (e.g. <strong><em>).
+            const merged = wrap
+                ? { open: `${wrap.open}${w.open}`, close: `${w.close}${wrap.close}` }
+                : w;
+            for (const child of Array.from(e.childNodes)) walk(child, merged);
+        } else if (e.tagName === "BR") {
+            tokens.push({ text: " ", html: "<br>" });
+        } else {
+            // Unknown inline-ish container — recurse without wrapping.
+            for (const child of Array.from(e.childNodes)) walk(child, wrap);
+        }
+    };
+    for (const child of Array.from(el.childNodes)) walk(child);
+    return tokens;
+}
+
+// Block representation — text blocks now carry rich tokens to preserve
+// inline formatting; list items get their own token arrays per <li>.
+type Block =
+    | { kind: "text"; tag: string; tokens: RichToken[] }
+    | { kind: "list"; tag: "ul" | "ol"; items: RichToken[][] };
+
+function parseBlocks(html: string): Block[] {
+    if (typeof window === "undefined") return [];
+    const doc = new DOMParser().parseFromString(html || "<p></p>", "text/html");
+    const blocks: Block[] = [];
+    const textTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "P", "BLOCKQUOTE"]);
+    for (const child of Array.from(doc.body.children)) {
+        const tag = child.tagName;
+        if (textTags.has(tag)) {
+            blocks.push({ kind: "text", tag: tag.toLowerCase(), tokens: tokenizeBlock(child) });
+        } else if (tag === "UL" || tag === "OL") {
+            const items = Array.from(child.children)
+                .filter(c => c.tagName === "LI")
+                .map(li => tokenizeBlock(li));
+            blocks.push({ kind: "list", tag: tag.toLowerCase() as "ul" | "ol", items });
+        }
+    }
+    return blocks;
+}
+
+// Diff two rich-token sequences and emit HTML. Equal tokens emit their
+// original HTML (preserving bold/em/links). Changed tokens get wrapped in
+// <ins>/<del> using escaped plain text so the diff stays unambiguous.
+function diffRichTokens(a: RichToken[], b: RichToken[]): string {
+    const m = a.length;
+    const n = b.length;
+    const MAX_TOKENS = 2000;
+    if (m > MAX_TOKENS || n > MAX_TOKENS) {
+        const allDel = a.map(t => `<del>${escapeHtml(t.text)}</del>`).join("");
+        const allIns = b.map(t => t.html).join("");
+        return allDel + allIns;
+    }
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = a[i].text === b[j].text ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+    const parts: string[] = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+        if (a[i].text === b[j].text) { parts.push(b[j].html); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { parts.push(`<del>${escapeHtml(a[i].text)}</del>`); i++; }
+        else { parts.push(`<ins>${escapeHtml(b[j].text)}</ins>`); j++; }
+    }
+    while (i < m) { parts.push(`<del>${escapeHtml(a[i++].text)}</del>`); }
+    while (j < n) { parts.push(`<ins>${escapeHtml(b[j++].text)}</ins>`); }
+    return parts.join("");
+}
+
+// Build an HTML diff string. Walks parallel blocks; for lists, diffs each
+// <li> item under a shared <ul>/<ol> wrapper so indentation is preserved.
+function buildDiffHtml(beforeHtml: string, afterHtml: string): string {
+    const a = parseBlocks(beforeHtml);
+    const b = parseBlocks(afterHtml);
+    const max = Math.max(a.length, b.length);
+    const out: string[] = [];
+    const tokensToHtml = (tokens: RichToken[]) => tokens.map(t => t.html).join("");
+    const tokensToText = (tokens: RichToken[]) => tokens.map(t => escapeHtml(t.text)).join("");
+
+    for (let i = 0; i < max; i++) {
+        const A = a[i];
+        const B = b[i];
+        if (A && B && A.kind === "list" && B.kind === "list") {
+            const tag = B.tag;
+            const len = Math.max(A.items.length, B.items.length);
+            const lis: string[] = [];
+            for (let j = 0; j < len; j++) {
+                const ai = A.items[j];
+                const bi = B.items[j];
+                if (ai !== undefined && bi !== undefined) {
+                    lis.push(`<li>${diffRichTokens(ai, bi)}</li>`);
+                } else if (bi !== undefined) {
+                    lis.push(`<li><ins>${tokensToText(bi)}</ins></li>`);
+                } else if (ai !== undefined) {
+                    lis.push(`<li><del>${tokensToText(ai)}</del></li>`);
+                }
+            }
+            out.push(`<${tag}>${lis.join("")}</${tag}>`);
+        } else if (A && B && A.kind === "text" && B.kind === "text") {
+            out.push(`<${B.tag}>${diffRichTokens(A.tokens, B.tokens)}</${B.tag}>`);
+        } else if (B) {
+            if (B.kind === "list") {
+                const items = B.items.map(toks => `<li><ins>${tokensToText(toks)}</ins></li>`).join("");
+                out.push(`<${B.tag}>${items}</${B.tag}>`);
+            } else {
+                // Preserve inline formatting on entirely-new blocks too.
+                out.push(`<${B.tag}><ins>${tokensToHtml(B.tokens)}</ins></${B.tag}>`);
+            }
+        } else if (A) {
+            if (A.kind === "list") {
+                const items = A.items.map(toks => `<li><del>${tokensToText(toks)}</del></li>`).join("");
+                out.push(`<${A.tag}>${items}</${A.tag}>`);
+            } else {
+                out.push(`<${A.tag}><del>${tokensToText(A.tokens)}</del></${A.tag}>`);
+            }
+        }
+    }
+    return out.join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +486,43 @@ function SEOEditorContent() {
     const [isScoring, setIsScoring] = useState(false);
     const [tips, setTips] = useState<Tip[]>([]);
     const [isTipping, setIsTipping] = useState(false);
+    // Dismissed/applied tip hashes — persisted in draft so they don't reappear
+    // after a regenerate within the same draft session.
+    const [dismissedTips, setDismissedTips] = useState<Set<string>>(new Set());
+    // Per-tip apply tracking — disables the row's button + shows a loader.
+    const [applyingIndexes, setApplyingIndexes] = useState<Set<number>>(new Set());
+    // Cache: contentHash -> tips[]. Re-Generate without edits = instant return.
+    const tipsCacheRef = useRef<Map<string, Tip[]>>(new Map());
+    // Cache for /apply-tips responses keyed on (content + meta + tips signature)
+    // so discarding a preview and re-applying the same tip skips the LLM call.
+    const applyCacheRef = useRef<Map<string, {
+        html: string;
+        meta_title: string;
+        meta_description: string;
+        applied: number[];
+        skipped: { index: number; reason: string }[];
+        changes_summary: string;
+    }>>(new Map());
+    // Undo stack — snapshots of {content, metaTitle, metaDesc} after each apply.
+    const undoStackRef = useRef<Array<{ content: string; metaTitle: string; metaDesc: string }>>([]);
+    const [undoVersion, setUndoVersion] = useState(0); // bump to re-render the Undo button enabled/disabled state
+    // Last-generate timestamp — used to throttle Generate clicks.
+    const lastTipsGenRef = useRef<number>(0);
+    // Diff preview state — holds the proposed apply result until the user confirms.
+    const [diffPreview, setDiffPreview] = useState<{
+        beforeContent: string;
+        beforeMetaTitle: string;
+        beforeMetaDesc: string;
+        afterContent: string;
+        afterMetaTitle: string;
+        afterMetaDesc: string;
+        applied: number[];
+        skipped: { index: number; reason: string }[];
+        changesSummary: string;
+        selectedTips: Tip[];
+        indexes: number[];
+        oldScore: number;
+    } | null>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // Sidebar tabs
     const [sidebarTab, setSidebarTab] = useState<"score" | "tips">("score");
@@ -193,7 +542,7 @@ function SEOEditorContent() {
     // Load draft from saved ID if ?draft= param is present
     // Read prefill from sessionStorage (coming from Blog Generator or similar).
     // New callers pass a JSON object with { content, metaTitle, metaDesc,
-    // focusKeyword, relatedKeywords }. Legacy string callers still work —
+    // focusKeyword, relatedKeywords }. Legacy string callers still work �
     // we treat the raw string as HTML content.
     useEffect(() => {
         const raw = sessionStorage.getItem("seo_editor_prefill");
@@ -215,7 +564,7 @@ function SEOEditorContent() {
                 }
             }
         } catch {
-            // raw string (legacy) — fall through
+            // raw string (legacy) � fall through
         }
         setContent(html);
         setPlainText(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
@@ -226,14 +575,21 @@ function SEOEditorContent() {
         const draftId = searchParams.get("draft");
         if (!draftId) return;
         setIsLoadingDraft(true);
-        api.get<{ data: { content?: string; metaTitle?: string; metaDesc?: string; focusKeyword?: string; relatedKeywords?: string } }>(`/api/seo/saves/${draftId}`)
+        api.get<{ data: { content?: string; metaTitle?: string; metaDesc?: string; focusKeyword?: string; relatedKeywords?: string; scheduledAt?: string; platforms?: string[] } }>(`/api/seo/saves/${draftId}`)
             .then((res) => {
                 const d = res.data.data;
-                if (d.content) setContent(d.content);
+                if (d.content) {
+                    setContent(d.content);
+                    // Seed plainText so the AI Tips button and word-count gates see the
+                    // loaded content immediately (RichEditor's onChange fires later).
+                    setPlainText(d.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+                }
                 if (d.metaTitle) setMetaTitle(d.metaTitle);
                 if (d.metaDesc) setMetaDesc(d.metaDesc);
                 if (d.focusKeyword) setFocusKeyword(d.focusKeyword);
                 if (d.relatedKeywords) setRelatedKeywords(d.relatedKeywords);
+                if (d.scheduledAt) setScheduledDate(d.scheduledAt);
+                if (d.platforms?.length) setSelectedPlatforms(d.platforms);
                 setSaveId(draftId);
                 hasUserEditedRef.current = true; // allow autosave for loaded drafts
                 // Seed the snapshot so autosave treats the loaded state as "in sync"
@@ -290,7 +646,28 @@ function SEOEditorContent() {
         async (text: string, s: ScoreResponse) => {
             const wc = text.trim().split(/\s+/).length;
             if (wc < MIN_WORDS_FOR_TIPS) return;
+
+            // Cooldown — stops accidental double-clicks burning LLM credits.
+            const now = Date.now();
+            if (now - lastTipsGenRef.current < TIPS_GENERATE_COOLDOWN_MS) {
+                const left = Math.ceil((TIPS_GENERATE_COOLDOWN_MS - (now - lastTipsGenRef.current)) / 1000);
+                toast.info(`Please wait ${left}s before regenerating`);
+                return;
+            }
+
+            // Cache key — covers everything that influences the LLM response.
+            const cacheKey = hashInput([
+                content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords, s.overall,
+            ]);
+            const cached = tipsCacheRef.current.get(cacheKey);
+            if (cached) {
+                lastTipsGenRef.current = now;
+                setTips(cached.filter(t => !dismissedTips.has(hashTip(t))));
+                return;
+            }
+
             setIsTipping(true);
+            lastTipsGenRef.current = now;
             try {
                 const res = await api.post<{ tips: Tip[] }>("/api/seo/tips", {
                     html: content,
@@ -301,20 +678,36 @@ function SEOEditorContent() {
                     target_word_count: parseInt(targetWords) || 1500,
                     analysis: s,
                 });
-                setTips(res.data.tips ?? []);
+                const fresh = res.data.tips ?? [];
+                tipsCacheRef.current.set(cacheKey, fresh);
+                setTips(fresh.filter(t => !dismissedTips.has(hashTip(t))));
             } catch {
                 toast.error("Couldn't generate tips — please try again");
             } finally {
                 setIsTipping(false);
             }
         },
-        [content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords]
+        [content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords, dismissedTips]
     );
 
     const derivedText = plainText.trim() || content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const wordCount = derivedText ? derivedText.split(/\s+/).length : 0;
     const overallLabel = !score ? "-" : score.overall >= 70 ? "Good" : score.overall >= 45 ? "Fair" : "Weak";
     const [isSaving, setIsSaving] = useState(false);
+    const [publishOpen, setPublishOpen] = useState(false);
+    const [devtoOpen, setDevtoOpen] = useState(false);
+    const [scheduledDate, setScheduledDate] = useState("");
+    const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+    const [isPublishing, setIsPublishing] = useState(false);
+
+    // Fetch connected providers � used to populate the publish platform list dynamically.
+    // Only fetched when the publish dialog is open to avoid unnecessary requests.
+    const { data: providers = [] } = useQuery<{ platform: string; configured: boolean; connected: boolean; page_name: string | null }[]>({
+        queryKey: ["social-providers"],
+        queryFn: async () => (await api.get("/api/social/providers")).data,
+        staleTime: 60 * 1000,
+        enabled: publishOpen,
+    });
     const [saveId, setSaveId] = useState<string | null>(null);
     const [isApplying, setIsApplying] = useState(false);
     const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>("idle");
@@ -324,14 +717,14 @@ function SEOEditorContent() {
     // Holds the in-flight POST when we auto-create a draft on first edit.
     // Acts as a mutex so concurrent callers share one create call.
     const autoCreateInFlightRef = useRef<Promise<string> | null>(null);
-    // Serialised snapshot of the last state that reached the server — used by
+    // Serialised snapshot of the last state that reached the server � used by
     // autosave to skip no-op saves when nothing actually changed.
     const lastSavedSnapshotRef = useRef<string>("");
     const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const buildSnapshot = useCallback(
-        () => JSON.stringify({ content, metaTitle, metaDesc, focusKeyword, relatedKeywords }),
-        [content, metaTitle, metaDesc, focusKeyword, relatedKeywords],
+        () => JSON.stringify({ content, metaTitle, metaDesc, focusKeyword, relatedKeywords, scheduledDate }),
+        [content, metaTitle, metaDesc, focusKeyword, relatedKeywords, scheduledDate],
     );
 
     const ensureSaveId = useCallback(async (): Promise<string | null> => {
@@ -339,7 +732,7 @@ function SEOEditorContent() {
         if (autoCreateInFlightRef.current) return autoCreateInFlightRef.current;
 
         const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
-        const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null };
+        const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null, scheduledAt: scheduledDate || null };
 
         const snapshot = buildSnapshot();
         const p = api
@@ -370,7 +763,7 @@ function SEOEditorContent() {
             setAutoSaveStatus("saving");
             try {
                 const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
-                const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null };
+                const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null, scheduledAt: scheduledDate || null };
                 await api.put(`/api/seo/saves/${saveId}`, { type: "draft", title, data });
                 lastSavedSnapshotRef.current = snapshot;
                 setAutoSaveStatus("saved");
@@ -382,7 +775,7 @@ function SEOEditorContent() {
         return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
     }, [saveId, isApplying, content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score, buildSnapshot]);
 
-    // Score + auto-create: debounce 400ms — fires on any content or meta change
+    // Score + auto-create: debounce 400ms � fires on any content or meta change
     useEffect(() => {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
@@ -395,10 +788,129 @@ function SEOEditorContent() {
         return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
     }, [content, focusKeyword, metaTitle, metaDesc, relatedKeywords, targetWords, runScore, saveId, ensureSaveId]);
 
-    const runApplyTips = useCallback(async () => {
-        if (!tips.length || !score || !content.trim()) return;
-        setIsApplying(true);
-        const snapshot = { content, metaTitle, metaDesc };
+    // Push a snapshot onto the undo stack, capping at UNDO_STACK_LIMIT.
+    const pushUndo = useCallback((snap: { content: string; metaTitle: string; metaDesc: string }) => {
+        const stack = undoStackRef.current;
+        stack.push(snap);
+        if (stack.length > UNDO_STACK_LIMIT) stack.shift();
+        setUndoVersion(v => v + 1);
+    }, []);
+
+    const popUndo = useCallback(() => {
+        const stack = undoStackRef.current;
+        const snap = stack.pop();
+        if (!snap) return;
+        setContent(snap.content);
+        setMetaTitle(snap.metaTitle);
+        setMetaDesc(snap.metaDesc);
+        setUndoVersion(v => v + 1);
+        toast.success("Reverted last change");
+    }, []);
+
+    // Count words from HTML (used for safety guard on apply output).
+    const countHtmlWords = useCallback((html: string) => {
+        const txt = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        return txt ? txt.split(/\s+/).length : 0;
+    }, []);
+
+    // Phase 1: fetch the rewrite, run safety guards, and open the diff preview
+    // modal. Does NOT touch editor state — that happens in commitApply().
+    // When `forceRefresh` is true, the cache is bypassed and a new LLM call
+    // is made — used by the Regenerate button in the diff preview.
+    const applyTipSubset = useCallback(async (selectedTips: Tip[], indexes: number[], forceRefresh = false) => {
+        if (!score || !content.trim() || selectedTips.length === 0) return;
+        setApplyingIndexes(prev => {
+            const next = new Set(prev);
+            indexes.forEach(i => next.add(i));
+            return next;
+        });
+        if (indexes.length === tips.length) setIsApplying(true);
+
+        const oldWordCount = countHtmlWords(content);
+        const oldScore = score.overall;
+
+        // Cache key — covers everything the /apply-tips endpoint sees.
+        // Tips are hashed by their (category, tip) identity, order-sensitive.
+        const tipsSignature = selectedTips.map(t => hashTip(t)).join(",");
+        // v3: bumped after backend added FACTS-block (length-check) prompting
+        // so cached no-op responses from the old prompt are evicted.
+        const applyCacheKey = hashInput([
+            "v3", content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords, tipsSignature,
+        ]);
+        // On force-refresh, drop the cached entry so the next branch falls
+        // through to the LLM call and a fresh result is stored.
+        if (forceRefresh) applyCacheRef.current.delete(applyCacheKey);
+
+        const openPreview = (d: {
+            html: string;
+            meta_title: string;
+            meta_description: string;
+            applied: number[];
+            skipped: { index: number; reason: string }[];
+            changes_summary: string;
+        }) => {
+            // Safety guard — protect against accidental content destruction.
+            const newWordCount = countHtmlWords(d.html);
+            if (oldWordCount > 0 && newWordCount < oldWordCount * APPLY_MIN_WORDS_RATIO) {
+                toast.error(`Apply rejected — output (${newWordCount} words) too short vs original (${oldWordCount}). Try again or apply tips one at a time.`);
+                return;
+            }
+            const oldH1 = (content.match(/<h1\b/gi) ?? []).length;
+            const newH1 = (d.html.match(/<h1\b/gi) ?? []).length;
+            if (oldH1 > 0 && newH1 === 0) {
+                toast.error("Apply rejected — output is missing the H1 heading. Try again.");
+                return;
+            }
+
+            // No-op detector: if the LLM returned everything unchanged, skip
+            // the diff preview and surface a clear message instead of opening
+            // an empty diff (confusing UX). This also catches the case where
+            // the model said "already within limits" and made no edits.
+            const unchanged =
+                d.html === content &&
+                d.meta_title === metaTitle &&
+                d.meta_description === metaDesc;
+            if (unchanged) {
+                if (d.skipped.length > 0) {
+                    const sample = d.skipped[0];
+                    toast.message("No changes applied", {
+                        description: sample.reason || "The AI didn't propose any edits for the selected tip(s).",
+                    });
+                } else {
+                    toast.info("AI returned no changes — try a different tip or regenerate.");
+                }
+                return;
+            }
+
+            setDiffPreview({
+                beforeContent: content,
+                beforeMetaTitle: metaTitle,
+                beforeMetaDesc: metaDesc,
+                afterContent: d.html,
+                afterMetaTitle: d.meta_title,
+                afterMetaDesc: d.meta_description,
+                applied: d.applied,
+                skipped: d.skipped,
+                changesSummary: d.changes_summary,
+                selectedTips,
+                indexes,
+                oldScore,
+            });
+        };
+
+        // Cache hit → skip LLM call entirely (no token cost, instant preview).
+        const cached = applyCacheRef.current.get(applyCacheKey);
+        if (cached) {
+            openPreview(cached);
+            setApplyingIndexes(prev => {
+                const next = new Set(prev);
+                indexes.forEach(i => next.delete(i));
+                return next;
+            });
+            setIsApplying(false);
+            return;
+        }
+
         try {
             const res = await api.post<{
                 html: string;
@@ -414,44 +926,119 @@ function SEOEditorContent() {
                 primary_keyword: focusKeyword,
                 related_keywords: relatedKeywords,
                 target_word_count: parseInt(targetWords) || 1500,
-                tips,
+                tips: selectedTips,
                 analysis: score,
             });
-            const d = res.data;
-            setContent(d.html);
-            setMetaTitle(d.meta_title);
-            setMetaDesc(d.meta_description);
-            setTips([]);
-            toast.success(
-                `Applied ${d.applied.length} of ${tips.length} tips${d.skipped.length ? ` — ${d.skipped.length} skipped` : ""}`,
-                {
-                    description: d.changes_summary || undefined,
-                    action: {
-                        label: "Undo",
-                        onClick: () => {
-                            setContent(snapshot.content);
-                            setMetaTitle(snapshot.metaTitle);
-                            setMetaDesc(snapshot.metaDesc);
-                        },
-                    },
-                }
-            );
+            applyCacheRef.current.set(applyCacheKey, res.data);
+            openPreview(res.data);
         } catch {
             toast.error("Couldn't apply tips — please try again");
         } finally {
+            setApplyingIndexes(prev => {
+                const next = new Set(prev);
+                indexes.forEach(i => next.delete(i));
+                return next;
+            });
             setIsApplying(false);
         }
-    }, [tips, score, content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords]);
+    }, [tips, score, content, metaTitle, metaDesc, focusKeyword, relatedKeywords, targetWords, countHtmlWords]);
+
+    // Phase 2: user confirmed the preview — commit the rewrite to the editor.
+    const commitApply = useCallback(() => {
+        const p = diffPreview;
+        if (!p) return;
+        const snapshot = { content: p.beforeContent, metaTitle: p.beforeMetaTitle, metaDesc: p.beforeMetaDesc };
+
+        pushUndo(snapshot);
+        setContent(p.afterContent);
+        setMetaTitle(p.afterMetaTitle);
+        setMetaDesc(p.afterMetaDesc);
+
+        // Drop tips that the server marked applied.
+        const selectedApplied = p.applied.map(i => p.selectedTips[i]).filter(Boolean);
+        if (selectedApplied.length) {
+            setTips(prev => prev.filter(t => !selectedApplied.some(s => s.tip === t.tip && s.category === t.category)));
+        }
+
+        // Re-score immediately for the visual reward.
+        const updatedScore = analyzeContent(
+            p.afterContent,
+            focusKeyword,
+            p.afterMetaTitle,
+            p.afterMetaDesc,
+            relatedKeywords,
+            parseInt(targetWords) || 1500,
+        );
+        setScore(updatedScore);
+        const delta = updatedScore.overall - p.oldScore;
+
+        const deltaText = delta > 0 ? ` (+${delta} score)` : delta < 0 ? ` (${delta} score)` : "";
+        toast.success(
+            `Applied ${p.applied.length} of ${p.selectedTips.length} tip${p.selectedTips.length > 1 ? "s" : ""}${deltaText}`,
+            {
+                description: p.changesSummary || undefined,
+                action: {
+                    label: "Undo",
+                    onClick: () => {
+                        setContent(snapshot.content);
+                        setMetaTitle(snapshot.metaTitle);
+                        setMetaDesc(snapshot.metaDesc);
+                    },
+                },
+            }
+        );
+        if (p.skipped.length) {
+            const sample = p.skipped[0];
+            toast.message(`${p.skipped.length} tip${p.skipped.length > 1 ? "s" : ""} skipped`, {
+                description: sample.reason || "Some tips needed external data.",
+            });
+        }
+        setDiffPreview(null);
+    }, [diffPreview, focusKeyword, relatedKeywords, targetWords, pushUndo]);
+
+    // Re-run the LLM with the same selected tips, bypassing the cache.
+    // Used by the Regenerate button in the diff preview to fetch a fresh
+    // proposed rewrite when the user doesn't like the current one.
+    const regenerateApply = useCallback(async () => {
+        const p = diffPreview;
+        if (!p) return;
+        const { selectedTips, indexes } = p;
+        setDiffPreview(null); // close preview while regenerating
+        await applyTipSubset(selectedTips, indexes, true);
+    }, [diffPreview, applyTipSubset]);
+
+    const runApplyTips = useCallback(async () => {
+        if (!tips.length) return;
+        await applyTipSubset(tips, tips.map((_, i) => i));
+    }, [tips, applyTipSubset]);
+
+    const applySingleTip = useCallback(async (idx: number) => {
+        const t = tips[idx];
+        if (!t) return;
+        await applyTipSubset([t], [idx]);
+    }, [tips, applyTipSubset]);
+
+    const dismissTip = useCallback((idx: number) => {
+        const t = tips[idx];
+        if (!t) return;
+        const h = hashTip(t);
+        setDismissedTips(prev => {
+            const next = new Set(prev);
+            next.add(h);
+            return next;
+        });
+        setTips(prev => prev.filter((_, i) => i !== idx));
+    }, [tips]);
 
     const saveDraft = useCallback(async () => {
-        if (!content.trim()) { toast.error("Nothing to save — editor is empty"); return; }
+        if (!content.trim()) { toast.error("Nothing to save � editor is empty"); return; }
         if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
         setIsSaving(true);
         try {
             const id = await ensureSaveId();
             if (!id) { toast.error("Failed to save draft"); return; }
             const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
-            const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null };
+            const data = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null, scheduledAt: scheduledDate || null };
             const snapshot = buildSnapshot();
             await api.put(`/api/seo/saves/${id}`, { type: "draft", title, data });
             lastSavedSnapshotRef.current = snapshot;
@@ -504,6 +1091,7 @@ function SEOEditorContent() {
     }
 
     return (
+        <>
         <div className="flex flex-col h-[calc(100vh-6rem)] overflow-hidden">
             {/* Breadcrumb */}
             <div className="flex items-center gap-1.5 text-sm text-muted-foreground mb-3 shrink-0">
@@ -520,9 +1108,9 @@ function SEOEditorContent() {
 
             <div className="flex flex-1 min-h-0 overflow-hidden">
 
-            {/* â”€â”€ LEFT: Editor panel â”€â”€ */}
+            {/* ── LEFT: Editor panel ── */}
             <div className="flex flex-1 flex-col min-w-0 pr-6 gap-4">
-                {/* Header row — this is actually the scores ring, editor header is in the left panel */}
+                {/* Header row � this is actually the scores ring, editor header is in the left panel */}
                 <div className="flex items-start justify-between gap-4">
                     <div className="flex items-start gap-3">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-emerald-500/10 border-emerald-500/20">
@@ -549,75 +1137,211 @@ function SEOEditorContent() {
                         >
                             {isSaving ? "Saving..." : "Save Draft"}
                         </button>
+                        <button
+                            onClick={() => {
+                                if (!content.trim()) { toast.error("Editor is empty"); return; }
+                                setPublishOpen(true);
+                            }}
+                            disabled={!content.trim()}
+                            className={cn(
+                                "rounded-md px-4 py-2 text-xs font-semibold transition-colors flex items-center gap-1.5",
+                                !content.trim()
+                                    ? "bg-muted text-muted-foreground cursor-not-allowed"
+                                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                            )}
+                        >
+                            <Send className="h-3.5 w-3.5" />
+                            Publish
+                        </button>
                     </div>
                 </div>
 
-                {/* Rich editor fills remaining height */}
+                {/* Rich editor fills remaining height. While diff preview is
+                    active we show a styled clone of the TipTap canvas that
+                    renders the diff HTML (with <ins>/<del> for changes) so it
+                    looks identical to the real editor.   */}
                 <div className="relative flex-1 min-h-0 flex flex-col">
-                    <RichEditor
-                        value={content}
-                        onChange={(html, text) => {
-                            hasUserEditedRef.current = true;
-                            setContent(html);
-                            setPlainText(text);
-                        }}
-                        placeholder="Paste your blog post, article, or any content here..."
-                        minHeight="100%"
-                        className="flex-1 h-full"
-                        meta={{
-                            title: metaTitle,
-                            description: metaDesc,
-                            focusKeyword: focusKeyword,
-                            relatedKeywords: relatedKeywords
-                        }}
-                        onMetaChange={(m) => {
-                            hasUserEditedRef.current = true;
-                            setMetaTitle(m.title);
-                            setMetaDesc(m.description);
-                            if (m.focusKeyword !== undefined) setFocusKeyword(m.focusKeyword);
-                            if (m.relatedKeywords !== undefined) setRelatedKeywords(m.relatedKeywords);
-                        }}
-                    />
-                    {isScoring && (
-                        <div className="absolute bottom-3 right-3 pointer-events-none">
-                            <span className="text-xs text-muted-foreground animate-pulse">Scoring...</span>
-                        </div>
-                    )}
+                    {diffPreview && (() => {
+                        const p = diffPreview;
+                        const projectedScore = analyzeContent(
+                            p.afterContent, focusKeyword, p.afterMetaTitle, p.afterMetaDesc, relatedKeywords,
+                            parseInt(targetWords) || 1500,
+                        );
+                        const delta = projectedScore.overall - p.oldScore;
+                        const diffHtml = buildDiffHtml(p.beforeContent, p.afterContent);
+                        return (
+                            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                                {/* Floating action bar — like VS Code Copilot's "Keep" toolbar */}
+                                <div className="shrink-0 flex items-center justify-between gap-3 border-b border-emerald-200 bg-linear-to-r from-emerald-50 via-emerald-50/50 to-transparent px-4 py-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <Sparkles className="h-4 w-4 text-emerald-600 shrink-0" />
+                                        <div className="min-w-0">
+                                            <p className="text-xs font-semibold text-foreground">AI suggested changes</p>
+                                            <p className="text-[11px] text-muted-foreground truncate">
+                                                {p.changesSummary || `${p.applied.length} change${p.applied.length > 1 ? "s" : ""} — review then keep or discard`}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-semibold">
+                                            <Check className="h-3 w-3" /> {p.applied.length}
+                                        </span>
+                                        {p.skipped.length > 0 && (
+                                            <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-semibold">
+                                                <AlertCircle className="h-3 w-3" /> {p.skipped.length}
+                                            </span>
+                                        )}
+                                        <span className={cn(
+                                            "hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold",
+                                            delta > 0 ? "bg-emerald-100 text-emerald-700" :
+                                            delta < 0 ? "bg-red-100 text-red-700" :
+                                            "bg-muted text-muted-foreground"
+                                        )}>
+                                            {p.oldScore} → {projectedScore.overall}
+                                            {delta !== 0 && <span>({delta > 0 ? "+" : ""}{delta})</span>}
+                                        </span>
+                                        <button
+                                            onClick={() => setDiffPreview(null)}
+                                            className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold hover:bg-muted/50 transition-colors"
+                                        >
+                                            <X className="h-3.5 w-3.5" /> Discard
+                                        </button>
+                                        <button
+                                            onClick={regenerateApply}
+                                            disabled={isApplying || applyingIndexes.size > 0}
+                                            title="Discard this proposal and ask the AI again"
+                                            className="inline-flex items-center gap-1 rounded-md border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-700 px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <RotateCw className="h-3.5 w-3.5" /> Regenerate
+                                        </button>
+                                        <button
+                                            onClick={commitApply}
+                                            className="inline-flex items-center gap-1 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white px-2.5 py-1 text-xs font-semibold transition-colors"
+                                        >
+                                            <Check className="h-3.5 w-3.5" /> Keep Changes
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Clone of TipTap A4 canvas — same prose styles via rich-editor-content/ProseMirror */}
+                                <div className="rich-editor-content flex-1 overflow-y-auto min-h-0 bg-muted/30">
+                                    <div className="mx-auto bg-background shadow-sm" style={{ width: "210mm", minHeight: "297mm" }}>
+                                        {/* Meta-fields diff (when changed) */}
+                                        {(p.beforeMetaTitle !== p.afterMetaTitle || p.beforeMetaDesc !== p.afterMetaDesc) && (
+                                            <div className="border-b" style={{ padding: "8mm 25mm" }}>
+                                                {p.beforeMetaTitle !== p.afterMetaTitle && (
+                                                    <div className="mb-3">
+                                                        <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground/70 mb-1">SEO Title</p>
+                                                        <p className="text-sm leading-snug" dangerouslySetInnerHTML={{ __html: segmentsToHtml(diffWords(p.beforeMetaTitle, p.afterMetaTitle)) }} />
+                                                    </div>
+                                                )}
+                                                {p.beforeMetaDesc !== p.afterMetaDesc && (
+                                                    <div>
+                                                        <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground/70 mb-1">Meta Description</p>
+                                                        <p className="text-sm leading-snug" dangerouslySetInnerHTML={{ __html: segmentsToHtml(diffWords(p.beforeMetaDesc, p.afterMetaDesc)) }} />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {/* Body diff — rendered inside the same ProseMirror selector so prose styling matches */}
+                                        <div className="ProseMirror" dangerouslySetInnerHTML={{ __html: diffHtml }} />
+                                    </div>
+                                </div>
+
+                                {/* Skipped tips footer (only when there are any) */}
+                                {p.skipped.length > 0 && (
+                                    <div className="shrink-0 border-t border-amber-200 bg-amber-50 px-4 py-2">
+                                        <p className="text-[10px] uppercase tracking-widest font-semibold text-amber-700 mb-0.5">
+                                            {p.skipped.length} tip{p.skipped.length > 1 ? "s" : ""} skipped
+                                        </p>
+                                        <ul className="space-y-0.5">
+                                            {p.skipped.slice(0, 2).map((s, i) => (
+                                                <li key={i} className="text-xs text-amber-800">
+                                                    <span className="font-semibold">#{s.index + 1}:</span> {s.reason || "No reason given"}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })()}
+
+                    {/* Real editor — stays mounted but hidden behind the diff overlay so state isn't lost */}
+                    <div className={cn("flex-1 min-h-0 flex flex-col", diffPreview && "hidden")}>
+                        <RichEditor
+                            value={content}
+                            onChange={(html, text) => {
+                                hasUserEditedRef.current = true;
+                                setContent(html);
+                                setPlainText(text);
+                            }}
+                            placeholder="Paste your blog post, article, or any content here..."
+                            minHeight="100%"
+                            className="flex-1 h-full"
+                            meta={{
+                                title: metaTitle,
+                                description: metaDesc,
+                                focusKeyword: focusKeyword,
+                                relatedKeywords: relatedKeywords
+                            }}
+                            onMetaChange={(m) => {
+                                hasUserEditedRef.current = true;
+                                setMetaTitle(m.title);
+                                setMetaDesc(m.description);
+                                if (m.focusKeyword !== undefined) setFocusKeyword(m.focusKeyword);
+                                if (m.relatedKeywords !== undefined) setRelatedKeywords(m.relatedKeywords);
+                            }}
+                        />
+                        {isScoring && (
+                            <div className="absolute bottom-3 right-3 pointer-events-none">
+                                <span className="text-xs text-muted-foreground animate-pulse">Scoring...</span>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 
-            {/* â”€â”€ RIGHT: Sidebar â”€â”€ */}
+            {/* ── RIGHT: Sidebar ── */}
             <div className="w-96 shrink-0 flex flex-col gap-0 border-l bg-card ">
 
                 {/* Tab bar */}
                 <div className="flex border-b shrink-0 sticky top-0 bg-card z-10">
-                    {(["score", "tips"] as const).map((tab) => (
-                        <button
-                            key={tab}
-                            onClick={() => setSidebarTab(tab)}
-                            className={cn(
-                                "flex-1 py-3 text-xs font-semibold uppercase tracking-widest border-b-2 transition-all",
-                                sidebarTab === tab
-                                    ? "border-foreground text-foreground"
-                                    : "border-transparent text-muted-foreground hover:text-foreground"
-                            )}
-                        >
-                            {tab === "score" ? "Score" : "AI Tips"}
-                        </button>
-                    ))}
+                    {(["score", "tips"] as const).map((tab) => {
+                        const highCount = tab === "tips" ? tips.filter(t => t.priority === "high").length : 0;
+                        return (
+                            <button
+                                key={tab}
+                                onClick={() => setSidebarTab(tab)}
+                                className={cn(
+                                    "flex-1 py-3 text-xs font-semibold uppercase tracking-widest border-b-2 transition-all flex items-center justify-center gap-1.5",
+                                    sidebarTab === tab
+                                        ? "border-foreground text-foreground"
+                                        : "border-transparent text-muted-foreground hover:text-foreground"
+                                )}
+                            >
+                                <span>{tab === "score" ? "Score" : "AI Tips"}</span>
+                                {tab === "tips" && highCount > 0 && (
+                                    <span className="inline-flex items-center justify-center min-w-4.5 h-4.5 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold">
+                                        {highCount}
+                                    </span>
+                                )}
+                            </button>
+                        );
+                    })}
                 </div>
 
-                {/* â”€â”€ AI TIPS TAB â”€â”€ */}
+                {/* ── AI TIPS TAB ── */}
                 {sidebarTab === "tips" && (
                     <div className="flex flex-col overflow-y-auto flex-1">
-                        {/* Generate button */}
-                        <div className="px-5 pt-5 pb-3 border-b">
+                        {/* Generate button + Undo */}
+                        <div className="px-5 pt-5 pb-3 border-b space-y-2">
                             <button
                                 type="button"
                                 disabled={isTipping || wordCount < MIN_WORDS_FOR_TIPS}
-                                onClick={() => score && runTips(plainText, score)}
+                                onClick={() => score && runTips(derivedText, score)}
                                 className={cn(
-                                    "w-full rounded-md px-4 py-2.5 text-xs font-semibold uppercase tracking-widest transition-all",
+                                    "w-full rounded-md px-4 py-2.5 text-xs font-semibold uppercase tracking-widest transition-all inline-flex items-center justify-center gap-1.5",
                                     isTipping
                                         ? "bg-muted text-muted-foreground cursor-not-allowed"
                                         : wordCount < MIN_WORDS_FOR_TIPS
@@ -625,11 +1349,30 @@ function SEOEditorContent() {
                                             : "bg-foreground text-background hover:opacity-90 active:scale-[0.98]"
                                 )}
                             >
-                                {isTipping ? "Analysing..." : wordCount < MIN_WORDS_FOR_TIPS ? `${MIN_WORDS_FOR_TIPS - wordCount} more words needed` : "Generate AI Tips"}
+                                {isTipping ? (
+                                    <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Analysing...</>
+                                ) : wordCount < MIN_WORDS_FOR_TIPS ? (
+                                    `${MIN_WORDS_FOR_TIPS - wordCount} more words needed`
+                                ) : (
+                                    <><Sparkles className="h-3.5 w-3.5" /> Generate AI Tips</>
+                                )}
                             </button>
-                            {score && wordCount >= 100 && tips.length > 0 && (
-                                <p className="text-[10px] text-muted-foreground text-center mt-1.5">Click to regenerate with latest content</p>
+                            {undoStackRef.current.length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={popUndo}
+                                    className="w-full rounded-md px-4 py-1.5 text-xs font-semibold border hover:bg-muted/50 inline-flex items-center justify-center gap-1.5"
+                                    title={`${undoStackRef.current.length} change${undoStackRef.current.length > 1 ? "s" : ""} can be undone`}
+                                >
+                                    <Undo2 className="h-3 w-3" />
+                                    Undo last apply ({undoStackRef.current.length})
+                                </button>
                             )}
+                            {score && wordCount >= 100 && tips.length > 0 && (
+                                <p className="text-[10px] text-muted-foreground text-center">Click to regenerate with latest content</p>
+                            )}
+                            {/* Undo version is part of deps so the button re-renders. */}
+                            <span className="hidden" data-undo-version={undoVersion} />
                         </div>
 
                         <div className="px-5 py-4">
@@ -641,7 +1384,7 @@ function SEOEditorContent() {
                                 <p className="text-xs text-muted-foreground">
                                     {wordCount < MIN_WORDS_FOR_TIPS
                                         ? `Write ${MIN_WORDS_FOR_TIPS - wordCount} more words to unlock AI tips.`
-                                        : "Click \u2728 Generate AI Tips above to analyse your content."}
+                                        : "Click ✨ Generate AI Tips above to analyse your content."}
                                 </p>
                             )}
 
@@ -649,32 +1392,62 @@ function SEOEditorContent() {
                                 <>
                                     <button
                                         type="button"
-                                        disabled={isApplying}
+                                        disabled={isApplying || applyingIndexes.size > 0}
                                         onClick={runApplyTips}
                                         className={cn(
-                                            "mb-3 w-full rounded-md px-4 py-2.5 text-xs font-semibold uppercase tracking-widest transition-all",
-                                            isApplying
+                                            "mb-3 w-full rounded-md px-4 py-2.5 text-xs font-semibold uppercase tracking-widest transition-all inline-flex items-center justify-center gap-1.5",
+                                            isApplying || applyingIndexes.size > 0
                                                 ? "bg-muted text-muted-foreground cursor-not-allowed"
                                                 : "bg-emerald-500 text-white hover:bg-emerald-600 active:scale-[0.98]"
                                         )}
                                     >
-                                        {isApplying ? "Applying tips..." : `Apply all ${tips.length} tips`}
+                                        {isApplying ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Applying tips...</> : `Apply all ${tips.length} tips`}
                                     </button>
                                     <ul className="space-y-2">
-                                        {tips.map((tip, i) => (
-                                            <li
-                                                key={i}
-                                                className={cn(
-                                                    "rounded-md border-l-2 px-3 py-2 text-xs leading-relaxed",
-                                                    PRIORITY_STYLE[tip.priority] ?? "border-l-muted bg-muted/10"
-                                                )}
-                                            >
-                                                <span className={cn("font-semibold block mb-0.5", PRIORITY_LABEL[tip.priority])}>
-                                                    {tip.category} · {tip.priority}
-                                                </span>
-                                                {tip.tip}
-                                            </li>
-                                        ))}
+                                        {tips.map((tip, i) => {
+                                            const busy = applyingIndexes.has(i);
+                                            return (
+                                                <li
+                                                    key={i}
+                                                    className={cn(
+                                                        "rounded-md border-l-2 px-3 py-2 text-xs leading-relaxed",
+                                                        PRIORITY_STYLE[tip.priority] ?? "border-l-muted bg-muted/10"
+                                                    )}
+                                                >
+                                                    <div className="flex items-center justify-between gap-2 mb-1">
+                                                        <span className={cn("font-semibold", PRIORITY_LABEL[tip.priority])}>
+                                                            {tip.category} • {tip.priority}
+                                                        </span>
+                                                        <div className="flex items-center gap-1">
+                                                            <button
+                                                                type="button"
+                                                                disabled={busy || isApplying}
+                                                                onClick={() => applySingleTip(i)}
+                                                                title="Apply this tip"
+                                                                className={cn(
+                                                                    "inline-flex items-center justify-center h-6 px-2 rounded text-[10px] font-semibold uppercase",
+                                                                    busy
+                                                                        ? "bg-muted text-muted-foreground cursor-not-allowed"
+                                                                        : "bg-emerald-500 text-white hover:bg-emerald-600"
+                                                                )}
+                                                            >
+                                                                {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : "Apply"}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                disabled={busy}
+                                                                onClick={() => dismissTip(i)}
+                                                                title="Dismiss"
+                                                                className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                                                            >
+                                                                <X className="h-3 w-3" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-foreground/90">{tip.tip}</p>
+                                                </li>
+                                            );
+                                        })}
                                     </ul>
                                 </>
                             )}
@@ -682,7 +1455,7 @@ function SEOEditorContent() {
                     </div>
                 )}
 
-                {/* â”€â”€ SCORE TAB â”€â”€ */}
+                {/* ── SCORE TAB ── */}
                 {sidebarTab === "score" && <div className="flex flex-col overflow-y-auto flex-1">
                     {/* Overall score ring */}
                     <div className="flex flex-col items-center gap-3 px-6 pt-8 pb-6 border-b">
@@ -799,13 +1572,13 @@ function SEOEditorContent() {
                             <ul className="space-y-1.5">
                                 {score.structure.issues.map((issue, i) => (
                                     <li key={i} className="flex items-start gap-1.5 text-xs text-amber-500">
-                                        <span className="shrink-0 mt-0.5">⚠</span>{issue}
+                                        <AlertCircle className="h-3 w-3 shrink-0 mt-0.5" />{issue}
                                     </li>
                                 ))}
                             </ul>
                         )}
                         {score && score.structure.issues.length === 0 && (
-                            <p className="text-xs text-emerald-500">✓ Structure looks good</p>
+                            <p className="text-xs text-emerald-500 inline-flex items-center gap-1.5"><Check className="h-3 w-3" /> Structure looks good</p>
                         )}
                     </div>
 
@@ -854,6 +1627,203 @@ function SEOEditorContent() {
             </div>
             </div>{/* end flex wrapper */}
         </div>
+
+        {/* -- Publish dialogs -- */}
+        <Dialog open={publishOpen} onOpenChange={(o) => { setPublishOpen(o); if (!o) setSelectedPlatforms([]); }}>
+            <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+                <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2">
+                        <Send className="h-4 w-4" /> Publish Blog
+                    </DialogTitle>
+                    <DialogDescription>
+                        Choose platforms, repurpose options, then publish or schedule.
+                    </DialogDescription>
+                </DialogHeader>
+
+                <div className="space-y-5 py-1">
+
+                    {/* -- Section 1: Platform selection --
+                        BLOG_PLATFORMS defines which providers support blog/article publishing.
+                        Adding a new platform here + to the backend providers list is all that's needed. */}
+                    {(() => {
+                        // Blog-capable platforms � add new ones here as they're implemented
+                        const BLOG_PLATFORMS: Record<string, { label: string; icon: React.ReactNode; bg: string }> = {
+                            devto:    { label: "Dev.to",   icon: <Code2 className="h-4 w-4" />,    bg: "bg-[#0A0A0A]" },
+                            linkedin: { label: "LinkedIn", icon: <Linkedin className="h-4 w-4" />, bg: "bg-[#0A66C2]" },
+                            // Future: medium, hashnode, wordpress � add here and they appear automatically
+                        };
+                        const blogProviders = providers.filter(p => BLOG_PLATFORMS[p.platform]);
+                        return (
+                            <div className="space-y-2">
+                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                    1 � Select Platforms
+                                </p>
+                                {blogProviders.length === 0 ? (
+                                    <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                                        <AlertCircle className="h-4 w-4 shrink-0" />
+                                        No blog platforms connected yet.
+                                        <button
+                                            className="underline hover:text-foreground ml-auto shrink-0"
+                                            onClick={() => { setPublishOpen(false); window.location.href = "/settings"; }}
+                                        >
+                                            Connect in Settings
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {blogProviders.map(p => {
+                                            const cfg = BLOG_PLATFORMS[p.platform]!;
+                                            const selected = selectedPlatforms.includes(p.platform);
+                                            return (
+                                                <button
+                                                    key={p.platform}
+                                                    onClick={() => setSelectedPlatforms(prev =>
+                                                        prev.includes(p.platform) ? prev.filter(x => x !== p.platform) : [...prev, p.platform]
+                                                    )}
+                                                    className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
+                                                        selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted/50"
+                                                    }`}
+                                                >
+                                                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white ${cfg.bg}`}>
+                                                        {cfg.icon}
+                                                    </span>
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="font-medium">{cfg.label}</p>
+                                                        {p.page_name && <p className="text-[11px] text-muted-foreground truncate">{p.page_name}</p>}
+                                                    </div>
+                                                    {selected ? (
+                                                        <CheckCircle2 className="h-4 w-4 text-primary shrink-0" />
+                                                    ) : !p.connected ? (
+                                                        <span
+                                                            role="button"
+                                                            tabIndex={0}
+                                                            onClick={(e) => { e.stopPropagation(); setPublishOpen(false); window.location.href = "/settings"; }}
+                                                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); setPublishOpen(false); window.location.href = "/settings"; } }}
+                                                            className="text-[11px] font-medium text-amber-600 hover:text-amber-700 hover:underline shrink-0 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 transition-colors cursor-pointer"
+                                                        >
+                                                            Connect
+                                                        </span>
+                                                    ) : null}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                {selectedPlatforms.length > 0 && (
+                                    <p className="text-xs text-muted-foreground">
+                                        {selectedPlatforms.length} platform{selectedPlatforms.length > 1 ? "s" : ""} selected
+                                    </p>
+                                )}
+                            </div>
+                        );
+                    })()}
+
+                    {/* -- Section 2: Repurpose -- */}
+                    <div className="space-y-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                            2 � Repurpose (Optional)
+                        </p>
+                        <button
+                            className="w-full flex items-center gap-3 rounded-lg border p-3 hover:bg-muted/50 transition-colors text-left"
+                            onClick={async () => {
+                                setPublishOpen(false);
+                                await saveDraft();
+                                sessionStorage.setItem("repurpose_prefill", JSON.stringify({
+                                    content: content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000),
+                                    source_url: "",
+                                }));
+                                window.location.href = "/generate/repurpose/new";
+                            }}
+                        >
+                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-600 text-white">
+                                <Recycle className="h-4 w-4" />
+                            </span>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold">Repurpose as Social Posts</p>
+                                <p className="text-xs text-muted-foreground">Turn this blog into LinkedIn, Twitter, Instagram posts</p>
+                            </div>
+                        </button>
+                    </div>
+
+                    {/* -- Section 3: Schedule or Publish -- */}
+                    <div className="space-y-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                            3 � Schedule or Publish
+                        </p>
+                        <div className="rounded-lg border p-3 space-y-2">
+                            <p className="text-xs text-muted-foreground">Optional: pick a date/time to auto-publish. Leave empty to publish now.</p>
+                            <DateTimePicker
+                                value={scheduledDate}
+                                onChange={setScheduledDate}
+                                placeholder="Pick date & time"
+                            />
+                        </div>
+                        <div className="flex gap-2 pt-1">
+                            <Button
+                                className="flex-1 gap-1.5"
+                                disabled={selectedPlatforms.length === 0 || isPublishing}
+                                onClick={async () => {
+                                    if (selectedPlatforms.length === 0) { toast.error("Select at least one platform"); return; }
+                                    setIsPublishing(true);
+                                    // Capture date before any state changes — explicit save so scheduledAt is persisted
+                                    const pickedDate = scheduledDate;
+                                    try {
+                                        const id = await ensureSaveId();
+                                        if (id) {
+                                            const title = metaTitle.trim() || focusKeyword.trim() || "Untitled draft";
+                                            const saveData = { content, metaTitle, metaDesc, focusKeyword, relatedKeywords, score: score?.overall ?? null, scheduledAt: pickedDate || null, platforms: selectedPlatforms };
+                                            await api.put(`/api/seo/saves/${id}`, { type: "draft", title, data: saveData });
+                                        }
+                                    } catch { /* autosave will retry */ }
+                                    // Dev.to: open dedicated dialog
+                                    if (selectedPlatforms.includes("devto")) {
+                                        setPublishOpen(false);
+                                        setIsPublishing(false);
+                                        setDevtoOpen(true);
+                                        return;
+                                    }
+                                    if (pickedDate) {
+                                        toast.success(`Blog scheduled for ${new Date(pickedDate).toLocaleString()}`);
+                                    } else {
+                                        toast.success(`Blog ready � connect ${selectedPlatforms.join(", ")} in Settings to publish.`);
+                                    }
+                                    setPublishOpen(false);
+                                    setIsPublishing(false);
+                                    setSelectedPlatforms([]);
+                                    setPublishOpen(false);
+                                    setIsPublishing(false);
+                                    setSelectedPlatforms([]);
+                                }}
+                            >
+                                {isPublishing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                                {scheduledDate ? "Schedule" : "Publish Now"}
+                            </Button>
+                            <Button variant="outline" onClick={() => setPublishOpen(false)}>
+                                Cancel
+                            </Button>
+                        </div>
+                        {selectedPlatforms.length === 0 && (
+                            <p className="text-xs text-muted-foreground text-center">Select at least one platform above</p>
+                        )}
+                    </div>
+                </div>
+            </DialogContent>
+        </Dialog>
+
+        {/* Dev.to publish dialog — reuses existing component */}
+        <PublishToDevToDialog
+            open={devtoOpen}
+            onOpenChange={setDevtoOpen}
+            saveId={saveId}
+            defaultTitle={metaTitle || focusKeyword || "Untitled"}
+            defaultTags={focusKeyword ? [focusKeyword] : []}
+            onPublished={() => {
+                toast.success("Published to Dev.to!");
+                setDevtoOpen(false);
+            }}
+        />
+
+        </>
     );
 }
 
@@ -864,3 +1834,4 @@ export default function SEOEditorPage() {
         </Suspense>
     );
 }
+

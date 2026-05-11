@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, Suspense } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { QUERY_KEYS } from "@/hooks/queries";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
 import api from "@/lib/api";
@@ -93,31 +95,29 @@ function SettingsContent() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
-  const [providers, setProviders] = useState<ProviderStatus[]>([]);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [connecting, setConnecting] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
 
-  // Fetch BOTH /providers (for the unified card grid) and /accounts (for the
-  // legacy quick-connect section). They overlap but serve different UI needs.
-  const fetchAll = useCallback(async () => {
-    try {
-      const [provRes, acctRes] = await Promise.all([
-        api.get<ProviderStatus[]>("/api/social/providers"),
-        api.get<SocialAccount[]>("/api/social/accounts"),
-      ]);
-      setProviders(provRes.data);
-      setAccounts(acctRes.data);
-    } catch {
-      toast.error("Failed to load social connections");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: providers = [], isLoading: providersLoading } = useQuery<ProviderStatus[]>({
+    queryKey: QUERY_KEYS.socialProviders,
+    queryFn: async () => (await api.get<ProviderStatus[]>("/api/social/providers")).data,
+    staleTime: 30 * 1000,
+  });
+  const { data: accounts = [], isLoading: accountsLoading } = useQuery<SocialAccount[]>({
+    queryKey: QUERY_KEYS.socialAccounts,
+    queryFn: async () => (await api.get<SocialAccount[]>("/api/social/accounts")).data,
+    staleTime: 30 * 1000,
+  });
+  const loading = providersLoading || accountsLoading;
 
-  // Handle OAuth callback query params (works for ALL platforms now — backend
-  // redirects to /settings?connected={platform} or ?error={platform}_failed).
+  // Stable reference — won't cause useEffect to re-run on every render
+  const fetchAll = useCallback(() => {
+    qc.invalidateQueries({ queryKey: QUERY_KEYS.socialProviders });
+    qc.invalidateQueries({ queryKey: QUERY_KEYS.socialAccounts });
+  }, [qc]);
+
+  // Handle OAuth callback query params
   useEffect(() => {
     const connected = searchParams.get("connected");
     const error = searchParams.get("error");
@@ -135,10 +135,6 @@ function SettingsContent() {
       router.replace("/settings");
     }
   }, [searchParams, router, fetchAll]);
-
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
 
   const connectFacebook = async () => {
     setConnecting("facebook");

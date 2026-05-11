@@ -13,6 +13,7 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LogOut, User, Menu, Coins } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -62,7 +63,13 @@ export function Navbar() {
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="w-64 p-0">
-            <div className="flex h-16 items-center border-b px-6">
+            <div className="flex h-16 items-center gap-2 border-b px-6">
+              <Image
+                src="/omni_logo.png"
+                alt="AI Marketing logo"
+                width={28}
+                height={28}
+              />
               <span className="text-lg font-bold">AI Marketing</span>
             </div>
             <nav className="flex flex-col gap-1 p-4">
@@ -87,7 +94,15 @@ export function Navbar() {
             </nav>
           </SheetContent>
         </Sheet>
-        <h2 className="text-lg font-semibold md:hidden">AI Marketing</h2>
+        <h2 className="flex items-center gap-2 text-lg font-semibold md:hidden">
+          <Image
+            src="/omni_logo.png"
+            alt="AI Marketing logo"
+            width={24}
+            height={24}
+          />
+          AI Marketing
+        </h2>
       </div>
 
       <div className="flex items-center gap-3">

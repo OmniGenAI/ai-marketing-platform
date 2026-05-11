@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 
@@ -6,7 +7,16 @@ export default function Home() {
     <div className="flex min-h-screen flex-col">
       <header className="border-b">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <h1 className="text-xl font-bold">AI Marketing Platform</h1>
+          <h1 className="flex items-center gap-2 text-xl font-bold">
+            <Image
+              src="/omni_logo.png"
+              alt="AI Marketing logo"
+              width={32}
+              height={32}
+              priority
+            />
+            AI Marketing Platform
+          </h1>
           <nav className="flex items-center gap-4">
             <Link href="/login">
               <Button variant="ghost">Login</Button>

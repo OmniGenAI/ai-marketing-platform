@@ -541,8 +541,22 @@ async def instagram_callback(
                 break
 
         if not instagram_page:
+            # Diagnose: did the user share ANY page at all?
+            if not pages:
+                msg = (
+                    "Facebook did not share any Pages with this app. "
+                    "When the Facebook popup appeared, you must click 'Edit settings' "
+                    "(not 'Continue') and tick your Page ('Omni ai') and grant Instagram permissions."
+                )
+            else:
+                page_names = ", ".join(p.get("name", "?") for p in pages) or "(none)"
+                msg = (
+                    f"No Instagram Business Account is linked to any of your authorised Pages ({page_names}). "
+                    "Open Instagram → Settings → Account Type → 'Switch to Professional Account' (Business), "
+                    "then go to Facebook Page → Settings → Linked Accounts → connect the Instagram account."
+                )
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/settings?error=instagram_failed&message=No Instagram Business Account found. Please connect your Instagram account to a Facebook page."
+                url=f"{settings.FRONTEND_URL}/settings?error=instagram_failed&message={msg}"
             )
 
         instagram_account_id = instagram_page["instagram_business_account"]["id"]

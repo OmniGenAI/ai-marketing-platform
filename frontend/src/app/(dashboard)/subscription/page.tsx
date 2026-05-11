@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, Suspense, useEffect, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useSubscriptionQuery, usePlansQuery, QUERY_KEYS } from "@/hooks/queries";
 import { useSearchParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -21,9 +23,10 @@ import type { Plan, Subscription } from "@/types";
 function SubscriptionContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [plans, setPlans] = useState<Plan[]>([]);
-  const [subscription, setSubscription] = useState<Subscription | null>(null);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
+  const { data: plans = [], isLoading: plansLoading } = usePlansQuery();
+  const { data: subscription, isLoading: subLoading, refetch: refetchSub } = useSubscriptionQuery();
+  const loading = plansLoading || subLoading;
   const [subscribingPlanId, setSubscribingPlanId] = useState<string | null>(null);
   const [activatingPlan, setActivatingPlan] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -31,24 +34,11 @@ function SubscriptionContent() {
   const [verifying, setVerifying] = useState(false);
   const verificationAttempted = useRef(false);
 
+  // For verification callbacks we need to imperatively refetch
   const fetchSubscription = useCallback(async () => {
-    try {
-      const response = await api.get<Subscription | null>("/api/subscription/status");
-      setSubscription(response.data);
-      return response.data;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const fetchPlans = useCallback(async () => {
-    try {
-      const response = await api.get<Plan[]>("/api/plans");
-      setPlans(response.data);
-    } catch {
-      toast.error("Failed to load plans");
-    }
-  }, []);
+    const result = await refetchSub();
+    return result.data ?? null;
+  }, [refetchSub]);
 
   // Verify checkout session and activate subscription
   const verifyCheckoutSession = useCallback(async (sessionId: string) => {
@@ -124,11 +114,7 @@ function SubscriptionContent() {
     }
   }, [searchParams, router, verifyCheckoutSession, fetchSubscription]);
 
-  useEffect(() => {
-    Promise.all([fetchPlans(), fetchSubscription()]).finally(() => {
-      setLoading(false);
-    });
-  }, [fetchPlans, fetchSubscription]);
+  // Plans and subscription are loaded by useQuery above — no manual effect needed.
 
   const handleSubscribe = async (planId: string) => {
     setSubscribingPlanId(planId);
@@ -175,7 +161,7 @@ function SubscriptionContent() {
     try {
       const response = await api.post("/api/subscription/cancel");
       toast.success(response.data.message);
-      await fetchSubscription();
+      qc.invalidateQueries({ queryKey: QUERY_KEYS.subscription });
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to cancel subscription");

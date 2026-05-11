@@ -107,8 +107,10 @@ export interface Post {
   image_option: "none" | "business" | "ai";
   platform: string;
   tone: string;
-  status: "draft" | "published" | "failed";
+  status: "draft" | "scheduled" | "published" | "failed";
+  scheduled_at: string | null;
   published_at: string | null;
+  external_post_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -145,6 +147,8 @@ export interface GenerateResponse {
    */
   image_pending?: boolean;
   post_id?: string | null;
+  /** When the user requested 2+ caption variations, the backend returns each here. */
+  variations?: Array<{ content: string; hashtags: string }>;
 }
 
 export type VoicePreset =

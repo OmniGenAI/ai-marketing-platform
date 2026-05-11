@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { QUERY_KEYS } from "@/hooks/queries";
 import { FileText, ArrowRight, Trash2, ExternalLink, BookOpen, Send, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/lib/api";
@@ -101,21 +103,18 @@ function extractDefaultTags(data: Record<string, unknown> | undefined): string[]
 }
 
 export default function BlogPage() {
-    const [saves, setSaves] = useState<BlogSaveItem[]>([]);
-    const [loadingSaves, setLoadingSaves] = useState(true);
+    const qc = useQueryClient();
     const [confirmId, setConfirmId] = useState<string | null>(null);
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
-    // Publish-to-Dev.to dialog state — kept here so it survives the inner card map.
     const [publishingSave, setPublishingSave] = useState<BlogSaveItem | null>(null);
     const PAGE_SIZE = 9;
 
-    useEffect(() => {
-        api.get<BlogSaveItem[]>("/api/blog/saves")
-            .then((res) => setSaves(res.data))
-            .catch(() => { /* non-critical */ })
-            .finally(() => setLoadingSaves(false));
-    }, []);
+    const { data: saves = [], isLoading: loadingSaves } = useQuery<BlogSaveItem[]>({
+        queryKey: QUERY_KEYS.blogSaves,
+        queryFn: async () => (await api.get<BlogSaveItem[]>("/api/blog/saves")).data,
+        staleTime: 30 * 1000,
+    });
 
     const confirmDelete = (id: string) => setConfirmId(id);
 
@@ -123,13 +122,10 @@ export default function BlogPage() {
         if (!confirmId) return;
         const id = confirmId;
         setConfirmId(null);
-        // Optimistic removal — snapshot so we can revert if the server rejects.
-        const snapshot = saves;
-        setSaves((prev) => prev.filter((s) => s.id !== id));
         try {
             await api.delete(`/api/blog/saves/${id}`);
+            qc.invalidateQueries({ queryKey: QUERY_KEYS.blogSaves });
         } catch {
-            setSaves(snapshot);
             toast.error("Failed to delete blog — please try again");
         }
     };

@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Show INFO-level logs from our app (Gemini, Serper, Playwright, etc.)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -10,7 +11,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster, analytics, social_oauth, post_analytics
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster, analytics, social_oauth, post_analytics, calendar as calendar_router
 
 
 def seed_default_plans():
@@ -338,11 +339,31 @@ async def _retention_loop():
 async def lifespan(app: FastAPI):
     # Startup
     import asyncio
+    from app.services.scheduler import run_due_posts
+
     ensure_tables_exist()
     seed_default_plans()
     retention_task = asyncio.create_task(_retention_loop())
+
+    # Post scheduler — checks for due scheduled posts every 60 seconds.
+    # Uses AsyncIOScheduler so it runs on the same event loop as FastAPI/Uvicorn.
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_due_posts,
+        trigger="interval",
+        seconds=60,
+        id="post_scheduler",
+        name="Publish scheduled posts",
+        max_instances=1,          # prevent overlap if a run takes > 60s
+        misfire_grace_time=30,    # fire late jobs up to 30s after their time
+    )
+    scheduler.start()
+    print("✅ Post scheduler started — checking every 60s")
+
     yield
+
     # Shutdown
+    scheduler.shutdown(wait=False)
     retention_task.cancel()
 
 app = FastAPI(
@@ -390,6 +411,7 @@ app.include_router(repurpose.router)
 app.include_router(poster.router)
 app.include_router(analytics.router)
 app.include_router(social_oauth.router)
+app.include_router(calendar_router.router)
 
 
 @app.get("/")

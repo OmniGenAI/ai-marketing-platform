@@ -291,10 +291,30 @@ function calcKeywordPlacement(
   if (!kw) {
     return { in_h1: false, in_h2: false, in_first_paragraph: false, placement_score: 0 };
   }
-  const contains = (s: string) => s.trim().toLowerCase().includes(kw);
-  const in_h1 = h1.some(contains);
-  const in_h2 = h2.some(contains);
-  const in_first_paragraph = paragraphs.length > 0 ? contains(paragraphs[0]) : false;
+
+  // Normalize: lowercase, replace punctuation/hyphens with spaces, collapse whitespace.
+  // This lets "Life-Saving Skills" match "life saving skills" and vice versa.
+  const normalize = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+
+  const normKw = normalize(kw);
+  const kwTokens = normKw.split(" ").filter((t) => t.length > 2);
+
+  const matches = (s: string): boolean => {
+    const n = normalize(s);
+    if (!n) return false;
+    // 1. Exact phrase match (after normalization)
+    if (n.includes(normKw)) return true;
+    // 2. Word-overlap fallback: >=50% of keyword tokens (length>2) present in heading.
+    // Handles reordered or partial phrasing like "first aid courses" vs "free first aid".
+    if (kwTokens.length === 0) return false;
+    const present = kwTokens.filter((t) => n.includes(t)).length;
+    return present / kwTokens.length >= 0.5;
+  };
+
+  const in_h1 = h1.some(matches);
+  const in_h2 = h2.some(matches);
+  const in_first_paragraph = paragraphs.length > 0 ? matches(paragraphs[0]) : false;
   const placement_score =
     (in_h1 ? 40 : 0) + (in_h2 ? 35 : 0) + (in_first_paragraph ? 25 : 0);
   return { in_h1, in_h2, in_first_paragraph, placement_score };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Card,
   CardContent,
@@ -19,54 +19,45 @@ const statusColors: Record<string, string> = {
   draft: "secondary",
   published: "default",
   failed: "destructive",
+  scheduled: "outline",
 };
 
 export default function PostsPage() {
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [publishingId, setPublishingId] = useState<string | null>(null);
+  const qc = useQueryClient();
 
-  useEffect(() => {
-    fetchPosts();
-  }, []);
+  const { data: posts = [], isLoading } = useQuery<Post[]>({
+    queryKey: ["posts"],
+    queryFn: async () => (await api.get<Post[]>("/api/posts")).data,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: true,
+  });
 
-  const fetchPosts = async () => {
-    try {
-      const response = await api.get<Post[]>("/api/posts");
-      setPosts(response.data);
-    } catch {
-      toast.error("Failed to load posts");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handlePublish = async (id: string) => {
-    setPublishingId(id);
-    try {
-      const response = await api.post<Post>(`/api/posts/${id}/publish`);
-      setPosts((prev) =>
-        prev.map((p) => (p.id === id ? response.data : p))
-      );
+  const publishMutation = useMutation({
+    mutationFn: async (id: string) => (await api.post<Post>(`/api/posts/${id}/publish`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["posts"] });
+      qc.invalidateQueries({ queryKey: ["calendar"] });
       toast.success("Post published successfully!");
-    } catch (error: unknown) {
-      const err = error as { response?: { data?: { detail?: string } } };
-      const message = err.response?.data?.detail || "Failed to publish post";
-      toast.error(message);
-    } finally {
-      setPublishingId(null);
-    }
-  };
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast.error(err.response?.data?.detail || "Failed to publish post");
+    },
+  });
 
-  const handleDelete = async (id: string) => {
-    try {
-      await api.delete(`/api/posts/${id}`);
-      setPosts((prev) => prev.filter((p) => p.id !== id));
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => { await api.delete(`/api/posts/${id}`); return id; },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["posts"] });
+      qc.invalidateQueries({ queryKey: ["calendar"] });
       toast.success("Post deleted");
-    } catch {
-      toast.error("Failed to delete post");
-    }
-  };
+    },
+    onError: () => toast.error("Failed to delete post"),
+  });
+
+  const publishingId = publishMutation.isPending ? publishMutation.variables ?? null : null;
+
+  const handlePublish = (id: string) => publishMutation.mutate(id);
+  const handleDelete = (id: string) => deleteMutation.mutate(id);
 
   return (
     <div className="space-y-6">

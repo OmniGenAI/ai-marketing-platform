@@ -24,6 +24,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
         error: <OctagonXIcon className="size-4" />,
         loading: <Loader2Icon className="size-4 animate-spin" />,
       }}
+      // Override sonner's default low-opacity description styling so the
+      // body/description text in toasts is readable across themes.
+      toastOptions={{
+        classNames: {
+          description: "!text-foreground/80 !opacity-100",
+        },
+      }}
       style={
         {
           "--normal-bg": "var(--popover)",

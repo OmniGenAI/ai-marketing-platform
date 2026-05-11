@@ -441,6 +441,13 @@ const PROSE_CSS = `
 .rich-editor-content .ProseMirror .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; width: 4px; background: #6366f1; cursor: col-resize; pointer-events: all; }
 .rich-editor-content .ProseMirror .tableWrapper { overflow-x: auto; }
 .rich-editor-content .ProseMirror p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: hsl(var(--muted-foreground)); pointer-events: none; float: left; height: 0; }
+
+/* AI-diff preview marks — rendered when content includes <ins>/<del> from
+   the SEO editor's diff overlay. Mimics VS Code Copilot's inline diff.
+   Scope is the whole rich-editor canvas so meta-field diffs (rendered as
+   plain <p> outside the ProseMirror tree) also get highlighted. */
+.rich-editor-content ins { background: rgba(16, 185, 129, 0.18); color: #065f46; text-decoration: none; padding: 0 2px; border-radius: 2px; }
+.rich-editor-content del { background: rgba(239, 68, 68, 0.15); color: #991b1b; text-decoration: line-through; padding: 0 2px; border-radius: 2px; }
 `;
 
 let proseStyleInjected = false;

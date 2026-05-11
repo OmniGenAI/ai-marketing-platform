@@ -4,17 +4,28 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Code2,
   Copy,
+  Facebook,
   Image as ImageIcon,
+  Instagram,
+  Linkedin,
+  MessageSquare,
   Plus,
   RefreshCw,
   Save,
+  Send,
   Sparkles,
+  Youtube,
 } from "lucide-react";
+import { toPng } from "html-to-image";
+import { useQuery } from "@tanstack/react-query";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +48,14 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
 
 import { DownloadButton } from "@/components/poster/DownloadButton";
 import { PosterPreview } from "@/components/poster/PosterPreview";
@@ -87,6 +106,25 @@ function PosterNewPageInner() {
   const [isSaving, setIsSaving] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [inputCollapsed, setInputCollapsed] = useState(false);
+
+  // ---- publish dialog state ----
+  type PlatformStatus = "pending" | "publishing" | "success" | "failed";
+  const [isPublishOpen, setIsPublishOpen] = useState(false);
+  const [publishPlatforms, setPublishPlatforms] = useState<string[]>([]);
+  const [publishProgress, setPublishProgress] = useState<
+    Record<string, { status: PlatformStatus; error?: string }>
+  >({});
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [scheduleValue, setScheduleValue] = useState<string>("");
+
+  const { data: providers = [] } = useQuery<
+    { platform: string; configured: boolean; connected: boolean; page_name: string | null }[]
+  >({
+    queryKey: ["social-providers"],
+    queryFn: async () => (await api.get("/api/social/providers")).data,
+    staleTime: 60 * 1000,
+    enabled: isPublishOpen,
+  });
 
   const previewRef = useRef<HTMLDivElement | null>(null);
   const template = useMemo(() => getPosterTemplate(templateStyle), [templateStyle]);
@@ -366,6 +404,130 @@ function PosterNewPageInner() {
     setCaptionTone("professional");
     setCtaVerbHint("");
     router.replace("/generate/poster/new");
+  };
+
+  /**
+   * Capture the live <PosterPreview> to a PNG data URL. The backend accepts
+   * data URLs as image_url and re-uploads them to Supabase / Facebook /
+   * Instagram so this is the simplest way to ship the rendered poster.
+   */
+  const renderPosterToDataUrl = async (): Promise<string | null> => {
+    if (!previewRef.current) return null;
+    try {
+      return await toPng(previewRef.current, {
+        pixelRatio: 2,
+        cacheBust: true,
+        backgroundColor: "#ffffff",
+      });
+    } catch (err) {
+      console.error("[poster] renderToDataUrl failed:", err);
+      return null;
+    }
+  };
+
+  const handlePublishClick = () => {
+    if (!poster?.background_image_url) {
+      toast.error("Generate a poster first");
+      return;
+    }
+    setIsPublishOpen(true);
+  };
+
+  // Unified publish handler — creates one post per selected platform,
+  // each with the rendered poster PNG as image_url and the social caption.
+  const handleConfirmPublish = async () => {
+    if (!poster) return;
+    if (publishPlatforms.length === 0) {
+      toast.error("Select at least one platform");
+      return;
+    }
+
+    setIsPublishing(true);
+
+    // Seed all platforms as "pending"
+    const initial: Record<string, { status: PlatformStatus; error?: string }> = {};
+    publishPlatforms.forEach((p) => {
+      initial[p] = { status: "pending" };
+    });
+    setPublishProgress(initial);
+
+    try {
+      // Render the live poster preview to a PNG data URL so the backend
+      // can upload it. Done once and reused across platforms.
+      const posterDataUrl = await renderPosterToDataUrl();
+      if (!posterDataUrl) {
+        toast.error("Could not capture poster image. Please try again.");
+        setIsPublishing(false);
+        return;
+      }
+
+      const caption = poster.caption || poster.headline || poster.title || "";
+      const isoSchedule = scheduleValue ? new Date(scheduleValue).toISOString() : null;
+
+      const results: { platform: string; ok: boolean; error?: string }[] = [];
+
+      for (const platform of publishPlatforms) {
+        setPublishProgress((prev) => ({
+          ...prev,
+          [platform]: { status: "publishing" },
+        }));
+        try {
+          const createRes = await api.post<{ id: string }>("/api/posts", {
+            content: caption,
+            hashtags: "",
+            image_url: posterDataUrl,
+            image_option: "upload",
+            tone: poster.caption_tone,
+            platform,
+            status: "draft",
+          });
+          const postId = createRes.data.id;
+
+          if (isoSchedule) {
+            await api.patch(`/api/posts/${postId}/reschedule`, {
+              scheduled_at: isoSchedule,
+            });
+          } else {
+            await api.post(`/api/posts/${postId}/publish`);
+          }
+
+          setPublishProgress((prev) => ({
+            ...prev,
+            [platform]: { status: "success" },
+          }));
+          results.push({ platform, ok: true });
+        } catch (err) {
+          const e = err as { response?: { data?: { detail?: string } } };
+          const errMsg = e.response?.data?.detail || "Failed";
+          setPublishProgress((prev) => ({
+            ...prev,
+            [platform]: { status: "failed", error: errMsg },
+          }));
+          results.push({ platform, ok: false, error: errMsg });
+        }
+      }
+
+      const successful = results.filter((r) => r.ok);
+      const failed = results.filter((r) => !r.ok);
+
+      if (successful.length > 0) {
+        const action = isoSchedule ? "scheduled" : "published";
+        const list = successful.map((r) => r.platform).join(", ");
+        toast.success(
+          `${action.charAt(0).toUpperCase() + action.slice(1)} on ${list}`,
+        );
+      }
+      if (failed.length > 0) {
+        toast.error(`Failed on ${failed.map((r) => r.platform).join(", ")}`);
+      }
+      if (failed.length === 0) {
+        setTimeout(() => setIsPublishOpen(false), 1200);
+      }
+    } catch {
+      toast.error("Failed to publish poster");
+    } finally {
+      setIsPublishing(false);
+    }
   };
 
   const showLowCredits =
@@ -729,30 +891,77 @@ function PosterNewPageInner() {
             <PreviewEmptyState />
           ) : (
             <>
-              {/* Meta bar */}
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge className="text-white border-transparent bg-linear-to-r from-violet-600 via-fuchsia-500 to-rose-500 hover:opacity-90">
-                  Style: {template.label}
-                </Badge>
-                <Badge
-                  variant="outline"
-                  className="border-fuchsia-200 text-fuchsia-700"
-                >
-                  {poster.aspect_ratio}
-                </Badge>
-                {poster.error_message === "background_generation_failed" && (
+              {/* Meta bar + actions */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className="text-white border-transparent bg-linear-to-r from-violet-600 via-fuchsia-500 to-rose-500 hover:opacity-90">
+                    Style: {template.label}
+                  </Badge>
                   <Badge
                     variant="outline"
-                    className="border-amber-300 text-amber-700"
+                    className="border-fuchsia-200 text-fuchsia-700"
                   >
-                    Background failed — regenerate
+                    {poster.aspect_ratio}
                   </Badge>
-                )}
-                {poster.status === "exported" && (
-                  <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 border-transparent">
-                    Exported
-                  </Badge>
-                )}
+                  {poster.error_message === "background_generation_failed" && (
+                    <Badge
+                      variant="outline"
+                      className="border-amber-300 text-amber-700"
+                    >
+                      Background failed — regenerate
+                    </Badge>
+                  )}
+                  {poster.status === "exported" && (
+                    <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 border-transparent">
+                      Exported
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={handlePublishClick}
+                    disabled={!poster.background_image_url || isPublishing}
+                    className="bg-purple-500 hover:bg-purple-600 text-white"
+                  >
+                    <Send className="mr-2 h-4 w-4" />
+                    Publish
+                  </Button>
+                  <DownloadButton
+                    targetRef={previewRef}
+                    title={poster.title}
+                    onDownloaded={handleDownloaded}
+                    className="text-white bg-linear-to-r from-violet-600 via-fuchsia-500 to-rose-500 hover:opacity-90 transition-opacity shadow-sm"
+                    disabled={!poster.background_image_url}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleSaveText}
+                    disabled={isSaving}
+                  >
+                    {isSaving ? (
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Save className="mr-2 h-4 w-4" />
+                    )}
+                    Save Edits
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleRegenerateBackground}
+                    disabled={busy || noCredits}
+                  >
+                    {isRegenerating ? (
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                    )}
+                    Regenerate Background ({POSTER_CREDIT_COST} Credit)
+                  </Button>
+                </div>
               </div>
 
               {/* Live preview — html-to-image captures THIS node. While the
@@ -982,46 +1191,231 @@ function PosterNewPageInner() {
                 </CardContent>
               </Card>
 
-              {/* Actions */}
-              <div className="flex flex-wrap gap-2">
-                <DownloadButton
-                  targetRef={previewRef}
-                  title={poster.title}
-                  onDownloaded={handleDownloaded}
-                  className="text-white bg-linear-to-r from-violet-600 via-fuchsia-500 to-rose-500 hover:opacity-90 transition-opacity shadow-sm"
-                  disabled={!poster.background_image_url}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleSaveText}
-                  disabled={isSaving}
-                >
-                  {isSaving ? (
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Save className="mr-2 h-4 w-4" />
-                  )}
-                  Save Edits
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleRegenerateBackground}
-                  disabled={busy || noCredits}
-                >
-                  {isRegenerating ? (
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                  )}
-                  Regenerate Background ({POSTER_CREDIT_COST} Credit)
-                </Button>
-              </div>
             </>
           )}
         </div>
       </div>
+
+      {/* Unified Publish Dialog — platforms, schedule, confirm */}
+      <Dialog
+        open={isPublishOpen}
+        onOpenChange={(o) => {
+          setIsPublishOpen(o);
+          if (!o) setPublishProgress({});
+        }}
+      >
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Send className="h-4 w-4" /> Publish Poster
+            </DialogTitle>
+            <DialogDescription>
+              Pick platforms and schedule. The rendered poster (background +
+              text overlay) will be uploaded as the post image.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5 py-1">
+            {/* ── Section 1: Platforms ── */}
+            {(() => {
+              const SOCIAL_PLATFORMS: Record<
+                string,
+                { label: string; icon: React.ReactNode; bg: string }
+              > = {
+                facebook: { label: "Facebook", icon: <Facebook className="h-4 w-4" />, bg: "bg-[#1877F2]" },
+                instagram: { label: "Instagram", icon: <Instagram className="h-4 w-4" />, bg: "bg-[#E4405F]" },
+                linkedin: { label: "LinkedIn", icon: <Linkedin className="h-4 w-4" />, bg: "bg-[#0A66C2]" },
+                reddit: { label: "Reddit", icon: <MessageSquare className="h-4 w-4" />, bg: "bg-[#FF4500]" },
+                youtube: { label: "YouTube", icon: <Youtube className="h-4 w-4" />, bg: "bg-[#FF0000]" },
+                devto: { label: "Dev.to", icon: <Code2 className="h-4 w-4" />, bg: "bg-[#0A0A0A]" },
+              };
+              const socialProviders = providers.filter(
+                (p) => SOCIAL_PLATFORMS[p.platform],
+              );
+              return (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                    1 — Select Platforms
+                  </p>
+                  {socialProviders.length === 0 ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      No platforms connected yet.
+                      <button
+                        className="underline hover:text-foreground ml-auto shrink-0"
+                        onClick={() => {
+                          setIsPublishOpen(false);
+                          router.push("/settings");
+                        }}
+                      >
+                        Connect in Settings
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      {socialProviders.map((p) => {
+                        const cfg = SOCIAL_PLATFORMS[p.platform]!;
+                        const selected = publishPlatforms.includes(p.platform);
+                        const progress = publishProgress[p.platform];
+                        const borderClass =
+                          progress?.status === "publishing"
+                            ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
+                            : progress?.status === "success"
+                              ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500"
+                              : progress?.status === "failed"
+                                ? "border-red-500 bg-red-50 ring-1 ring-red-500"
+                                : selected
+                                  ? "border-purple-500 bg-purple-50 ring-1 ring-purple-500"
+                                  : "hover:bg-muted/50";
+                        return (
+                          <button
+                            key={p.platform}
+                            disabled={isPublishing}
+                            onClick={() => {
+                              if (isPublishing) return;
+                              setPublishPlatforms((prev) =>
+                                prev.includes(p.platform)
+                                  ? prev.filter((x) => x !== p.platform)
+                                  : [...prev, p.platform],
+                              );
+                            }}
+                            className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${borderClass} disabled:cursor-not-allowed`}
+                            title={progress?.error}
+                          >
+                            <span
+                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white ${cfg.bg}`}
+                            >
+                              {cfg.icon}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium">{cfg.label}</p>
+                              {progress?.status === "publishing" && (
+                                <p className="text-[11px] text-blue-600 truncate">
+                                  {scheduleValue ? "Scheduling…" : "Publishing…"}
+                                </p>
+                              )}
+                              {progress?.status === "success" && (
+                                <p className="text-[11px] text-emerald-600 truncate">
+                                  {scheduleValue ? "Scheduled ✓" : "Published ✓"}
+                                </p>
+                              )}
+                              {progress?.status === "failed" && (
+                                <p className="text-[11px] text-red-600 line-clamp-2 wrap-break-word">
+                                  {progress.error || "Failed"}
+                                </p>
+                              )}
+                              {!progress && p.page_name && (
+                                <p className="text-[11px] text-muted-foreground truncate">
+                                  {p.page_name}
+                                </p>
+                              )}
+                            </div>
+                            {progress?.status === "publishing" ? (
+                              <RefreshCw className="h-4 w-4 text-blue-600 shrink-0 animate-spin" />
+                            ) : progress?.status === "success" ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                            ) : progress?.status === "failed" ? (
+                              <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+                            ) : selected ? (
+                              <CheckCircle2 className="h-4 w-4 text-purple-600 shrink-0" />
+                            ) : !p.connected ? (
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setIsPublishOpen(false);
+                                  router.push("/settings");
+                                }}
+                                className="text-[11px] font-medium text-amber-600 hover:underline shrink-0 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 cursor-pointer"
+                              >
+                                Connect
+                              </span>
+                            ) : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {publishPlatforms.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      {publishPlatforms.length} platform
+                      {publishPlatforms.length > 1 ? "s" : ""} selected
+                    </p>
+                  )}
+                  {Object.entries(publishProgress).filter(
+                    ([, v]) => v.status === "failed",
+                  ).length > 0 && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-1.5">
+                      <p className="text-xs font-semibold text-red-700">Errors</p>
+                      {Object.entries(publishProgress)
+                        .filter(([, v]) => v.status === "failed")
+                        .map(([platform, v]) => (
+                          <div key={platform} className="text-xs text-red-700">
+                            <span className="font-medium capitalize">
+                              {platform}:
+                            </span>{" "}
+                            <span className="wrap-break-word">
+                              {v.error || "Unknown error"}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* ── Section 2: Schedule ── */}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                2 — Schedule (Optional)
+              </p>
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Pick a date/time to auto-publish. Leave empty to publish now.
+                </p>
+                <DateTimePicker
+                  value={scheduleValue}
+                  onChange={setScheduleValue}
+                />
+              </div>
+            </div>
+
+            {/* ── Section 3: Confirm ── */}
+            <div className="flex gap-2 pt-1">
+              <Button
+                className="flex-1 gap-1.5 bg-purple-500 hover:bg-purple-600 text-white"
+                disabled={publishPlatforms.length === 0 || isPublishing}
+                onClick={handleConfirmPublish}
+              >
+                {isPublishing ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />{" "}
+                    {scheduleValue ? "Scheduling…" : "Publishing…"}
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-3.5 w-3.5" />{" "}
+                    {scheduleValue ? "Schedule" : "Publish Now"}
+                  </>
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setIsPublishOpen(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+            {publishPlatforms.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center">
+                Select at least one platform above
+              </p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

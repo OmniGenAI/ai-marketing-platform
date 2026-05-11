@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
   ExternalLink,
@@ -27,6 +28,7 @@ import {
   POSTER_TEMPLATES_BY_ID,
   getPosterTemplate,
 } from "@/lib/poster/templates";
+import { PosterPreview } from "@/components/poster/PosterPreview";
 import type { Poster } from "@/types";
 
 const PAGE_SIZE = 9;
@@ -56,21 +58,15 @@ function timeAgo(iso: string): string {
 }
 
 export default function PosterHubPage() {
-  const [posters, setPosters] = useState<Poster[]>([]);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
+  const { data: posters = [], isLoading: loading } = useQuery<Poster[]>({
+    queryKey: ["posters"],
+    queryFn: async () => (await api.get<Poster[]>("/api/posters")).data || [],
+    staleTime: 30 * 1000,
+  });
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-
-  useEffect(() => {
-    api
-      .get<Poster[]>("/api/posters")
-      .then((res) => setPosters(res.data || []))
-      .catch(() => {
-        /* non-critical — list stays empty */
-      })
-      .finally(() => setLoading(false));
-  }, []);
 
   const confirmDelete = (id: string) => setConfirmId(id);
 
@@ -78,12 +74,10 @@ export default function PosterHubPage() {
     if (!confirmId) return;
     const id = confirmId;
     setConfirmId(null);
-    const snapshot = posters;
-    setPosters((prev) => prev.filter((p) => p.id !== id));
     try {
       await api.delete(`/api/posters/${id}`);
+      qc.invalidateQueries({ queryKey: ["posters"] });
     } catch {
-      setPosters(snapshot);
       toast.error("Failed to delete — please try again");
     }
   };
@@ -326,23 +320,30 @@ function PosterCard({
 
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-lg border bg-card hover:border-foreground/20 transition-colors">
-      {/* Thumbnail */}
-      <div className="relative aspect-square bg-neutral-100 overflow-hidden">
+      {/* Thumbnail — render the full poster (background + text overlay)
+          so the saved card matches what was exported. */}
+      <div className="relative overflow-hidden bg-neutral-100">
         {poster.background_image_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={poster.background_image_url}
-            alt={poster.title}
-            className="h-full w-full object-cover"
+          <PosterPreview
+            template={template}
+            aspectRatio={poster.aspect_ratio}
+            backgroundUrl={poster.background_image_url}
+            headline={poster.headline ?? ""}
+            tagline={poster.tagline ?? ""}
+            cta={poster.cta ?? ""}
+            eyebrow={poster.event_meta ?? ""}
+            features={poster.features ?? []}
+            brandLabel={poster.brand_label ?? ""}
+            className="rounded-none! border-0! shadow-none!"
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+          <div className="flex aspect-square w-full items-center justify-center text-muted-foreground">
             <ImageOff className="h-8 w-8" />
           </div>
         )}
 
         {/* Status badges */}
-        <div className="absolute top-2 left-2 flex gap-1.5">
+        <div className="absolute top-2 left-2 flex gap-1.5 z-10">
           <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur">
             <Layers className="h-2.5 w-2.5" />
             {template.label}

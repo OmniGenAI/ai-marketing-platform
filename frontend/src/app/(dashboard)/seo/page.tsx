@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { QUERY_KEYS } from "@/hooks/queries";
 import {
     PenLine,
     Search,
@@ -125,29 +127,25 @@ function timeAgo(iso: string) {
 }
 
 export default function SEOPage() {
-    const [saves, setSaves] = useState<SeoSaveItem[]>([]);
-    const [loadingSaves, setLoadingSaves] = useState(true);
+    const qc = useQueryClient();
     const [confirmId, setConfirmId] = useState<string | null>(null);
     const [typeFilter, setTypeFilter] = useState<"all" | "brief" | "draft">("all");
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
     const PAGE_SIZE = 9;
-
-    const [status, setStatus] = useState<ContentStatusResponse | null>(null);
-    const [loadingStatus, setLoadingStatus] = useState(true);
     const [kindFilter, setKindFilter] = useState<"all" | "post" | "poster" | "reel">("all");
 
-    useEffect(() => {
-        api.get<SeoSaveItem[]>("/api/seo/saves")
-            .then((res) => setSaves(res.data))
-            .catch(() => {/* non-critical */ })
-            .finally(() => setLoadingSaves(false));
+    const { data: saves = [], isLoading: loadingSaves } = useQuery<SeoSaveItem[]>({
+        queryKey: QUERY_KEYS.seoSaves,
+        queryFn: async () => (await api.get<SeoSaveItem[]>("/api/seo/saves")).data,
+        staleTime: 30 * 1000,
+    });
 
-        api.get<ContentStatusResponse>("/api/seo/content-status")
-            .then((res) => setStatus(res.data))
-            .catch(() => {/* non-critical */ })
-            .finally(() => setLoadingStatus(false));
-    }, []);
+    const { data: status, isLoading: loadingStatus } = useQuery<ContentStatusResponse>({
+        queryKey: ["seo-content-status"],
+        queryFn: async () => (await api.get<ContentStatusResponse>("/api/seo/content-status")).data,
+        staleTime: 30 * 1000,
+    });
 
     const confirmDelete = (id: string) => setConfirmId(id);
 
@@ -155,12 +153,12 @@ export default function SEOPage() {
         if (!confirmId) return;
         const id = confirmId;
         setConfirmId(null);
-        setSaves((prev) => prev.filter((s) => s.id !== id));
-        await api.delete(`/api/seo/saves/${id}`).catch(() => {/* non-critical */ });
+        await api.delete(`/api/seo/saves/${id}`).catch(() => {});
+        qc.invalidateQueries({ queryKey: QUERY_KEYS.seoSaves });
     };
 
     const sorted = [...saves]
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
         .filter((s) => typeFilter === "all" || s.type === typeFilter)
         .filter((s) => !search.trim() || s.title.toLowerCase().includes(search.trim().toLowerCase()));
 
@@ -421,7 +419,7 @@ export default function SEOPage() {
                                                 : "text-muted-foreground hover:text-foreground"
                                         }`}
                                     >
-                                        {t === "all" ? "All" : t === "brief" ? "Brief" : "Draft"}
+                                        {t === "all" ? "All" : t === "brief" ? "Brief" : "Blog"}
                                     </button>
                                 ))}
                             </div>
@@ -448,10 +446,12 @@ export default function SEOPage() {
                                     className={`self-start rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                                         item.type === "brief"
                                             ? "border-violet-500/30 bg-violet-500/10 text-violet-500"
-                                            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+                                            : item.type === "draft"
+                                            ? "border-blue-500/30 bg-blue-500/10 text-blue-500"
+                                            : "border-muted-foreground/30 bg-muted/30 text-muted-foreground"
                                     }`}
                                 >
-                                    {item.type === "brief" ? "Brief" : "Draft"}
+                                    {item.type === "brief" ? "Brief" : item.type === "draft" ? "Blog" : item.type}
                                 </span>
 
                                 <p className="text-sm font-medium line-clamp-2 pr-6">{item.title}</p>

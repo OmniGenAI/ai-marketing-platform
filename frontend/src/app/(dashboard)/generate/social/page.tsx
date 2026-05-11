@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { QUERY_KEYS } from "@/hooks/queries";
 import {
     Sparkles,
     Search,
@@ -76,21 +78,15 @@ function timeAgo(iso: string): string {
 }
 
 export default function SocialHubPage() {
-    const [saves, setSaves] = useState<PostSaveItem[]>([]);
-    const [loadingSaves, setLoadingSaves] = useState(true);
+    const qc = useQueryClient();
+    const { data: saves = [], isLoading: loadingSaves } = useQuery<PostSaveItem[]>({
+        queryKey: QUERY_KEYS.posts,
+        queryFn: async () => (await api.get<PostSaveItem[]>("/api/posts")).data || [],
+        staleTime: 30 * 1000,
+    });
     const [confirmId, setConfirmId] = useState<string | null>(null);
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
-
-    useEffect(() => {
-        api
-            .get<PostSaveItem[]>("/api/posts")
-            .then((res) => setSaves(res.data || []))
-            .catch(() => {
-                /* non-critical */
-            })
-            .finally(() => setLoadingSaves(false));
-    }, []);
 
     const confirmDelete = (id: string) => setConfirmId(id);
 
@@ -98,12 +94,10 @@ export default function SocialHubPage() {
         if (!confirmId) return;
         const id = confirmId;
         setConfirmId(null);
-        const snapshot = saves;
-        setSaves((prev) => prev.filter((s) => s.id !== id));
         try {
             await api.delete(`/api/posts/${id}`);
+            qc.invalidateQueries({ queryKey: QUERY_KEYS.posts });
         } catch {
-            setSaves(snapshot);
             toast.error("Failed to delete — please try again");
         }
     };

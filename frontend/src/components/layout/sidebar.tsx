@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -16,6 +17,7 @@ import {
   Recycle,
   Image as ImageIcon,
   BarChart3,
+  CalendarDays,
 } from "lucide-react";
 
 const navItems = [
@@ -65,6 +67,11 @@ const navItems = [
     icon: FileText,
   },
   {
+    title: "Calendar",
+    href: "/calendar",
+    icon: CalendarDays,
+  },
+  {
     title: "Analytics",
     href: "/analytics",
     icon: BarChart3,
@@ -87,8 +94,15 @@ export function Sidebar() {
   return (
     <aside className="hidden w-64 shrink-0 border-r bg-card md:block">
       <div className="flex h-16 items-center border-b px-6">
-        <Link href="/dashboard" className="text-lg font-bold">
-          AI Marketing
+        <Link href="/dashboard" className="flex items-center gap-2 text-lg font-bold">
+          <Image
+            src="/omni_logo.png"
+            alt="AI Marketing logo"
+            width={28}
+            height={28}
+            priority
+          />
+          <span>AI Marketing</span>
         </Link>
       </div>
       <nav className="flex flex-col gap-1 p-4">

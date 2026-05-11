@@ -1,5 +1,8 @@
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime, timezone
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -8,7 +11,12 @@ from app.models.post import Post
 from app.models.social_account import SocialAccount
 from app.schemas.post import PostCreate, PostUpdate, PostResponse
 from app.dependencies import get_current_user
-from app.services.social import publish_to_facebook, publish_to_instagram
+from app.services.social import (
+    publish_to_facebook,
+    publish_to_instagram,
+    publish_to_linkedin,
+    publish_to_reddit,
+)
 from app.config import settings
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
@@ -36,6 +44,71 @@ def create_post(
 ):
     post = Post(user_id=current_user.id, **data.model_dump())
     db.add(post)
+    db.commit()
+    db.refresh(post)
+    return post
+
+
+# ---------------------------------------------------------------------------
+# Calendar endpoints — MUST be declared before /{post_id} so FastAPI matches
+# the literal path "/calendar" before the generic param route.
+# ---------------------------------------------------------------------------
+
+class RescheduleRequest(BaseModel):
+    scheduled_at: datetime
+
+
+@router.get("/calendar", response_model=list[PostResponse])
+def get_calendar_posts(
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all posts whose scheduled_at OR published_at falls in the given
+    year/month. Used by the calendar UI to populate day cells."""
+    from calendar import monthrange
+    _, last_day = monthrange(year, month)
+    period_start = datetime(year, month, 1, tzinfo=timezone.utc)
+    period_end = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    posts = (
+        db.query(Post)
+        .filter(
+            Post.user_id == current_user.id,
+            or_(
+                Post.scheduled_at.between(period_start, period_end),
+                Post.published_at.between(period_start, period_end),
+            ),
+        )
+        .order_by(Post.scheduled_at.asc().nullslast(), Post.published_at.asc().nullslast())
+        .all()
+    )
+    return posts
+
+
+@router.patch("/{post_id}/reschedule", response_model=PostResponse)
+def reschedule_post(
+    post_id: str,
+    data: RescheduleRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update scheduled_at and flip status to 'scheduled' (or back to 'draft' if null)."""
+    post = (
+        db.query(Post)
+        .filter(Post.id == post_id, Post.user_id == current_user.id)
+        .first()
+    )
+    if not post:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+    if post.status == "published":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot reschedule an already-published post.",
+        )
+    post.scheduled_at = data.scheduled_at
+    post.status = "scheduled" if data.scheduled_at else "draft"
     db.commit()
     db.refresh(post)
     return post
@@ -171,14 +244,12 @@ async def publish_post(
 
         # Publish to the platform
         elif post.platform.lower() == "facebook":
-            # Combine content and hashtags for Facebook
             full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
-
             result = await publish_to_facebook(
                 page_id=social_account.page_id,
                 access_token=social_account.access_token,
                 content=full_content,
-                image_url=post.image_url if hasattr(post, 'image_url') else None
+                image_url=post.image_url if post.image_url else None,
             )
 
         elif post.platform.lower() == "instagram":
@@ -198,6 +269,24 @@ async def publish_post(
                 image_url=post.image_url,
                 caption=caption,
                 user_id=current_user.id
+            )
+
+        elif post.platform.lower() == "linkedin":
+            full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
+            result = await publish_to_linkedin(
+                member_urn=social_account.page_id,
+                access_token=social_account.access_token,
+                content=full_content,
+                image_url=post.image_url if post.image_url else None,
+            )
+
+        elif post.platform.lower() == "reddit":
+            full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
+            result = await publish_to_reddit(
+                username=social_account.page_id,
+                image_url=post.image_url if post.image_url else None,
+                access_token=social_account.access_token,
+                content=full_content,
             )
 
         else:

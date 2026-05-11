@@ -214,14 +214,28 @@ def generate_faq_schema(faqs: list[dict]) -> dict:
 def analyse_content_structure(content: str) -> dict:
     """
     Analyse heading structure, paragraph length and formatting issues.
+    Supports both Markdown (`# `, `## `, `### `) and HTML (`<h1>`, `<h2>`,
+    `<h3>`) since the SEO editor stores rich-text HTML.
     """
     lines = content.split('\n')
 
-    h1 = [l for l in lines if l.startswith('# ') and not l.startswith('## ')]
-    h2 = [l for l in lines if l.startswith('## ') and not l.startswith('### ')]
-    h3 = [l for l in lines if l.startswith('### ')]
+    # Markdown headings
+    md_h1 = [l for l in lines if l.startswith('# ') and not l.startswith('## ')]
+    md_h2 = [l for l in lines if l.startswith('## ') and not l.startswith('### ')]
+    md_h3 = [l for l in lines if l.startswith('### ')]
 
-    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+    # HTML headings — count both opening tags inside the raw content.
+    html_h1 = re.findall(r'<h1\b[^>]*>', content, flags=re.IGNORECASE)
+    html_h2 = re.findall(r'<h2\b[^>]*>', content, flags=re.IGNORECASE)
+    html_h3 = re.findall(r'<h3\b[^>]*>', content, flags=re.IGNORECASE)
+
+    h1 = md_h1 + html_h1
+    h2 = md_h2 + html_h2
+    h3 = md_h3 + html_h3
+
+    # For paragraph stats, strip HTML tags so word counts aren't polluted.
+    plain = re.sub(r'<[^>]+>', ' ', content)
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', plain) if p.strip()]
     para_lengths = [len(re.findall(r'\b\w+\b', p)) for p in paragraphs]
     long_paras = [l for l in para_lengths if l > 150]
 
@@ -347,13 +361,28 @@ def analyse_keyword_placement(text: str, keyword: str) -> dict:
     kw = keyword.lower()
     lines = text.split("\n")
 
-    h1_lines = [l for l in lines if l.startswith("# ") and not l.startswith("## ")]
-    h2_lines = [l for l in lines if l.startswith("## ")]
+    # Markdown headings
+    md_h1_lines = [l for l in lines if l.startswith("# ") and not l.startswith("## ")]
+    md_h2_lines = [l for l in lines if l.startswith("## ")]
 
-    in_h1 = any(kw in l.lower() for l in h1_lines)
-    in_h2 = any(kw in l.lower() for l in h2_lines)
+    # HTML headings — extract inner text of <h1>/<h2> tags
+    html_h1_lines = re.findall(r'<h1\b[^>]*>(.*?)</h1>', text, flags=re.IGNORECASE | re.DOTALL)
+    html_h2_lines = re.findall(r'<h2\b[^>]*>(.*?)</h2>', text, flags=re.IGNORECASE | re.DOTALL)
 
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip() and not p.strip().startswith("#")]
+    # Strip any nested tags from heading inner-HTML before matching
+    def _strip(s: str) -> str:
+        return re.sub(r'<[^>]+>', ' ', s)
+
+    h1_texts = [l.lower() for l in md_h1_lines] + [_strip(l).lower() for l in html_h1_lines]
+    h2_texts = [l.lower() for l in md_h2_lines] + [_strip(l).lower() for l in html_h2_lines]
+
+    in_h1 = any(kw in t for t in h1_texts)
+    in_h2 = any(kw in t for t in h2_texts)
+
+    # First paragraph: strip HTML so we look at plain text, skip heading-only blocks.
+    plain = re.sub(r'<(h[1-6]|/h[1-6])\b[^>]*>', '\n', text, flags=re.IGNORECASE)
+    plain = re.sub(r'<[^>]+>', ' ', plain)
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', plain) if p.strip() and not p.strip().startswith("#")]
     first_para = paragraphs[0].lower() if paragraphs else ""
 
     in_first = kw in first_para

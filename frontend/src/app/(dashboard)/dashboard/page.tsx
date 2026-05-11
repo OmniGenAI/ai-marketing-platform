@@ -1,9 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { useAuth } from "@/hooks/use-auth";
-import api from "@/lib/api";
-import type { Wallet, Subscription, Post } from "@/types";
+import { usePostsQuery, useWalletQuery, useSubscriptionQuery } from "@/hooks/queries";
 import {
   Card,
   CardContent,
@@ -18,30 +16,9 @@ import { Sparkles, FileText, CreditCard, Building2, Loader2 } from "lucide-react
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const [wallet, setWallet] = useState<Wallet | null>(null);
-  const [subscription, setSubscription] = useState<Subscription | null>(null);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [walletRes, subscriptionRes, postsRes] = await Promise.all([
-          api.get<Wallet>("/api/wallet").catch(() => ({ data: null })),
-          api.get<Subscription | null>("/api/subscription/status").catch(() => ({ data: null })),
-          api.get<Post[]>("/api/posts").catch(() => ({ data: [] })),
-        ]);
-
-        setWallet(walletRes.data);
-        setSubscription(subscriptionRes.data);
-        setPosts(postsRes.data || []);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, []);
+  const { data: wallet } = useWalletQuery();
+  const { data: subscription } = useSubscriptionQuery();
+  const { data: posts = [], isLoading: loading } = usePostsQuery();
 
   const publishedCount = posts.filter((p) => p.status === "published").length;
   const recentPosts = posts.slice(0, 3);

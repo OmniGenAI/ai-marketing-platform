@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     Recycle,
     Search,
@@ -49,21 +50,15 @@ function timeAgo(iso: string): string {
 }
 
 export default function RepurposeHubPage() {
-    const [saves, setSaves] = useState<RepurposeSaveItem[]>([]);
-    const [loadingSaves, setLoadingSaves] = useState(true);
+    const qc = useQueryClient();
+    const { data: saves = [], isLoading: loadingSaves } = useQuery<RepurposeSaveItem[]>({
+        queryKey: ["repurpose-saves"],
+        queryFn: async () => (await api.get<RepurposeSaveItem[]>("/api/repurpose/saves")).data || [],
+        staleTime: 30 * 1000,
+    });
     const [confirmId, setConfirmId] = useState<string | null>(null);
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
-
-    useEffect(() => {
-        api
-            .get<RepurposeSaveItem[]>("/api/repurpose/saves")
-            .then((res) => setSaves(res.data || []))
-            .catch(() => {
-                /* non-critical — list is just empty */
-            })
-            .finally(() => setLoadingSaves(false));
-    }, []);
 
     const confirmDelete = (id: string) => setConfirmId(id);
 
@@ -71,12 +66,10 @@ export default function RepurposeHubPage() {
         if (!confirmId) return;
         const id = confirmId;
         setConfirmId(null);
-        const snapshot = saves;
-        setSaves((prev) => prev.filter((s) => s.id !== id));
         try {
             await api.delete(`/api/repurpose/saves/${id}`);
+            qc.invalidateQueries({ queryKey: ["repurpose-saves"] });
         } catch {
-            setSaves(snapshot);
             toast.error("Failed to delete — please try again");
         }
     };

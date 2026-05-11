@@ -43,8 +43,20 @@ import {
   Wand2,
   Search,
   Link as LinkIcon,
+  Clock,
+  ArrowLeft,
+  CheckCircle2,
+  Facebook,
+  Instagram,
+  Linkedin,
+  MessageSquare,
+  Code2,
+  Youtube,
+  AlertCircle,
 } from "lucide-react";
 import api from "@/lib/api";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { useQuery } from "@tanstack/react-query";
 import { useSubscription } from "@/hooks/use-subscription";
 import type { GenerateResponse } from "@/types";
 
@@ -71,12 +83,44 @@ function GeneratePageContent() {
   } = useSubscription();
 
   const [tone, setTone] = useState("professional");
-  const [selectedPlatform, setSelectedPlatform] = useState<string>("facebook");
+  // Multi-select tones — when 2+ are selected the LLM blends them into one cohesive voice.
+  // `tone` (singular) is kept for backwards-compat with downstream code that reads it.
+  const [selectedTones, setSelectedTones] = useState<string[]>(["professional"]);
+  const toggleTone = (v: string) => {
+    setSelectedTones(prev => {
+      if (prev.includes(v)) {
+        // Keep at least 1
+        return prev.length > 1 ? prev.filter(t => t !== v) : prev;
+      }
+      return [...prev, v];
+    });
+    // Mirror first selected as `tone` for legacy code paths
+    setTone(v);
+  };
+  // Multi-select platforms — generation/publish run for each, but a single
+  // post row is created per platform. selectedPlatform mirrors the first one
+  // for backward compatibility with downstream code that expects a single value.
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(["facebook"]);
+  const selectedPlatform = selectedPlatforms[0] ?? "facebook";
+  const setSelectedPlatform = (v: string) => setSelectedPlatforms([v]);
+  const togglePlatform = (v: string) => {
+    setSelectedPlatforms(prev => {
+      if (prev.includes(v)) {
+        // Don't allow deselecting the last one — at least 1 platform must stay
+        return prev.length > 1 ? prev.filter(p => p !== v) : prev;
+      }
+      return [...prev, v];
+    });
+  };
   const [topic, setTopic] = useState("");
   const [topicError, setTopicError] = useState("");
   const [imageOption, setImageOption] = useState<ImageOption>("upload");
   const [generatedContent, setGeneratedContent] = useState("");
   const [generatedHashtags, setGeneratedHashtags] = useState("");
+  // All caption variations returned by the backend (when `variations > 1`).
+  // The first one is mirrored into generatedContent/Hashtags as the default.
+  const [variations, setVariations] = useState<Array<{ content: string; hashtags: string }>>([]);
+  const [variationIndex, setVariationIndex] = useState(0);
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   // Tracks the auto-saved draft Post returned by /api/generate so subsequent
   // Save Draft / Publish actions update that row instead of creating duplicates.
@@ -85,6 +129,19 @@ function GeneratePageContent() {
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
+  const [scheduleValue, setScheduleValue] = useState("");
+  const [publishPlatforms, setPublishPlatforms] = useState<string[]>([]);
+  // Per-platform live status during publish ("pending" | "publishing" | "success" | "failed")
+  type PlatformStatus = "pending" | "publishing" | "success" | "failed";
+  const [publishProgress, setPublishProgress] = useState<Record<string, { status: PlatformStatus; error?: string }>>({});
+
+  // Fetch connected providers — used to populate the publish platform list dynamically
+  const { data: providers = [] } = useQuery<{ platform: string; configured: boolean; connected: boolean; page_name: string | null }[]>({
+    queryKey: ["social-providers"],
+    queryFn: async () => (await api.get("/api/social/providers")).data,
+    staleTime: 60 * 1000,
+    enabled: isPublishModalOpen,
+  });
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [aspectRatio, setAspectRatio] = useState<string>("1:1");
@@ -94,16 +151,97 @@ function GeneratePageContent() {
   const [isImagePending, setIsImagePending] = useState(false);
 
   const handlePublishClick = () => {
-    if (!selectedPlatform) {
-      toast.error("Please select a platform");
-      return;
+    if (!generatedContent) { toast.error("Generate content first"); return; }
+    // Pre-select platforms based on what was chosen for generation
+    // (only override if nothing is already set — preserves loaded post state)
+    if (publishPlatforms.length === 0) {
+      setPublishPlatforms(selectedPlatforms);
     }
     setIsPublishModalOpen(true);
   };
 
-  const handleFinalPublish = async () => {
-    setIsPublishModalOpen(false);
-    handlePostNow();
+  // Unified publish/schedule handler — creates one post per selected platform
+  // (each platform has its own row in the DB so schedule/publish runs independently).
+  // Tracks per-platform progress in `publishProgress` so the UI can ping-pong status.
+  const handleConfirmPublish = async () => {
+    if (publishPlatforms.length === 0) { toast.error("Select at least one platform"); return; }
+    setIsPublishing(true);
+
+    // Seed all platforms as "pending"
+    const initialProgress: Record<string, { status: PlatformStatus; error?: string }> = {};
+    publishPlatforms.forEach(p => { initialProgress[p] = { status: "pending" }; });
+    setPublishProgress(initialProgress);
+
+    try {
+      const isoSchedule = scheduleValue ? new Date(scheduleValue).toISOString() : null;
+      const baseFields = {
+        content: generatedContent,
+        hashtags: generatedHashtags,
+        image_url: getDisplayImageUrl(),
+        image_option: imageOption,
+        tone,
+      };
+
+      const results: { platform: string; ok: boolean; error?: string }[] = [];
+
+      for (let i = 0; i < publishPlatforms.length; i++) {
+        const platform = publishPlatforms[i];
+        // Mark this platform as actively publishing
+        setPublishProgress(prev => ({ ...prev, [platform]: { status: "publishing" } }));
+        try {
+          let postId: string | null = null;
+          if (i === 0 && currentPostId) {
+            await api.patch(`/api/posts/${currentPostId}`, {
+              ...baseFields,
+              platform,
+              status: "draft",
+            });
+            postId = currentPostId;
+          } else {
+            const res = await api.post<{ id: string }>("/api/posts", {
+              ...baseFields,
+              platform,
+              status: "draft",
+            });
+            postId = res.data.id;
+            if (i === 0) setCurrentPostId(postId);
+          }
+          if (isoSchedule) {
+            await api.patch(`/api/posts/${postId}/reschedule`, { scheduled_at: isoSchedule });
+          } else {
+            await api.post(`/api/posts/${postId}/publish`);
+          }
+          setPublishProgress(prev => ({ ...prev, [platform]: { status: "success" } }));
+          results.push({ platform, ok: true });
+        } catch (err) {
+          const e = err as { response?: { data?: { detail?: string } } };
+          const errMsg = e.response?.data?.detail || "Failed";
+          setPublishProgress(prev => ({ ...prev, [platform]: { status: "failed", error: errMsg } }));
+          results.push({ platform, ok: false, error: errMsg });
+        }
+      }
+
+      const successful = results.filter(r => r.ok);
+      const failed = results.filter(r => !r.ok);
+
+      if (successful.length > 0) {
+        const action = isoSchedule ? "scheduled" : "published";
+        const platformList = successful.map(r => r.platform).join(", ");
+        toast.success(`${action.charAt(0).toUpperCase() + action.slice(1)} on ${platformList}`);
+      }
+      if (failed.length > 0) {
+        const platformList = failed.map(r => r.platform).join(", ");
+        toast.error(`Failed on ${platformList}`);
+      }
+      // Auto-close dialog only when ALL platforms succeeded; otherwise let user inspect the errors
+      if (failed.length === 0) {
+        setTimeout(() => setIsPublishModalOpen(false), 1200);
+      }
+    } catch {
+      toast.error("Failed to schedule/publish");
+    } finally {
+      setIsPublishing(false);
+    }
   };
 
   // Load existing post when ?id= is present in the URL (e.g. navigating from
@@ -121,6 +259,8 @@ function GeneratePageContent() {
           image_option: string;
           platform: string;
           tone: string;
+          scheduled_at?: string | null;
+          status?: string;
         }>(`/api/posts/${id}`);
         const p = res.data;
         setCurrentPostId(p.id);
@@ -128,6 +268,14 @@ function GeneratePageContent() {
         setGeneratedHashtags(p.hashtags || "");
         setSelectedPlatform(p.platform || "facebook");
         setTone(p.tone || "professional");
+        // Pre-fill modal state when reopening a scheduled / saved post
+        if (p.platform) setPublishPlatforms([p.platform]);
+        if (p.scheduled_at) {
+          // Convert UTC ISO -> local datetime-local format
+          const d = new Date(p.scheduled_at);
+          const pad = (n: number) => String(n).padStart(2, "0");
+          setScheduleValue(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+        }
         if (p.image_option === "upload" || p.image_option === "ai") {
           setImageOption(p.image_option as ImageOption);
         }
@@ -313,7 +461,9 @@ function GeneratePageContent() {
     try {
       const payload = {
         platform: selectedPlatform,
-        tone,
+        tone,                           // Backwards compat — backend uses `tones` if provided
+        tones: selectedTones,           // Multi-tone blend
+        variations: 2,                  // Always request 2 caption variations
         topic,
         image_option: imageOption,
         uploaded_image_url: imageOption === "upload" ? uploadedImageUrl : null,
@@ -333,6 +483,9 @@ function GeneratePageContent() {
 
       setGeneratedContent(response.data.content);
       setGeneratedHashtags(response.data.hashtags);
+      // Capture all variations if backend returned them
+      setVariations(response.data.variations || []);
+      setVariationIndex(0);
       setGeneratedImageUrl(response.data.image_url);
       // Replace any prior draft id with the freshly-created one so subsequent
       // Save / Publish actions update this row, not the previous draft.
@@ -482,12 +635,31 @@ function GeneratePageContent() {
   const showLowCreditsWarning = creditsRemaining !== Infinity && creditsRemaining <= 3 && creditsRemaining > 0;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Generate Post</h1>
-        <p className="text-muted-foreground">
-          Use AI to generate engaging social media posts for your business.
-        </p>
+    <div className="space-y-4">
+      {/* Breadcrumb back */}
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+        <button
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Back
+        </button>
+        <span>/</span>
+        <span className="text-foreground font-medium">Generate Post</span>
+      </div>
+
+      {/* Title + icon */}
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-purple-500 text-white shadow-sm">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Generate Post</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            Use AI to craft engaging social media posts for your business.
+          </p>
+        </div>
       </div>
 
       {showLowCreditsWarning && (
@@ -528,99 +700,134 @@ function GeneratePageContent() {
         </Alert>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-[440px_1fr] relative">
         <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Post Settings</CardTitle>
+          <Card className="relative border-purple-200 h-[calc(100vh-13rem)] flex flex-col gap-0 overflow-hidden">
+            {/* Purple accent stripe */}
+            <div className="absolute inset-x-0 top-0 h-1 bg-purple-500" />
+            <CardHeader className="shrink-0 mb-3 border-b">
+              <CardTitle className="text-purple-600">
+                Post Settings
+              </CardTitle>
               <CardDescription>
                 Configure what kind of post you want to generate.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-2">
+            <CardContent className="flex-1 overflow-y-auto space-y-6 pb-6 scrollbar-thin">
+              {/* Topic */}
+              <div className="space-y-1.5">
                 <Label htmlFor="topic">
                   Post Topic <span className="text-red-500">*</span>
                 </Label>
                 <Textarea
                   id="topic"
-                  placeholder="e.g., New product launch, Holiday sale, Behind the scenes..."
+                  placeholder="e.g., New product launch, Holiday sale, Behind the scenes…"
                   value={topic}
                   onChange={(e) => {
                     setTopic(e.target.value);
                     if (topicError) setTopicError("");
                   }}
                   rows={3}
-                  className={topicError ? "border-red-500 focus:ring-red-500" : "focus:ring-primary"}
+                  className={topicError ? "border-red-500 focus:ring-red-500" : ""}
                 />
                 {topicError && (
-                  <p className="text-sm text-red-500">{topicError}</p>
+                  <p className="text-xs text-red-500">{topicError}</p>
                 )}
               </div>
 
+              {/* Platform — multi-select grid with platform colors */}
               <div className="space-y-2">
-                <Label>
-                  Platform <span className="text-red-500">*</span>
+                <Label className="flex items-center justify-between">
+                  <span>Platform <span className="text-red-500">*</span></span>
+                  {selectedPlatforms.length > 0 && (
+                    <span className="text-[10px] text-muted-foreground font-normal">
+                      {selectedPlatforms.length} selected
+                    </span>
+                  )}
                 </Label>
-                <div className="flex flex-wrap gap-2">
+                <div className="grid grid-cols-3 gap-1.5">
                   {[
-                    { value: "facebook", label: "Facebook" },
-                    { value: "instagram", label: "Instagram" },
-                    { value: "linkedin", label: "LinkedIn" },
-                    { value: "twitter", label: "X / Twitter" },
-                    { value: "threads", label: "Threads" },
+                    { value: "facebook",  label: "Facebook",  color: "#1877F2" },
+                    { value: "instagram", label: "Instagram", color: "#E4405F" },
+                    { value: "linkedin",  label: "LinkedIn",  color: "#0A66C2" },
+                    { value: "twitter",   label: "X / Twitter", color: "#0F172A" },
+                    { value: "threads",   label: "Threads",   color: "#0F172A" },
                   ].map((p) => {
-                    const active = selectedPlatform === p.value;
+                    const active = selectedPlatforms.includes(p.value);
                     return (
                       <button
                         key={p.value}
                         type="button"
-                        onClick={() => setSelectedPlatform(p.value)}
-                        className={`px-4 py-2 rounded-full text-xs font-semibold transition-all border ${
+                        onClick={() => togglePlatform(p.value)}
+                        style={active ? { borderColor: p.color, color: p.color, backgroundColor: `${p.color}10` } : undefined}
+                        className={`relative px-2.5 py-2 rounded-lg text-xs font-semibold transition-all border ${
                           active
-                            ? "bg-primary text-primary-foreground border-primary shadow-sm"
-                            : "bg-background text-muted-foreground border-input hover:border-primary/50"
+                            ? "ring-1"
+                            : "text-muted-foreground border-border hover:border-foreground/30"
                         }`}
                       >
                         {p.label}
+                        {active && (
+                          <span
+                            className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white"
+                            style={{ backgroundColor: p.color }}
+                          >
+                            ✓
+                          </span>
+                        )}
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              <div className="space-y-4">
+              {/* Tone */}
+              <div className="space-y-2">
                 <Label className="flex items-center justify-between">
-                  Tone
+                  <span>
+                    Tone
+                    {selectedTones.length > 1 && (
+                      <span className="ml-2 text-[10px] text-purple-600 font-medium">
+                        Blending {selectedTones.length} tones
+                      </span>
+                    )}
+                  </span>
                   {isFreePlan && (
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
                       Upgrade for more
                     </span>
                   )}
                 </Label>
-                <div className="flex flex-wrap gap-2">
-                  {availableTones.map((t) => (
-                    <button
-                      key={t.value}
-                      type="button"
-                      onClick={() => setTone(t.value)}
-                      className={`px-4 py-2 rounded-full text-xs font-semibold transition-all border ${
-                        tone === t.value
-                          ? "bg-primary text-primary-foreground border-primary shadow-sm"
-                          : "bg-background text-muted-foreground border-input hover:border-primary/50"
-                      }`}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
+                <div className="flex flex-wrap gap-1.5">
+                  {availableTones.map((t) => {
+                    const active = selectedTones.includes(t.value);
+                    return (
+                      <button
+                        key={t.value}
+                        type="button"
+                        onClick={() => toggleTone(t.value)}
+                        className={`px-3 py-1.5 rounded-full text-[11px] font-medium transition-all border ${
+                          active
+                            ? "border-purple-500 bg-purple-50 text-purple-700"
+                            : "text-muted-foreground border-border hover:border-foreground/30"
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
                 </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Pick one for a single voice, or select multiple to blend them.
+                </p>
               </div>
 
-              <div className="space-y-3 rounded-xl border border-primary/20 p-4 bg-muted/20 shadow-sm transition-all">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="space-y-1">
-                    <Label className="flex items-center gap-2 text-sm font-bold">
-                      <Search className="h-4 w-4 text-primary" />
+              {/* SEO Mode — compact card with purple accent */}
+              <div className="space-y-3 rounded-lg border border-purple-200 p-3 bg-purple-50/40 transition-all">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <Label className="flex items-center gap-1.5 text-sm font-semibold">
+                      <Search className="h-3.5 w-3.5 text-purple-600" />
                       SEO Mode
                     </Label>
                     <p className="text-xs text-muted-foreground leading-relaxed">
@@ -632,8 +839,8 @@ function GeneratePageContent() {
                     role="switch"
                     aria-checked={seoMode}
                     onClick={() => setSeoMode(!seoMode)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-                      seoMode ? "bg-primary" : "bg-muted-foreground/30"
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 ${
+                      seoMode ? "bg-purple-500" : "bg-muted-foreground/30"
                     }`}
                   >
                     <span
@@ -670,9 +877,10 @@ function GeneratePageContent() {
                 )}
               </div>
 
-              <div className="space-y-2 group">
-                <Label htmlFor="blog-url" className="flex items-center gap-2">
-                  <LinkIcon className="h-3.5 w-3.5" />
+              {/* Backlink URL */}
+              <div className="space-y-1.5">
+                <Label htmlFor="blog-url" className="flex items-center gap-1.5">
+                  <LinkIcon className="h-3.5 w-3.5 text-muted-foreground" />
                   Backlink URL <span className="text-[10px] text-muted-foreground font-normal">(Optional)</span>
                 </Label>
                 <Input
@@ -686,41 +894,48 @@ function GeneratePageContent() {
 
               <Separator />
 
-              <div className="grid grid-cols-2 gap-3">
-                <Button
-                  type="button"
-                  variant={imageOption === "upload" ? "default" : "outline"}
-                  className="h-auto py-3 flex flex-col gap-1 transition-all"
-                  onClick={() => setImageOption("upload")}
-                >
-                  <ImageIcon className="h-5 w-5" />
-                  <span className="text-xs font-bold uppercase tracking-tight">Upload</span>
-                </Button>
-                <Button
-                  type="button"
-                  variant={imageOption === "ai" ? "default" : "outline"}
-                  className="h-auto py-3 flex flex-col gap-1 transition-all"
-                  onClick={() => {
-                    setImageOption("ai");
-                    setUploadedImageUrl(null);
-                  }}
-                >
-                  <Wand2 className="h-5 w-5" />
-                  <span className="text-xs font-bold uppercase tracking-tight">AI Generated</span>
-                </Button>
+              {/* Image source toggle */}
+              <div className="space-y-2">
+                <Label className="text-xs">Image source</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setImageOption("upload")}
+                    className={`flex flex-col items-center gap-1.5 rounded-lg border py-3 transition-all ${
+                      imageOption === "upload"
+                        ? "border-purple-500 bg-purple-50 text-purple-700 ring-1 ring-purple-500"
+                        : "border-border text-muted-foreground hover:border-foreground/30"
+                    }`}
+                  >
+                    <ImageIcon className="h-4 w-4" />
+                    <span className="text-xs font-semibold">Upload</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setImageOption("ai"); setUploadedImageUrl(null); }}
+                    className={`flex flex-col items-center gap-1.5 rounded-lg border py-3 transition-all ${
+                      imageOption === "ai"
+                        ? "border-purple-500 bg-purple-50 text-purple-700 ring-1 ring-purple-500"
+                        : "border-border text-muted-foreground hover:border-foreground/30"
+                    }`}
+                  >
+                    <Wand2 className="h-4 w-4" />
+                    <span className="text-xs font-semibold">AI Generated</span>
+                  </button>
+                </div>
               </div>
 
               {imageOption === "ai" && (
                 <div className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-200">
                   <div className="space-y-2">
                     <Label className="text-xs">Aspect Ratio</Label>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                       {[
-                        { value: "1:1", label: "1:1 Square" },
-                        { value: "4:5", label: "4:5 Portrait" },
-                        { value: "9:16", label: "9:16 Story" },
-                        { value: "16:9", label: "16:9 Landscape" },
-                        { value: "1.91:1", label: "1.91:1 Link" },
+                        { value: "1:1",    label: "Square",    sub: "1:1" },
+                        { value: "4:5",    label: "Portrait",  sub: "4:5" },
+                        { value: "9:16",   label: "Story",     sub: "9:16" },
+                        { value: "16:9",   label: "Landscape", sub: "16:9" },
+                        { value: "1.91:1", label: "Link",      sub: "1.91:1" },
                       ].map((r) => {
                         const active = aspectRatio === r.value;
                         return (
@@ -728,13 +943,14 @@ function GeneratePageContent() {
                             key={r.value}
                             type="button"
                             onClick={() => setAspectRatio(r.value)}
-                            className={`px-3 py-1.5 rounded-full text-[11px] font-semibold transition-all border ${
+                            className={`rounded-md border p-2 text-left text-xs transition-all ${
                               active
-                                ? "bg-primary text-primary-foreground border-primary shadow-sm"
-                                : "bg-background text-muted-foreground border-input hover:border-primary/50"
+                                ? "border-purple-500 bg-purple-50 ring-1 ring-purple-500"
+                                : "border-border hover:border-foreground/30"
                             }`}
                           >
-                            {r.label}
+                            <span className={`block font-semibold ${active ? "text-purple-700" : ""}`}>{r.label}</span>
+                            <span className="block text-[10px] text-muted-foreground">{r.sub}</span>
                           </button>
                         );
                       })}
@@ -829,10 +1045,14 @@ function GeneratePageContent() {
                 </div>
               )}
 
+            </CardContent>
+
+            {/* Sticky generate footer — stays at the bottom of the fixed-height card */}
+            <div className="px-6 pt-3 shrink-0 border-t bg-background">
               <Button
                 onClick={handleGenerate}
                 disabled={isGenerating || creditsRemaining === 0}
-                className="w-full h-12 text-base font-bold gap-2 shadow-sm transition-all"
+                className="w-full h-12 text-base font-bold gap-2 shadow-sm transition-all bg-purple-500 hover:bg-purple-600 text-white"
               >
                 {isGenerating ? (
                   <>
@@ -846,17 +1066,19 @@ function GeneratePageContent() {
                   </>
                 )}
               </Button>
-            </CardContent>
+            </div>
           </Card>
         </div>
 
-        <Card>
+        <Card className="relative border-purple-200 overflow-hidden">
+          {/* Purple accent stripe */}
+          <div className="absolute inset-x-0 top-0 h-1 bg-purple-500" />
           <CardHeader>
             <CardTitle className="flex items-center justify-between">
-              Generated Post
-              <div className="flex gap-1">
-                <Badge variant="secondary" className="capitalize">{selectedPlatform}</Badge>
-              </div>
+              <span className="text-purple-600">
+                Generated Post
+              </span>
+              <Badge variant="secondary" className="capitalize">{selectedPlatform}</Badge>
             </CardTitle>
             <CardDescription>
               Review and edit the AI-generated content below.
@@ -865,6 +1087,35 @@ function GeneratePageContent() {
           <CardContent className="space-y-4">
             {generatedContent ? (
               <>
+                {/* Variation switcher — only when 2+ captions are returned */}
+                {variations.length > 1 && (
+                  <div className="flex items-center justify-between rounded-lg border border-purple-200 bg-purple-50/50 px-3 py-2">
+                    <span className="text-xs font-medium text-purple-700">
+                      Caption variation
+                    </span>
+                    <div className="flex gap-1">
+                      {variations.map((_, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => {
+                            setVariationIndex(i);
+                            setGeneratedContent(variations[i].content);
+                            setGeneratedHashtags(variations[i].hashtags);
+                          }}
+                          className={`px-3 py-1 text-xs font-semibold rounded transition-all ${
+                            variationIndex === i
+                              ? "bg-purple-500 text-white"
+                              : "bg-background text-muted-foreground hover:bg-purple-100"
+                          }`}
+                        >
+                          V{i + 1}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {seoKeywordsUsed.length > 0 && (
                   <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 space-y-2">
                     <div className="flex items-center gap-2 text-xs font-semibold text-primary">
@@ -974,31 +1225,184 @@ function GeneratePageContent() {
                 </div>
               </>
             ) : (
-              <div className="flex h-48 items-center justify-center text-muted-foreground">
-                <p>Generated content will appear here</p>
+              <div className="flex min-h-100 flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-purple-50/50 p-8 text-center">
+                <span className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500 text-white shadow-sm">
+                  <Sparkles className="h-6 w-6" />
+                </span>
+                <h3 className="text-lg font-semibold">No post yet</h3>
+                <p className="max-w-sm text-sm text-muted-foreground">
+                  Fill in the topic and pick a platform on the left, then hit Generate.
+                  The AI will craft a platform-native post you can edit, schedule, or publish live.
+                </p>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
 
-      <Dialog open={isPublishModalOpen} onOpenChange={setIsPublishModalOpen}>
-        <DialogContent className="sm:max-w-md">
+      {/* Unified Publish Dialog — 3 sections: platforms, schedule, confirm */}
+      <Dialog open={isPublishModalOpen} onOpenChange={(o) => { setIsPublishModalOpen(o); if (!o) setPublishProgress({}); }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Publish to <span className="capitalize">{selectedPlatform}</span>?</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <Send className="h-4 w-4" /> Publish Post
+            </DialogTitle>
             <DialogDescription>
-              This will publish the post to your connected{" "}
-              <span className="capitalize">{selectedPlatform}</span> account immediately.
+              Choose platforms and schedule, then publish.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsPublishModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleFinalPublish} disabled={isPublishing}>
-              Confirm & Publish
-            </Button>
-          </DialogFooter>
+
+          <div className="space-y-5 py-1">
+            {/* ── Section 1: Platform selection ── */}
+            {(() => {
+              const SOCIAL_PLATFORMS: Record<string, { label: string; icon: React.ReactNode; bg: string }> = {
+                facebook:  { label: "Facebook",   icon: <Facebook className="h-4 w-4" />,      bg: "bg-[#1877F2]" },
+                instagram: { label: "Instagram",  icon: <Instagram className="h-4 w-4" />,     bg: "bg-[#E4405F]" },
+                linkedin:  { label: "LinkedIn",   icon: <Linkedin className="h-4 w-4" />,      bg: "bg-[#0A66C2]" },
+                reddit:    { label: "Reddit",     icon: <MessageSquare className="h-4 w-4" />, bg: "bg-[#FF4500]" },
+                youtube:   { label: "YouTube",    icon: <Youtube className="h-4 w-4" />,       bg: "bg-[#FF0000]" },
+                devto:     { label: "Dev.to",     icon: <Code2 className="h-4 w-4" />,         bg: "bg-[#0A0A0A]" },
+              };
+              const socialProviders = providers.filter(p => SOCIAL_PLATFORMS[p.platform]);
+              return (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                    1 — Select Platforms
+                  </p>
+                  {socialProviders.length === 0 ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      No platforms connected yet.
+                      <button
+                        className="underline hover:text-foreground ml-auto shrink-0"
+                        onClick={() => { setIsPublishModalOpen(false); router.push("/settings"); }}
+                      >
+                        Connect in Settings
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      {socialProviders.map(p => {
+                        const cfg = SOCIAL_PLATFORMS[p.platform]!;
+                        const selected = publishPlatforms.includes(p.platform);
+                        const progress = publishProgress[p.platform];
+                        // Status-based border color overrides the default selected state
+                        const borderClass =
+                          progress?.status === "publishing" ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500" :
+                          progress?.status === "success" ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500" :
+                          progress?.status === "failed" ? "border-red-500 bg-red-50 ring-1 ring-red-500" :
+                          selected ? "border-purple-500 bg-purple-50 ring-1 ring-purple-500" : "hover:bg-muted/50";
+                        return (
+                          <button
+                            key={p.platform}
+                            disabled={isPublishing}
+                            onClick={() => {
+                              if (isPublishing) return;
+                              setPublishPlatforms(prev =>
+                                prev.includes(p.platform) ? prev.filter(x => x !== p.platform) : [...prev, p.platform]
+                              );
+                            }}
+                            className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${borderClass} disabled:cursor-not-allowed`}
+                            title={progress?.error}
+                          >
+                            <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white ${cfg.bg}`}>
+                              {cfg.icon}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium">{cfg.label}</p>
+                              {progress?.status === "publishing" && (
+                                <p className="text-[11px] text-blue-600 truncate">{scheduleValue ? "Scheduling…" : "Publishing…"}</p>
+                              )}
+                              {progress?.status === "success" && (
+                                <p className="text-[11px] text-emerald-600 truncate">{scheduleValue ? "Scheduled ✓" : "Published ✓"}</p>
+                              )}
+                              {progress?.status === "failed" && (
+                                <p className="text-[11px] text-red-600 line-clamp-2 wrap-break-word">{progress.error || "Failed"}</p>
+                              )}
+                              {!progress && p.page_name && <p className="text-[11px] text-muted-foreground truncate">{p.page_name}</p>}
+                            </div>
+                            {/* Right-side status indicator */}
+                            {progress?.status === "publishing" ? (
+                              <RefreshCw className="h-4 w-4 text-blue-600 shrink-0 animate-spin" />
+                            ) : progress?.status === "success" ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                            ) : progress?.status === "failed" ? (
+                              <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+                            ) : selected ? (
+                              <CheckCircle2 className="h-4 w-4 text-purple-600 shrink-0" />
+                            ) : !p.connected ? (
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                onClick={(e) => { e.stopPropagation(); setIsPublishModalOpen(false); router.push("/settings"); }}
+                                className="text-[11px] font-medium text-amber-600 hover:underline shrink-0 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 cursor-pointer"
+                              >
+                                Connect
+                              </span>
+                            ) : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {publishPlatforms.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      {publishPlatforms.length} platform{publishPlatforms.length > 1 ? "s" : ""} selected
+                    </p>
+                  )}
+
+                  {/* Failed-platform error details — show full message inline */}
+                  {Object.entries(publishProgress).filter(([, v]) => v.status === "failed").length > 0 && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-1.5">
+                      <p className="text-xs font-semibold text-red-700">Errors</p>
+                      {Object.entries(publishProgress)
+                        .filter(([, v]) => v.status === "failed")
+                        .map(([platform, v]) => (
+                          <div key={platform} className="text-xs text-red-700">
+                            <span className="font-medium capitalize">{platform}:</span>{" "}
+                            <span className="wrap-break-word">{v.error || "Unknown error"}</span>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* ── Section 2: Schedule (optional) ── */}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                2 — Schedule (Optional)
+              </p>
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Pick a date/time to auto-publish. Leave empty to publish now.
+                </p>
+                <DateTimePicker value={scheduleValue} onChange={setScheduleValue} />
+              </div>
+            </div>
+
+            {/* ── Section 3: Confirm ── */}
+            <div className="flex gap-2 pt-1">
+              <Button
+                className="flex-1 gap-1.5 bg-purple-500 hover:bg-purple-600 text-white"
+                disabled={publishPlatforms.length === 0 || isPublishing}
+                onClick={handleConfirmPublish}
+              >
+                {isPublishing
+                  ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> {scheduleValue ? "Scheduling…" : "Publishing…"}</>
+                  : <><Send className="h-3.5 w-3.5" /> {scheduleValue ? "Schedule" : "Publish Now"}</>
+                }
+              </Button>
+              <Button variant="outline" onClick={() => setIsPublishModalOpen(false)}>
+                Cancel
+              </Button>
+            </div>
+            {publishPlatforms.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center">Select at least one platform above</p>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

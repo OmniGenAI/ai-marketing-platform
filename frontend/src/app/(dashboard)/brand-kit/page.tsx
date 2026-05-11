@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -137,7 +138,6 @@ function CompletionBar({ config }: { config: BrandKitState }) {
 
 export default function BrandKitPage() {
   const [isLoading, setIsLoading] = useState(false);
-  const [isFetching, setIsFetching] = useState(true);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [websiteSummary, setWebsiteSummary] = useState<{
     business_type?: string;
@@ -174,8 +174,9 @@ export default function BrandKitPage() {
     website_context: null,
   });
 
-  useEffect(() => {
-    const fetchConfig = async () => {
+  const { isLoading: isFetching } = useQuery({
+    queryKey: ["brand-kit"],
+    queryFn: async () => {
       try {
         const response = await api.get("/api/brand-kit");
         if (response.data) {
@@ -186,34 +187,26 @@ export default function BrandKitPage() {
             competitors: response.data.competitors || "",
             website: response.data.website || "",
           }));
-          // Rehydrate previously saved scraped context (logo, colors, etc.)
           if (response.data.website_context) {
             try {
               const ctx = JSON.parse(response.data.website_context);
               setScrapedContext(ctx);
               if (ctx.ai_summary) {
-                try {
-                  setWebsiteSummary(JSON.parse(ctx.ai_summary));
-                } catch {
-                  /* ignore */
-                }
+                try { setWebsiteSummary(JSON.parse(ctx.ai_summary)); } catch { /* ignore */ }
               }
-            } catch {
-              /* ignore malformed JSON */
-            }
+            } catch { /* ignore */ }
           }
         }
+        return response.data;
       } catch (error: unknown) {
         const err = error as { response?: { status?: number } };
-        if (err.response?.status !== 404) {
-          toast.error("Failed to load brand kit");
-        }
-      } finally {
-        setIsFetching(false);
+        if (err.response?.status !== 404) toast.error("Failed to load brand kit");
+        return null;
       }
-    };
-    fetchConfig();
-  }, []);
+    },
+    staleTime: 5 * 60 * 1000,   // brand config rarely changes
+    refetchOnWindowFocus: false,
+  });
 
   const handleChange = (field: string, value: string) => {
     setConfig((prev) => ({ ...prev, [field]: value }));
