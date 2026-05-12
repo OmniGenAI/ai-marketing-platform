@@ -62,8 +62,9 @@ class YouTubeProvider(OAuthProvider):
         return f"{GOOGLE_AUTHORIZE}?{urlencode(params)}"
 
     async def exchange_code(
-        self, *, code: str, redirect_uri: str
+        self, *, code: str, redirect_uri: str, state: str | None = None,
     ) -> TokenBundle:
+        del state  # not used
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 GOOGLE_TOKEN,

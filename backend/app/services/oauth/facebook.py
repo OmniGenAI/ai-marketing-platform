@@ -128,8 +128,9 @@ class FacebookProvider(OAuthProvider):
         return f"{FB_OAUTH_DIALOG}?{urlencode(params)}"
 
     async def exchange_code(
-        self, *, code: str, redirect_uri: str
+        self, *, code: str, redirect_uri: str, state: str | None = None,
     ) -> TokenBundle:
+        del state  # not used
         long_lived = await _exchange_code_for_user_token(
             code=code, redirect_uri=redirect_uri
         )
@@ -267,8 +268,9 @@ class InstagramProvider(OAuthProvider):
         return f"{FB_OAUTH_DIALOG}?{urlencode(params)}"
 
     async def exchange_code(
-        self, *, code: str, redirect_uri: str
+        self, *, code: str, redirect_uri: str, state: str | None = None,
     ) -> TokenBundle:
+        del state  # not used
         long_lived = await _exchange_code_for_user_token(
             code=code, redirect_uri=redirect_uri
         )

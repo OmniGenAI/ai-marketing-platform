@@ -56,11 +56,11 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
 import api from "@/lib/api";
 import { useSubscription } from "@/hooks/use-subscription";
+import { useCreditCosts } from "@/hooks/queries";
 import type { Reel, VoiceOption, VoicesResponse } from "@/types";
-
-const REEL_CREDIT_COST = 4;
 
 const TONES = [
   { value: "professional", label: "Professional" },
@@ -92,6 +92,8 @@ const STATUS_PROGRESS: Record<string, { progress: number; label: string }> = {
   published: { progress: 100, label: "Published" },
   failed: { progress: 0, label: "Failed" },
   publish_failed: { progress: 100, label: "Publish failed" },
+  cancel_requested: { progress: 0, label: "Cancelling..." },
+  cancelled: { progress: 0, label: "Cancelled" },
 };
 
 export default function ReelsPage() {
@@ -102,6 +104,12 @@ export default function ReelsPage() {
     planSlug,
     refresh: refreshSubscription,
   } = useSubscription();
+  // Cost per reel video — sourced from backend /api/credits/costs so the
+  // value updates without a frontend redeploy. Falls back to 4 while in
+  // flight (matches the backend default).
+  const _costs = useCreditCosts();
+  const REEL_CREDIT_COST = _costs.reel_video;
+  const REEL_CANCEL_COST = _costs.reel_cancel;
 
   // Form state
   const [topic, setTopic] = useState("");
@@ -159,6 +167,10 @@ export default function ReelsPage() {
   // Publish-to-platforms dialog
   const [publishDialogReel, setPublishDialogReel] = useState<Reel | null>(null);
   const [publishPlatforms, setPublishPlatforms] = useState<string[]>(["instagram"]);
+  // Optional scheduled publish time (datetime-local string). When set, the
+  // reel is rescheduled via /api/calendar/reel/{id}/reschedule instead of
+  // published immediately. Empty = "publish now".
+  const [publishScheduledAt, setPublishScheduledAt] = useState<string>("");
   // Connected social providers — used to render the publish platform list
   const { data: providers = [] } = useQuery<{ platform: string; configured: boolean; connected: boolean; page_name: string | null }[]>({
     queryKey: ["social-providers"],
@@ -199,7 +211,7 @@ export default function ReelsPage() {
   // regenerate on an old reel (which keeps its original created_at but
   // updates updated_at when the pipeline ticks) still triggers polling.
   useEffect(() => {
-    const TERMINAL = ["script_ready", "ready", "published", "failed", "publish_failed"];
+    const TERMINAL = ["script_ready", "ready", "published", "failed", "publish_failed", "cancelled"];
     const POLL_WINDOW_MS = 30 * 60 * 1000; // only poll reels active within last 30 minutes
 
     const lastActiveTs = (r: Reel): number => {
@@ -334,10 +346,74 @@ export default function ReelsPage() {
     }
   };
 
-  const handlePublish = async (reel: Reel, platforms: string[] = ["instagram"]) => {
+  // Track which reel id has an in-flight cancel request so the button shows
+  // a spinner and disables itself while the API call is en route.
+  const [cancellingReelId, setCancellingReelId] = useState<string | null>(null);
+
+  const handleCancelGeneration = async (reel: Reel) => {
+    if (!confirm(
+      `Cancel video generation? You'll be charged ${REEL_CANCEL_COST} credit `
+      + `to cover what's already been rendered (the remaining ${REEL_CREDIT_COST - REEL_CANCEL_COST} credits will be refunded).`
+    )) return;
+    setCancellingReelId(reel.id);
+    try {
+      const res = await api.post<Reel>(`/api/reels/${reel.id}/cancel`);
+      if (selectedReel?.id === reel.id) setSelectedReel(res.data);
+      qc.invalidateQueries({ queryKey: ["reels"] });
+      await refreshSubscription();
+      toast.success("Cancel requested — pipeline will stop at next checkpoint.");
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      toast.error(err.response?.data?.detail || "Failed to cancel generation");
+    } finally {
+      setCancellingReelId(null);
+    }
+  };
+
+  const handlePublish = async (
+    reel: Reel,
+    platforms: string[] = ["instagram"],
+    scheduledAt?: string,
+  ) => {
     if (platforms.length === 0) { toast.error("Select at least one platform"); return; }
+
     setPublishingReelId(reel.id);
     try {
+      // Reject past dates so the scheduler doesn't fire immediately.
+      let iso: string | null = null;
+      if (scheduledAt) {
+        const picked = new Date(scheduledAt);
+        if (Number.isNaN(picked.getTime())) {
+          toast.error("Invalid date/time picked");
+          return;
+        }
+        if (picked.getTime() <= Date.now()) {
+          toast.error("Pick a future date/time to schedule");
+          return;
+        }
+        iso = picked.toISOString();
+      }
+
+      // Scheduled path — use the unified calendar reschedule endpoint and
+      // skip the actual publish call. The scheduler will publish at the
+      // chosen time. (Same pattern as social/post + blog scheduling.)
+      if (iso) {
+        await api.patch(`/api/calendar/reel/${reel.id}/reschedule`, {
+          scheduled_at: iso,
+        });
+        qc.invalidateQueries({ queryKey: ["reels"] });
+        qc.invalidateQueries({ queryKey: ["calendar"] });
+        toast.success(
+          `Reel scheduled for ${new Date(iso).toLocaleString()} on ${
+            platforms.length === 1 ? platforms[0] : `${platforms.length} platforms`
+          }.`,
+        );
+        setPublishDialogReel(null);
+        setPublishScheduledAt("");
+        return;
+      }
+
+      // Immediate publish path.
       const captionOverride = seoCaptions[reel.id]?.caption || undefined;
       const response = await api.post<Reel>(
         `/api/reels/${reel.id}/publish`,
@@ -353,6 +429,7 @@ export default function ReelsPage() {
         : `${platforms.length} platforms`;
       toast.success(`Reel published to ${label}!`);
       setPublishDialogReel(null);
+      setPublishScheduledAt("");
     } catch (error: unknown) {
       const err = error as { response?: { data?: { detail?: string } } };
       toast.error(err.response?.data?.detail || "Failed to publish reel");
@@ -363,6 +440,7 @@ export default function ReelsPage() {
 
   const openPublishDialog = (reel: Reel) => {
     setPublishPlatforms([reel.platform || "instagram"]);
+    setPublishScheduledAt("");
     setPublishDialogReel(reel);
   };
 
@@ -502,6 +580,9 @@ export default function ReelsPage() {
     }
     if (status === "failed" || status === "publish_failed") {
       return <Badge variant="destructive"><XCircle className="h-3 w-3 mr-1" /> {statusInfo.label}</Badge>;
+    }
+    if (status === "cancelled") {
+      return <Badge variant="outline" className="border-muted-foreground/40 text-muted-foreground"><XCircle className="h-3 w-3 mr-1" /> Cancelled</Badge>;
     }
     return (
       <Badge variant="secondary">
@@ -766,12 +847,33 @@ export default function ReelsPage() {
                     </div>
 
                     {/* Progress bar for processing (hidden on terminal states) */}
-                    {!["script_ready", "ready", "published", "failed", "publish_failed"].includes(selectedReel.status) && (
+                    {!["script_ready", "ready", "published", "failed", "publish_failed", "cancelled"].includes(selectedReel.status) && (
                       <div className="space-y-2">
                         <Progress value={STATUS_PROGRESS[selectedReel.status]?.progress || 0} />
                         <p className="text-sm text-center text-muted-foreground">
-                          {STATUS_PROGRESS[selectedReel.status]?.label || "Processing..."}
+                          {selectedReel.status === "cancel_requested"
+                            ? "Cancelling…"
+                            : STATUS_PROGRESS[selectedReel.status]?.label || "Processing..."}
                         </p>
+                        {/* Cancel button — visible while the pipeline is
+                            running. Charges REEL_CANCEL_COST credits and
+                            refunds the difference. Disabled once cancel is
+                            already requested. */}
+                        {selectedReel.status !== "cancel_requested" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full text-destructive border-destructive/40 hover:bg-destructive/10"
+                            disabled={cancellingReelId === selectedReel.id}
+                            onClick={() => handleCancelGeneration(selectedReel)}
+                          >
+                            {cancellingReelId === selectedReel.id ? (
+                              <><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Cancelling...</>
+                            ) : (
+                              <>Cancel generation ({REEL_CANCEL_COST} credit)</>
+                            )}
+                          </Button>
+                        )}
                       </div>
                     )}
 
@@ -890,7 +992,7 @@ export default function ReelsPage() {
 
                     {/* Actions */}
                     <div className="flex gap-2">
-                      {(selectedReel.status === "script_ready" || selectedReel.status === "failed") && (
+                      {(selectedReel.status === "script_ready" || selectedReel.status === "failed" || selectedReel.status === "cancelled") && (
                         <Button
                           onClick={() => handleGenerateVideo(selectedReel)}
                           disabled={isGeneratingVideo || creditsRemaining < REEL_CREDIT_COST}
@@ -904,30 +1006,65 @@ export default function ReelsPage() {
                           ) : (
                             <>
                               <Film className="h-4 w-4" />
-                              {selectedReel.status === "failed" ? "Retry" : "Generate"} Video Reel ({REEL_CREDIT_COST} credits)
+                              {selectedReel.status === "failed" || selectedReel.status === "cancelled" ? "Retry" : "Generate"} Video Reel ({REEL_CREDIT_COST} credits)
                             </>
                           )}
                         </Button>
                       )}
-                      {selectedReel.status === "ready" && (
-                        <Button
-                          onClick={() => openPublishDialog(selectedReel)}
-                          disabled={publishingReelId === selectedReel.id}
-                          className="flex-1 gap-2"
-                        >
-                          {publishingReelId === selectedReel.id ? (
-                            <>
-                              <RefreshCw className="h-4 w-4 animate-spin" />
-                              Publishing...
-                            </>
-                          ) : (
-                            <>
-                              <Send className="h-4 w-4" />
-                              Publish
-                            </>
-                          )}
-                        </Button>
-                      )}
+                      {(selectedReel.status === "ready" || selectedReel.status === "published") && (() => {
+                        // Determine button mode:
+                        //   - published_at in the past  → already published
+                        //   - published_at in the future → scheduled (status stays "ready" until scheduler fires)
+                        //   - status === "published"    → already published
+                        //   - otherwise                 → ready to publish
+                        const hasPublishedAt = !!selectedReel.published_at;
+                        const publishMoment = hasPublishedAt
+                          ? new Date(selectedReel.published_at as string).getTime()
+                          : 0;
+                        const isScheduled =
+                          selectedReel.status === "ready" &&
+                          hasPublishedAt &&
+                          publishMoment > Date.now();
+                        const isAlreadyPublished =
+                          selectedReel.status === "published" ||
+                          (hasPublishedAt && publishMoment <= Date.now());
+
+                        return (
+                          <Button
+                            onClick={() => openPublishDialog(selectedReel)}
+                            disabled={publishingReelId === selectedReel.id}
+                            className="flex-1 gap-2"
+                            variant={isAlreadyPublished ? "outline" : "default"}
+                          >
+                            {publishingReelId === selectedReel.id ? (
+                              <>
+                                <RefreshCw className="h-4 w-4 animate-spin" />
+                                Publishing...
+                              </>
+                            ) : isAlreadyPublished ? (
+                              <>
+                                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                                Published — Republish
+                              </>
+                            ) : isScheduled ? (
+                              <>
+                                <Clock className="h-4 w-4" />
+                                Scheduled {new Date(selectedReel.published_at as string).toLocaleString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })} — Reschedule
+                              </>
+                            ) : (
+                              <>
+                                <Send className="h-4 w-4" />
+                                Publish
+                              </>
+                            )}
+                          </Button>
+                        );
+                      })()}
                       {(selectedReel.status === "ready" || selectedReel.status === "published") && (
                         <Button
                           variant="outline"
@@ -1027,8 +1164,9 @@ export default function ReelsPage() {
                             </span>
                           </div>
 
-                          {/* Generate Video button for script-ready reels */}
-                          {reel.status === "script_ready" && (
+                          {/* Generate Video button — also re-shown after a
+                              user-cancelled or failed render so they can retry. */}
+                          {(reel.status === "script_ready" || reel.status === "cancelled" || reel.status === "failed") && (
                             <Button
                               size="sm"
                               className="w-full gap-2 mt-2"
@@ -1039,33 +1177,47 @@ export default function ReelsPage() {
                               disabled={isGeneratingVideo || creditsRemaining < REEL_CREDIT_COST}
                             >
                               <Film className="h-3 w-3" />
-                              Generate Video ({REEL_CREDIT_COST})
+                              {reel.status === "script_ready" ? "Generate" : "Retry"} Video ({REEL_CREDIT_COST})
                             </Button>
                           )}
-                          {/* Publish button for ready reels */}
-                          {reel.status === "ready" && (
-                            <Button
-                              size="sm"
-                              className="w-full gap-2 mt-2"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openPublishDialog(reel);
-                              }}
-                              disabled={publishingReelId === reel.id}
-                            >
-                              {publishingReelId === reel.id ? (
-                                <>
-                                  <RefreshCw className="h-3 w-3 animate-spin" />
-                                  Publishing...
-                                </>
-                              ) : (
-                                <>
-                                  <Send className="h-3 w-3" />
-                                  Publish to Instagram
-                                </>
-                              )}
-                            </Button>
-                          )}
+                          {/* Publish button for ready/published/scheduled reels.
+                              Mirrors the detail-panel logic so list and detail
+                              views stay in sync. */}
+                          {(reel.status === "ready" || reel.status === "published") && (() => {
+                            const hasPublishedAt = !!reel.published_at;
+                            const publishMoment = hasPublishedAt
+                              ? new Date(reel.published_at as string).getTime()
+                              : 0;
+                            const isScheduled =
+                              reel.status === "ready" &&
+                              hasPublishedAt &&
+                              publishMoment > Date.now();
+                            const isAlreadyPublished =
+                              reel.status === "published" ||
+                              (hasPublishedAt && publishMoment <= Date.now());
+                            return (
+                              <Button
+                                size="sm"
+                                variant={isAlreadyPublished ? "outline" : "default"}
+                                className="w-full gap-2 mt-2"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openPublishDialog(reel);
+                                }}
+                                disabled={publishingReelId === reel.id}
+                              >
+                                {publishingReelId === reel.id ? (
+                                  <><RefreshCw className="h-3 w-3 animate-spin" /> Publishing...</>
+                                ) : isAlreadyPublished ? (
+                                  <><CheckCircle2 className="h-3 w-3 text-emerald-500" /> Republish</>
+                                ) : isScheduled ? (
+                                  <><Clock className="h-3 w-3" /> Scheduled — Reschedule</>
+                                ) : (
+                                  <><Send className="h-3 w-3" /> Publish</>
+                                )}
+                              </Button>
+                            );
+                          })()}
                         </div>
                       </CardContent>
                     </Card>
@@ -1213,19 +1365,43 @@ export default function ReelsPage() {
                 {publishPlatforms.length} platform{publishPlatforms.length > 1 ? "s" : ""} selected
               </p>
             )}
+
+            {/* Schedule section — leave empty to publish immediately. When a
+                date is picked we call the calendar reschedule endpoint and
+                let the scheduler fire the publish later. */}
+            <div className="space-y-1.5 pt-1">
+              <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Schedule (optional)
+              </Label>
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Pick a date and time to auto-publish. Leave empty to publish now.
+                </p>
+                <DateTimePicker
+                  value={publishScheduledAt}
+                  onChange={setPublishScheduledAt}
+                  placeholder="Pick date & time"
+                />
+              </div>
+            </div>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setPublishDialogReel(null)}>Cancel</Button>
             <Button
-              onClick={() => publishDialogReel && handlePublish(publishDialogReel, publishPlatforms)}
+              onClick={() => publishDialogReel && handlePublish(publishDialogReel, publishPlatforms, publishScheduledAt)}
               disabled={publishPlatforms.length === 0 || !!publishingReelId}
               className="gap-1.5"
             >
-              {publishingReelId
-                ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Publishing…</>
-                : <><Send className="h-3.5 w-3.5" /> Publish Now</>
-              }
+              {publishingReelId ? (
+                <><RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  {publishScheduledAt ? "Scheduling…" : "Publishing…"}
+                </>
+              ) : (
+                <><Send className="h-3.5 w-3.5" />
+                  {publishScheduledAt ? "Schedule" : "Publish Now"}
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

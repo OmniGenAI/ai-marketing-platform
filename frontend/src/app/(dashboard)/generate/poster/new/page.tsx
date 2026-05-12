@@ -68,6 +68,7 @@ import {
   getPosterTemplate,
 } from "@/lib/poster/templates";
 import { useSubscription } from "@/hooks/use-subscription";
+import { useCreditCosts } from "@/hooks/queries";
 import type {
   Poster,
   PosterAspectRatio,
@@ -77,14 +78,15 @@ import type {
   PosterTemplateStyle,
 } from "@/types";
 
-const POSTER_CREDIT_COST = 1;
-
 function PosterNewPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const urlPosterId = searchParams.get("id");
   const { canUseCredits, creditsRemaining, refresh: refreshSubscription } =
     useSubscription();
+  // Cost per poster generation — backend-tunable via /api/credits/costs.
+  // Falls back to the hardcoded default while the request is in flight.
+  const POSTER_CREDIT_COST = useCreditCosts().poster;
 
   // ---- form state ----
   const [title, setTitle] = useState("");

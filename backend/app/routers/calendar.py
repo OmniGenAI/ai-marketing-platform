@@ -115,26 +115,35 @@ def get_calendar(
         ))
 
     # ------------------------------------------------------------------
-    # Reels — scheduled or published
+    # Reels — scheduled or published.
+    # A scheduled reel keeps status "ready" with published_at set to the
+    # target date (there is no scheduled_at column on Reel), so "ready"
+    # reels with a published_at must be included too.
     # ------------------------------------------------------------------
     reels = (
         db.query(Reel)
         .filter(
             Reel.user_id == current_user.id,
-            Reel.status.in_(["scheduled", "published"]),
+            Reel.status.in_(["ready", "scheduled", "published"]),
+            Reel.published_at.isnot(None),
             Reel.published_at.between(start, end),
         )
         .all()
     )
+    now = datetime.now(timezone.utc)
     for r in reels:
         date = r.published_at or r.created_at
+        # A "ready" reel with a future published_at is effectively scheduled.
+        display_status = r.status
+        if r.status == "ready" and r.published_at and r.published_at > now:
+            display_status = "scheduled"
         items.append(CalendarItem(
             id=r.id,
             type="reel",
             date=date.isoformat(),
             title=r.topic[:60] if r.topic else "Reel",
             platform=r.platform,
-            status=r.status,
+            status=display_status,
             image_url=r.thumbnail_url,
             video_url=r.video_url,
             thumbnail_url=r.thumbnail_url,

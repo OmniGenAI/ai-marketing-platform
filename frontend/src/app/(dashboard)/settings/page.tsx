@@ -29,6 +29,8 @@ import {
   Bug,
   Code2,
   MessageSquare,
+  Twitter,
+  AtSign,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -79,6 +81,18 @@ const PLATFORM_CONFIG: Record<
     iconColor: "#FF4500",
     description: "Submit posts to subreddits and track upvotes.",
   },
+  twitter: {
+    label: "Twitter / X",
+    icon: <Twitter className="h-5 w-5" />,
+    iconColor: "#000000",
+    description: "Post tweets and threads directly from the dashboard.",
+  },
+  threads: {
+    label: "Threads",
+    icon: <AtSign className="h-5 w-5" />,
+    iconColor: "#000000",
+    description: "Cross-post to Threads from your Instagram-linked account.",
+  },
 };
 
 // Order matches what users typically prioritize.
@@ -89,7 +103,15 @@ const PLATFORM_ORDER = [
   "youtube",
   "devto",
   "reddit",
+  "twitter",
+  "threads",
 ];
+
+// Platforms that don't have a backend provider yet — rendered as
+// "Coming Soon" cards so users can see what's on the roadmap. Empty now
+// that Twitter and Threads have full backend support; keep the mechanism
+// for future additions.
+const COMING_SOON_PLATFORMS = new Set<string>();
 
 function SettingsContent() {
   const { user } = useAuth();
@@ -287,123 +309,62 @@ function SettingsContent() {
           ) : (
             <>
               {/* All-platform connect grid (uses /api/social/providers).
-                  Sorted by PLATFORM_ORDER so the most-used networks come first. */}
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {PLATFORM_ORDER.map((platform) => {
-                  const status = providers.find((p) => p.platform === platform);
-                  const cfg = PLATFORM_CONFIG[platform];
-                  if (!status || !cfg) return null;
-                  // Match by platform name to find the matching account row for delete.
-                  const account = accounts.find(
-                    (a) => a.platform === platform
-                  );
-                  return (
-                    <SocialConnectCard
-                      key={platform}
-                      status={status}
-                      label={cfg.label}
-                      icon={cfg.icon}
-                      iconColor={cfg.iconColor}
-                      description={cfg.description}
-                      accountId={account?.id}
-                      onChanged={fetchAll}
-                    />
-                  );
-                })}
-              </div>
-
-              {isDev && <Separator className="my-4" />}
-
-              {/* Legacy quick-connect — uses pre-configured page tokens from .env.
-                  Dev-only: skips OAuth, attaches the operator's shared FB/IG
-                  to the calling user. Hidden in prod; real users go through
-                  the OAuth cards above. Backend also gates this behind
-                  ALLOW_QUICK_CONNECT. */}
-              {isDev && <div className="space-y-2">
-                <p className="text-xs font-medium text-muted-foreground">
-                  Quick Connect (testing — uses shared accounts from .env)
-                </p>
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <Button
-                    variant={facebookConnected ? "outline" : "secondary"}
-                    onClick={quickConnectFacebook}
-                    disabled={connecting === "facebook-quick" || facebookConnected}
-                    className="flex items-center gap-2"
-                    size="sm"
-                  >
-                    {connecting === "facebook-quick" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Facebook className="h-4 w-4" />
-                    )}
-                    {facebookConnected ? "FB Connected" : "Quick Connect FB"}
-                  </Button>
-                  <Button
-                    variant={instagramConnected ? "outline" : "secondary"}
-                    onClick={quickConnectInstagram}
-                    disabled={connecting === "instagram-quick" || instagramConnected}
-                    className="flex items-center gap-2"
-                    size="sm"
-                  >
-                    {connecting === "instagram-quick" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Instagram className="h-4 w-4" />
-                    )}
-                    {instagramConnected ? "IG Connected" : "Quick Connect IG"}
-                  </Button>
-                </div>
-              </div>}
-
-              {/* Dev Mode Section */}
-              {isDev && (
-                <>
-                  <Separator className="my-4" />
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Bug className="h-4 w-4 text-orange-500" />
-                      <span className="text-sm font-medium">Development Mode</span>
-                      <Badge variant="outline" className="text-orange-500 border-orange-500">
-                        Testing Only
-                      </Badge>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Use mock accounts to test publishing without real Facebook OAuth setup.
-                      These won&apos;t actually post to social media.
-                    </p>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={mockConnectFacebook}
-                        disabled={connecting === "facebook-mock" || facebookConnected}
-                        className="flex items-center gap-2"
-                      >
-                        {connecting === "facebook-mock" ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Facebook className="h-4 w-4" />
-                        )}
-                        Mock Facebook
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={mockConnectInstagram}
-                        disabled={connecting === "instagram-mock" || instagramConnected}
-                        className="flex items-center gap-2"
-                      >
-                        {connecting === "instagram-mock" ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Instagram className="h-4 w-4" />
-                        )}
-                        Mock Instagram
-                      </Button>
-                    </div>
+                  Sorted by PLATFORM_ORDER, then "Coming Soon" / unconfigured
+                  platforms are pushed to the end so connectable cards stay
+                  on top. Configured-but-not-yet-connected cards stay first. */}
+              {(() => {
+                const sortedPlatforms = [...PLATFORM_ORDER].sort((a, b) => {
+                  const aIsComingSoon =
+                    COMING_SOON_PLATFORMS.has(a) ||
+                    !(providers.find((p) => p.platform === a)?.configured);
+                  const bIsComingSoon =
+                    COMING_SOON_PLATFORMS.has(b) ||
+                    !(providers.find((p) => p.platform === b)?.configured);
+                  if (aIsComingSoon === bIsComingSoon) {
+                    // Stable: preserve PLATFORM_ORDER ordering within each group.
+                    return PLATFORM_ORDER.indexOf(a) - PLATFORM_ORDER.indexOf(b);
+                  }
+                  return aIsComingSoon ? 1 : -1;
+                });
+                return (
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {sortedPlatforms.map((platform) => {
+                      const cfg = PLATFORM_CONFIG[platform];
+                      if (!cfg) return null;
+                      if (COMING_SOON_PLATFORMS.has(platform)) {
+                        return (
+                          <ComingSoonCard
+                            key={platform}
+                            label={cfg.label}
+                            icon={cfg.icon}
+                            iconColor={cfg.iconColor}
+                            description={cfg.description}
+                          />
+                        );
+                      }
+                      const status = providers.find((p) => p.platform === platform);
+                      if (!status) return null;
+                      // Match by platform name to find the matching account row for delete.
+                      const account = accounts.find(
+                        (a) => a.platform === platform
+                      );
+                      return (
+                        <SocialConnectCard
+                          key={platform}
+                          status={status}
+                          label={cfg.label}
+                          icon={cfg.icon}
+                          iconColor={cfg.iconColor}
+                          description={cfg.description}
+                          accountId={account?.id}
+                          onChanged={fetchAll}
+                        />
+                      );
+                    })}
                   </div>
-                </>
-              )}
+                );
+              })()}
+
             </>
           )}
         </CardContent>
@@ -424,6 +385,56 @@ function SettingsContent() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// Compact card for platforms that aren't wired up yet. Matches the visual
+// rhythm of SocialConnectCard so the grid stays consistent.
+function ComingSoonCard({
+  label,
+  icon,
+  iconColor,
+  description,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  iconColor: string;
+  description?: string;
+}) {
+  return (
+    <Card className="relative overflow-hidden border-dashed bg-muted/20">
+      <CardHeader className="px-3 pb-2">
+        <div className="flex items-center gap-2.5 pr-6">
+          <div
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white opacity-60 [&_svg]:h-3.5 [&_svg]:w-3.5"
+            style={{ backgroundColor: iconColor }}
+          >
+            {icon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <CardTitle className="flex items-center gap-1.5 text-sm leading-tight">
+              <span className="truncate text-muted-foreground">{label}</span>
+              <Badge
+                variant="outline"
+                className="h-4 border-amber-400 bg-amber-50 px-1.5 text-[9px] font-semibold text-amber-700"
+              >
+                Coming Soon
+              </Badge>
+            </CardTitle>
+            {description && (
+              <CardDescription className="mt-0.5 line-clamp-1 text-[11px] leading-tight">
+                {description}
+              </CardDescription>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="px-3 pb-3">
+        <p className="text-[11px] text-muted-foreground">
+          Support for {label} is on the roadmap — stay tuned.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 

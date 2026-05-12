@@ -14,6 +14,7 @@ from app.models.post import Post
 from app.schemas.post import GenerateRequest, GenerateResponse
 from app.dependencies import get_current_user
 from app.services.ai import generate_social_post, generate_image_from_prompt
+from app.services.credits import COST_SOCIAL_POST
 
 logger = logging.getLogger(__name__)
 
@@ -270,13 +271,13 @@ async def generate_post(
             )
 
         if wallet.balance != UNLIMITED_BALANCE:
-            wallet.balance -= 1
-        wallet.total_credits_used += 1
+            wallet.balance -= COST_SOCIAL_POST
+        wallet.total_credits_used += COST_SOCIAL_POST
 
         usage_log = UsageLog(
             wallet_id=wallet.id,
             action="generate_post",
-            credits_used=1,
+            credits_used=COST_SOCIAL_POST,
             description=f"Generated {data.platform} post",
         )
         db.add(usage_log)

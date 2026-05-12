@@ -26,6 +26,7 @@ import {
   FileText,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useCreditCosts } from "@/hooks/queries";
 import { markdownToSafeHtml } from "@/lib/markdown";
 
 interface H2Section {
@@ -114,6 +115,8 @@ function BlogGenerateContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const savedId = searchParams.get("id");
+  // Backend-tunable cost shown on the Generate button so users know the price.
+  const blogCost = useCreditCosts().blog;
 
   const [currentSaveId, setCurrentSaveId] = useState<string | null>(savedId);
   const [topic, setTopic] = useState("");
@@ -627,7 +630,7 @@ function BlogGenerateContent() {
                 className="w-full h-11 font-semibold gap-2 bg-blue-500 hover:bg-blue-600 text-white disabled:bg-muted disabled:text-muted-foreground"
               >
                 <BookOpen className="h-4 w-4" />
-                {isLoading ? "Writing Blog…" : "Generate Blog"}
+                {isLoading ? "Writing Blog…" : `Generate Blog (${blogCost} credit${blogCost === 1 ? "" : "s"})`}
               </Button>
             </div>
           </div>

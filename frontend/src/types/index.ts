@@ -307,7 +307,7 @@ export interface Reel {
   audio_url: string | null;
   video_url: string | null;
   thumbnail_url: string | null;
-  status: "pending" | "generating_script" | "script_ready" | "generating_audio" | "fetching_videos" | "generating_ai_video" | "downloading_videos" | "processing_video" | "composing_video" | "ready" | "published" | "failed" | "publish_failed";
+  status: "pending" | "generating_script" | "script_ready" | "generating_audio" | "fetching_videos" | "generating_ai_video" | "downloading_videos" | "processing_video" | "composing_video" | "ready" | "published" | "failed" | "publish_failed" | "cancel_requested" | "cancelled";
   error_message: string | null;
   platform: string;
   published_at: string | null;

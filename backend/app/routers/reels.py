@@ -43,10 +43,14 @@ from app.services.social import (
     publish_to_reddit_video,
 )
 
+from app.services.credits import COST_REEL_VIDEO, COST_REEL_CANCEL
+
 router = APIRouter(prefix="/api/reels", tags=["reels"])
 
-# Cost per video render — charged only when the user confirms they want the video.
-REEL_CREDIT_COST = 4
+# Cost per video render — charged only when the user confirms they want the
+# video. Sourced from settings via app.services.credits so the value is
+# env-tunable and the frontend can read it from /api/credits/costs.
+REEL_CREDIT_COST = COST_REEL_VIDEO
 
 REEL_PIPELINE_TIMEOUT_S = 15 * 60
 
@@ -302,6 +306,107 @@ def generate_video(
     return reel
 
 
+# In-progress statuses that can be cancelled. Anything in a terminal state
+# (ready / published / failed / cancelled) is rejected with a 409.
+_CANCELLABLE_STATUSES = {
+    "generating_audio",
+    "fetching_videos",
+    "generating_ai_video",
+    "downloading_videos",
+    "composing_video",
+    "processing_video",
+    "generating",  # legacy / future status names
+    "rendering",
+}
+
+
+@router.post("/{reel_id}/cancel", response_model=ReelResponse)
+def cancel_video_generation(
+    reel_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel an in-flight reel video render.
+
+    Flow:
+      1. Verify the reel is in a cancellable status.
+      2. Atomically flip status -> "cancel_requested" so the background
+         pipeline picks it up at the next checkpoint.
+      3. Refund the original REEL_VIDEO credit charge MINUS a small cancel
+         fee (REEL_CANCEL_CREDIT_COST) so we recover what was already spent
+         on the half-finished render (TTS / partial Sora call).
+      4. Log the refund + cancel-fee as separate UsageLog entries.
+
+    The pipeline polls the reel status at every checkpoint and raises
+    ReelCancelledError when it sees "cancel_requested" — that path commits
+    status="cancelled" and skips the generic-failure refund branch.
+    """
+    reel = (
+        db.query(Reel)
+        .filter(Reel.id == reel_id, Reel.user_id == current_user.id)
+        .first()
+    )
+    if not reel:
+        raise HTTPException(status_code=404, detail="Reel not found")
+
+    if reel.status not in _CANCELLABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reel is not generating (status: {reel.status}).",
+        )
+
+    # Atomic transition — only one cancel wins if the user double-clicks.
+    transition = db.execute(
+        update(Reel)
+        .where(and_(
+            Reel.id == reel_id,
+            Reel.user_id == current_user.id,
+            Reel.status.in_(tuple(_CANCELLABLE_STATUSES)),
+        ))
+        .values(status="cancel_requested", error_message="Cancel requested by user")
+    )
+    if transition.rowcount == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Cancel already in progress or pipeline already finished.",
+        )
+
+    # Refund accounting: give back the video cost, then charge the cancel
+    # fee in a separate ledger entry so both numbers are auditable.
+    wallet = db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
+    if wallet:
+        try:
+            net_refund = max(0, COST_REEL_VIDEO - COST_REEL_CANCEL)
+            if wallet.balance != -1:
+                wallet.balance += net_refund
+            wallet.total_credits_used = max(
+                0, (wallet.total_credits_used or 0) - net_refund
+            )
+            db.add(UsageLog(
+                wallet_id=wallet.id,
+                action="refund_reel_video",
+                credits_used=-COST_REEL_VIDEO,
+                description=f"Refund: cancelled reel {reel_id}",
+            ))
+            db.add(UsageLog(
+                wallet_id=wallet.id,
+                action="cancel_reel_video",
+                credits_used=COST_REEL_CANCEL,
+                description=f"Cancel fee for reel {reel_id}",
+            ))
+        except Exception as e:
+            db.rollback()
+            print(f"[Reel {reel_id}] Cancel refund failed: {e}")
+            raise HTTPException(
+                status_code=500, detail="Cancel saved but refund failed."
+            )
+
+    db.commit()
+    db.refresh(reel)
+    return reel
+
+
 async def run_reel_generation(
     reel_id: str,
     topic: str,
@@ -344,9 +449,15 @@ async def run_reel_generation(
         _mark_reel_failed(db, reel_id, "Video generation timed out")
         _refund_reel_credits(db, user_id, f"reel {reel_id} timed out")
     except Exception as e:
-        # process_reel_generation already persists the failed status; we just refund.
-        print(f"[Reel {reel_id}] pipeline failed: {e} — refunding credits")
-        _refund_reel_credits(db, user_id, f"reel {reel_id}: {e}")
+        # User cancels are handled separately — the /cancel endpoint already
+        # refunded (minus the cancel fee), so we must NOT double-refund here.
+        from app.services.reel_service import ReelCancelledError
+        if isinstance(e, ReelCancelledError):
+            print(f"[Reel {reel_id}] cancelled — refund already handled by /cancel")
+        else:
+            # process_reel_generation already persists the failed status; we just refund.
+            print(f"[Reel {reel_id}] pipeline failed: {e} — refunding credits")
+            _refund_reel_credits(db, user_id, f"reel {reel_id}: {e}")
     finally:
         db.close()
 

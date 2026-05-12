@@ -13,7 +13,9 @@ from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.seo_save import SeoSave
 from app.models.user import User
+from app.models.wallet import Wallet
 from app.routers.seo import _llm_call, _strip_fences
+from app.services.credits import COST_BLOG_GENERATE, charge_credits, require_credits
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +441,22 @@ def _generate_blog_in_background(
         except Exception as e:
             db.rollback()
             logger.error(f"[BLOG-BG] persist failed for save {save_id}: {e}", exc_info=True)
+            return  # don't charge if persist failed
+
+        # Deduct credits ONLY after successful persist so a failed render
+        # doesn't bill the user. Re-fetch wallet inside this DB session.
+        try:
+            wallet = db.query(Wallet).filter(Wallet.user_id == user_id).first()
+            if wallet:
+                charge_credits(
+                    db,
+                    wallet,
+                    action="blog_generate",
+                    cost=COST_BLOG_GENERATE,
+                    description=f"Blog: {title[:80]} ({word_count} words)",
+                )
+        except Exception as e:
+            logger.error(f"[BLOG-BG] credit deduct failed for save {save_id}: {e}")
     finally:
         db.close()
 
@@ -476,6 +494,11 @@ def generate_blog(
     """
     if not data.topic.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
+
+    # Pre-flight credit check. Deducted after the BG pipeline succeeds so
+    # failed blog renders don't charge the user.
+    require_credits(db, current_user.id, COST_BLOG_GENERATE)
+    db.commit()  # release read snapshot before kicking off the BG task
 
     logger.info(
         "[BLOG] Kickoff for topic=%r keyword=%r words=%d",

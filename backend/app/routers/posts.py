@@ -16,6 +16,8 @@ from app.services.social import (
     publish_to_instagram,
     publish_to_linkedin,
     publish_to_reddit,
+    publish_to_twitter,
+    publish_to_threads,
 )
 from app.config import settings
 
@@ -287,6 +289,25 @@ async def publish_post(
                 image_url=post.image_url if post.image_url else None,
                 access_token=social_account.access_token,
                 content=full_content,
+            )
+
+        elif post.platform.lower() == "twitter":
+            full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
+            result = await publish_to_twitter(
+                access_token=social_account.access_token,
+                content=full_content,
+                image_url=post.image_url if post.image_url else None,
+            )
+
+        elif post.platform.lower() == "threads":
+            # Threads uses its user id as page_id; data URLs aren't supported
+            # so the caller must provide a public https image (or text only).
+            full_content = f"{post.content}\n\n{post.hashtags}" if post.hashtags else post.content
+            result = await publish_to_threads(
+                threads_user_id=social_account.page_id,
+                access_token=social_account.access_token,
+                content=full_content,
+                image_url=post.image_url if post.image_url else None,
             )
 
         else:

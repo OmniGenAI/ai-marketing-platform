@@ -199,8 +199,10 @@ async def oauth_callback(
         )
 
     try:
+        # Pass `state` through so PKCE providers (Twitter) can look up the
+        # stashed code_verifier. Non-PKCE providers ignore the parameter.
         token = await provider.exchange_code(
-            code=code, redirect_uri=_redirect_uri(platform)
+            code=code, redirect_uri=_redirect_uri(platform), state=state,
         )
         profile = await provider.fetch_profile(token)
         upsert_account(

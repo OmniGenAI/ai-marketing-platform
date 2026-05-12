@@ -10,10 +10,18 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.seo_save import SeoSave
 from app.models.user import User
+from app.services.credits import (
+    COST_SEO_APPLY_TIPS,
+    COST_SEO_BRIEF,
+    COST_SEO_KEYWORDS,
+    COST_SEO_TIPS,
+    charge_credits,
+    require_credits,
+)
 from app.services.scraper import scrape_article_content, scrape_articles_batch
 
 
@@ -441,10 +449,27 @@ def extract_seo_keywords(topic: str, use_serp_grounding: bool = True) -> dict:
 
 
 @router.post("/keywords", response_model=SEOKeywordsResponse)
-def generate_keywords(data: SEOKeywordsRequest):
+def generate_keywords(
+    data: SEOKeywordsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     if not data.topic.strip():
         raise HTTPException(status_code=400, detail="Topic is required")
+
+    # Pre-flight credit check (no row lock; deduct after success).
+    wallet = require_credits(db, current_user.id, COST_SEO_KEYWORDS)
+    db.commit()  # release read snapshot before LLM call
+
     result = extract_seo_keywords(data.topic)
+
+    charge_credits(
+        db,
+        wallet,
+        action="seo_keywords",
+        cost=COST_SEO_KEYWORDS,
+        description=f"Keyword extraction: {data.topic[:80]}",
+    )
     return SEOKeywordsResponse(**result)
 
 
@@ -1075,6 +1100,23 @@ def _generate_seo_brief_in_background(
             except Exception as e:
                 db.rollback()
                 logger.error(f"[BRIEF-BG] persist failed for save {save_id}: {e}", exc_info=True)
+
+        # Deduct credits AFTER the pipeline persisted successfully so a
+        # failed brief doesn't charge the user. Re-fetch the wallet inside
+        # this DB session.
+        try:
+            from app.models.wallet import Wallet as WalletModel
+            wallet = db.query(WalletModel).filter(WalletModel.user_id == user_id).first()
+            if wallet:
+                charge_credits(
+                    db,
+                    wallet,
+                    action="seo_brief",
+                    cost=COST_SEO_BRIEF,
+                    description=f"SEO brief: {(request_dict.get('topic') or '')[:80]}",
+                )
+        except Exception as e:
+            logger.error(f"[BRIEF-BG] credit deduct failed for save {save_id}: {e}")
     finally:
         db.close()
 
@@ -1113,6 +1155,11 @@ def generate_seo_brief(
     """
     if not data.topic.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Topic is required.")
+
+    # Pre-flight credit check. Actual deduction happens after the BG pipeline
+    # succeeds so a failed brief doesn't charge the user.
+    require_credits(db, current_user.id, COST_SEO_BRIEF)
+    db.commit()  # release read snapshot before kicking off the BG task
 
     placeholder_title = data.topic.strip() or "Untitled"
     placeholder_payload = {
@@ -1686,6 +1733,7 @@ def _rule_based_tips(req: SEOTipsRequest) -> list[SEOTip]:
 def generate_seo_tips(
     data: SEOTipsRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Return specific, rubric-aware SEO tips for the live editor.
 
@@ -1693,6 +1741,12 @@ def generate_seo_tips(
     - Embeds the scoring rubric so Gemini knows which lever moves which score.
     - Falls back to deterministic rule-based tips if Gemini fails.
     """
+    # Pre-flight credit check. Tips run on every "Generate AI Tips" click so
+    # this is the hot endpoint; rule-based fallback path still charges since
+    # the user opted into a paid action.
+    wallet = require_credits(db, current_user.id, COST_SEO_TIPS)
+    db.commit()  # release read snapshot before the LLM call
+
     # Prefer new `html`; fall back to legacy `content` (plain text)
     source = data.html or data.content or ""
     source_label = "HTML" if data.html else "TEXT"
@@ -1758,6 +1812,13 @@ Return ONLY a JSON array, no markdown, no commentary:
         logger.info("SEO tips: using rule-based fallback (Gemini empty or malformed)")
         tips = _rule_based_tips(data)
 
+    charge_credits(
+        db,
+        wallet,
+        action="seo_tips",
+        cost=COST_SEO_TIPS,
+        description=f"AI tips ({len(tips)} suggestions)",
+    )
     return SEOTipsResponse(tips=tips)
 
 
@@ -1833,6 +1894,7 @@ def _coerce_skipped(raw: list) -> list[SEOSkippedTip]:
 def apply_seo_tips(
     data: SEOApplyTipsRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Apply the given AI tips to the draft in one shot.
 
@@ -1846,6 +1908,11 @@ def apply_seo_tips(
         raise HTTPException(status_code=400, detail="html is required")
     if not data.tips:
         raise HTTPException(status_code=400, detail="tips list is empty")
+
+    # Pre-flight credit check. Charged AFTER the rewrite succeeds so failed
+    # apply-tips calls (invalid LLM output, etc.) don't bill the user.
+    wallet = require_credits(db, current_user.id, COST_SEO_APPLY_TIPS)
+    db.commit()
 
     tips = data.tips[:_APPLY_MAX_TIPS]
     html_in = _truncate(data.html, _APPLY_MAX_HTML_CHARS)
@@ -2002,6 +2069,13 @@ Return ONLY this JSON object (no markdown, no commentary):
     if not can_edit_meta_desc:
         final_meta_desc = data.meta_description
 
+    charge_credits(
+        db,
+        wallet,
+        action="seo_apply_tips",
+        cost=COST_SEO_APPLY_TIPS,
+        description=f"Applied {len(applied)} of {len(tips)} tips",
+    )
     return SEOApplyTipsResponse(
         html=final_html,
         meta_title=final_meta_title,

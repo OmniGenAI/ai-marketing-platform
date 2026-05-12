@@ -6,8 +6,12 @@ Script generation (SDK-based):
   2. xAI Grok via xai-sdk — fallback
 
 Video generation (SDK-based):
-  1. xAI grok-imagine-video via xai-sdk — primary, native audio capable
+  1. OpenAI Sora-2 video — primary
   2. Pexels stock videos + Edge TTS voiceover — fallback
+
+The xAI grok-imagine-video helpers (`generate_ai_video_xai`,
+`generate_multi_segment_ai_video`) are kept for future use but are no longer
+wired into the pipeline.
 """
 import asyncio
 import contextvars
@@ -38,6 +42,33 @@ def _record_reel_warning(message: str) -> None:
     bucket = _reel_warnings.get()
     if bucket is not None and message not in bucket:
         bucket.append(message)
+
+
+class ReelCancelledError(Exception):
+    """Raised when the user requests cancel mid-pipeline.
+
+    The pipeline polls the reel's status between major steps and raises
+    this so `run_reel_generation` can short-circuit the long path without
+    being treated as a normal failure (no refund, status stays
+    "cancelled", error_message records the reason).
+    """
+
+
+def _check_cancelled(db_session, reel_id: str) -> None:
+    """Poll the DB once for a cancel request and raise if found.
+
+    Sprinkle this call between heavy steps in process_reel_generation (TTS,
+    video gen, compose, upload) so a user-initiated cancel stops the
+    pipeline at the next checkpoint. The DB hit is cheap compared to the
+    multi-second LLM/Sora calls it sits between.
+    """
+    if not db_session:
+        return
+    from app.models.reel import Reel
+    db_session.expire_all()  # force a fresh read so we see external updates
+    reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+    if reel and reel.status == "cancel_requested":
+        raise ReelCancelledError("Cancelled by user")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +151,15 @@ XAI_VIDEO_RESOLUTION = "720p"
 XAI_VIDEO_ASPECT_RATIO = "9:16"
 # Per xAI docs: generation duration capped at 15s.
 XAI_VIDEO_MAX_DURATION_S = 15
+
+# OpenAI Sora-2 supports clip durations of 4, 8, or 12 seconds — anything
+# longer is generated as multiple segments and merged.
+OPENAI_VIDEO_MAX_DURATION_S = 12
+OPENAI_VIDEO_ALLOWED_SECONDS = (4, 8, 12)
+# Status values returned by the videos API. "completed" is the only success
+# state; anything else (queued/in_progress) is still running, "failed" is a
+# terminal error.
+_OPENAI_VIDEO_PENDING_STATES = {"queued", "in_progress"}
 
 
 @functools.cache
@@ -456,6 +496,209 @@ async def generate_multi_segment_ai_video(
     if success:
         return merged_path
     return None
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Sora-2 video generation — primary provider.
+# ---------------------------------------------------------------------------
+def _openai_clip_seconds(duration: int) -> str:
+    """Snap an arbitrary duration to the nearest allowed Sora-2 clip length.
+
+    Sora-2 only accepts "4", "8", or "12". We round *up* so the resulting
+    clip is at least as long as the caller asked for — the merge step will
+    trim to ``duration_target``.
+    """
+    for allowed in OPENAI_VIDEO_ALLOWED_SECONDS:
+        if duration <= allowed:
+            return str(allowed)
+    return str(OPENAI_VIDEO_MAX_DURATION_S)
+
+
+async def generate_ai_video_openai(
+    prompt: str,
+    output_path: str,
+    duration: int = 8,
+    size: str | None = None,
+) -> bool:
+    """Generate a single AI video clip via OpenAI's Sora-2 model.
+
+    Uses the OpenAI Python SDK's ``client.videos`` namespace: create the job,
+    poll until terminal state, then stream the rendered MP4 to
+    ``output_path``. Returns True on success.
+
+    Sora-2 currently caps each clip at 12 seconds; callers that need longer
+    durations should go through ``generate_multi_segment_ai_video_openai``.
+    """
+    client = _get_openai_client()
+    if client is None:
+        return False
+
+    seconds_str = _openai_clip_seconds(duration)
+    video_size = size or settings.OPENAI_VIDEO_SIZE
+
+    def _run(active_prompt: str) -> tuple[bytes | None, str | None]:
+        try:
+            job = client.videos.create(
+                model=settings.OPENAI_VIDEO_MODEL,
+                prompt=active_prompt,
+                size=video_size,
+                seconds=seconds_str,
+            )
+        except Exception as e:
+            return None, f"create failed: {e}"
+
+        import time
+        deadline = time.time() + 10 * 60  # mirror xAI SDK's 10-minute internal cap
+        # Sora-2 jobs typically take 1–5 minutes. Start with a 15s gap, ramp
+        # up to 30s once the job has been running ~1m — keeps the polling
+        # request count to roughly 1 per 20s instead of 1 per 5s.
+        poll_interval = 15.0
+        elapsed = 0.0
+        try:
+            while getattr(job, "status", None) in _OPENAI_VIDEO_PENDING_STATES:
+                if time.time() > deadline:
+                    return None, "poll deadline exceeded"
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+                if elapsed >= 60.0 and poll_interval < 30.0:
+                    poll_interval = 30.0
+                job = client.videos.retrieve(job.id)
+        except Exception as e:
+            return None, f"poll failed: {e}"
+
+        status = getattr(job, "status", None)
+        if status != "completed":
+            err = getattr(job, "error", None) or status
+            return None, f"status={status}, error={err}"
+
+        try:
+            content = client.videos.download_content(video_id=job.id, variant="video")
+            # SDK exposes the response as either a streaming object with
+            # ``.read()`` or a raw httpx response. Handle both.
+            data = content.read() if hasattr(content, "read") else bytes(content)
+            return data, None
+        except Exception as e:
+            return None, f"download failed: {e}"
+
+    video_bytes, err = await asyncio.to_thread(_run, prompt)
+    if not video_bytes:
+        if err:
+            print(f"[OpenAI Video] Generation error: {err}")
+            if "moderation" in err.lower() or "content_policy" in err.lower():
+                _record_reel_warning(
+                    "An AI video segment was blocked by OpenAI's content "
+                    "rules; the reel fell back to stock footage."
+                )
+        return False
+
+    with open(output_path, "wb") as f:
+        f.write(video_bytes)
+    print(f"[OpenAI Video] Saved to {output_path}")
+    return True
+
+
+def _openai_scene_prompts(
+    script: str, topic: str, tone: str, num_segments: int
+) -> list[str]:
+    """Build distinct per-segment visual prompts for Sora-2.
+
+    Mirrors ``_generate_scene_prompts`` but skips the xAI-specific moderation
+    rewrites — OpenAI's content filter has different sensitivities, so we
+    pass the original wording through unchanged.
+    """
+    words = script.split()
+    words_per_segment = max(1, len(words) // num_segments)
+    visual_styles = [
+        "establishing shot with smooth camera movement",
+        "close-up detail shot with bokeh background",
+        "dynamic angle with engaging visuals",
+        "wide cinematic shot with depth",
+    ]
+    prompts: list[str] = []
+    for i in range(num_segments):
+        start_idx = i * words_per_segment
+        end_idx = start_idx + words_per_segment if i < num_segments - 1 else len(words)
+        segment_text = " ".join(words[start_idx:end_idx])[:200]
+        style = visual_styles[i % len(visual_styles)]
+        prompts.append(
+            f"Cinematic vertical social media video, {style}. "
+            f"Visually depicts: {segment_text}. "
+            f"Topic: {topic}. Tone: {tone}. "
+            f"Smooth motion, professional quality, no text overlays, no subtitles."
+        )
+    return prompts
+
+
+async def generate_multi_segment_ai_video_openai(
+    script: str,
+    topic: str,
+    tone: str,
+    duration_target: int,
+    temp_dir: str,
+    size: str | None = None,
+) -> str | None:
+    """Generate a multi-segment Sora-2 video for durations > 12s.
+
+    Splits the reel into ``ceil(duration_target / 12)`` parallel clips, then
+    merges them through the existing ffmpeg/moviepy pipeline. Returns the
+    path to the merged video, or None on failure.
+    """
+    num_segments = (duration_target + OPENAI_VIDEO_MAX_DURATION_S - 1) // OPENAI_VIDEO_MAX_DURATION_S
+    segment_duration = OPENAI_VIDEO_MAX_DURATION_S
+
+    print(
+        f"[OpenAI Multi-Segment] Generating {num_segments} x {segment_duration}s "
+        f"clips for {duration_target}s video (parallel)"
+    )
+
+    scene_prompts = _openai_scene_prompts(script, topic, tone, num_segments)
+
+    # Cap concurrency — OpenAI's video endpoint rate-limits per minute and a
+    # 60s reel firing 5 parallel jobs is a quick way to get throttled.
+    semaphore = asyncio.Semaphore(min(4, num_segments))
+
+    async def _gen(i: int, prompt: str) -> tuple[int, str | None]:
+        segment_path = os.path.join(temp_dir, f"openai_segment_{i}.mp4")
+        async with semaphore:
+            print(f"[OpenAI Multi-Segment] Starting segment {i+1}/{num_segments}…")
+            try:
+                ok = await asyncio.wait_for(
+                    generate_ai_video_openai(
+                        prompt=prompt,
+                        output_path=segment_path,
+                        duration=segment_duration,
+                        size=size,
+                    ),
+                    timeout=8 * 60,
+                )
+            except asyncio.TimeoutError:
+                print(f"[OpenAI Multi-Segment] Segment {i+1} TIMED OUT")
+                return i, None
+        if ok and os.path.exists(segment_path):
+            print(f"[OpenAI Multi-Segment] Segment {i+1} ready")
+            return i, segment_path
+        print(f"[OpenAI Multi-Segment] Segment {i+1} FAILED")
+        return i, None
+
+    results = await asyncio.gather(*[_gen(i, p) for i, p in enumerate(scene_prompts)])
+    segment_paths = [path for _, path in sorted(results, key=lambda r: r[0]) if path]
+
+    if not segment_paths:
+        print("[OpenAI Multi-Segment] No segments generated successfully")
+        return None
+
+    if len(segment_paths) < num_segments:
+        print(
+            f"[OpenAI Multi-Segment] Warning: Only {len(segment_paths)}/{num_segments} "
+            "segments generated"
+        )
+
+    if len(segment_paths) == 1:
+        return segment_paths[0]
+
+    merged_path = os.path.join(temp_dir, "merged_openai_video.mp4")
+    success = await merge_video_segments(segment_paths, merged_path, duration_target)
+    return merged_path if success else None
 
 
 def _merge_video_segments_ffmpeg(
@@ -1535,14 +1778,24 @@ def _reencode_sync(src: str, dst: str) -> None:
 
 
 def _set_status(db_session, reel_id: str, status_value: str) -> None:
-    """Update status on the reel row in one place."""
+    """Update status on the reel row in one place.
+
+    Refuses to overwrite a pending cancel signal so the next checkpoint
+    can still detect and honour the user's cancel request even if a step
+    finished after the cancel landed.
+    """
     if not db_session:
         return
     from app.models.reel import Reel
+    db_session.expire_all()
     reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
-    if reel:
-        reel.status = status_value
-        db_session.commit()
+    if not reel:
+        return
+    if reel.status == "cancel_requested":
+        # Don't clobber the cancel; the next _check_cancelled() will raise.
+        return
+    reel.status = status_value
+    db_session.commit()
 
 
 async def process_reel_generation(
@@ -1623,6 +1876,7 @@ async def process_reel_generation(
                 target_duration=float(duration_target),
             )
         print(f"[Reel {reel_id}] Final voiceover duration: {vo_duration:.2f}s (target {duration_target}s)")
+        _check_cancelled(db_session, reel_id)
         _set_status(db_session, reel_id, "fetching_videos")
 
         # Step 3: Generate or fetch videos
@@ -1633,48 +1887,61 @@ async def process_reel_generation(
 
         script_preview = result["script"][:300].strip()
 
-        # --- Option 1: xAI grok-imagine-video (primary) ---
-        # Set USE_AI_VIDEO=false in env to skip xAI entirely (e.g. when the
-        # team has no credits) — saves 2-8 minutes per failed attempt.
-        _xai_enabled = os.environ.get("USE_AI_VIDEO", "true").lower() == "true"
-        if not use_ai_video and _xai_enabled and settings.XAI_API_KEY:
-            print(f"[Reel {reel_id}] Generating AI video with xAI grok-imagine-video...")
+        # --- Option 1: OpenAI Sora-2 video (primary) ---
+        # Set USE_AI_VIDEO=false in env to skip OpenAI entirely (e.g. when the
+        # team has no Sora credits) — saves 2-8 minutes per failed attempt.
+        # The xAI grok-imagine-video helpers above are intentionally retained
+        # but not invoked; we may re-enable them later as a secondary fallback.
+        _openai_video_enabled = (
+            os.environ.get("USE_AI_VIDEO", str(settings.USE_AI_VIDEO)).lower() == "true"
+        )
+        if not use_ai_video and _openai_video_enabled and settings.OPENAI_API_KEY:
+            print(f"[Reel {reel_id}] Generating AI video with OpenAI {settings.OPENAI_VIDEO_MODEL}...")
             _set_status(db_session, reel_id, "generating_ai_video")
 
-            # For videos > 15s, use multi-segment generation
-            if duration_target > XAI_VIDEO_MAX_DURATION_S:
-                print(f"[Reel {reel_id}] Using multi-segment generation for {duration_target}s video...")
-                merged_path = await generate_multi_segment_ai_video(
+            if duration_target > OPENAI_VIDEO_MAX_DURATION_S:
+                print(
+                    f"[Reel {reel_id}] Using multi-segment OpenAI generation "
+                    f"for {duration_target}s video..."
+                )
+                merged_path = await generate_multi_segment_ai_video_openai(
                     script=result["script"],
                     topic=topic,
                     tone=tone,
                     duration_target=duration_target,
                     temp_dir=temp_dir,
-                    aspect_ratio=XAI_VIDEO_ASPECT_RATIO,
-                    resolution=XAI_VIDEO_RESOLUTION,
                 )
                 if merged_path:
-                    # Copy merged video to expected path
-                    import shutil
                     shutil.copy(merged_path, ai_video_path)
-                    print(f"[Reel {reel_id}] Multi-segment video generated.")
+                    print(f"[Reel {reel_id}] Multi-segment OpenAI video generated.")
                     use_ai_video = True
+
+                    # Dev recovery snapshot — persist the merged-from-partial
+                    # video to a stable `output/` folder so we can recover
+                    # the work even if a later step crashes. Cheap copy, no
+                    # impact on the normal happy path.
+                    try:
+                        debug_dir = os.path.join(os.getcwd(), "output")
+                        os.makedirs(debug_dir, exist_ok=True)
+                        debug_path = os.path.join(debug_dir, f"reel_{reel_id}_partial.mp4")
+                        shutil.copy(merged_path, debug_path)
+                        print(f"[Reel {reel_id}] Dev snapshot saved: {debug_path}")
+                    except Exception as snap_err:
+                        # Snapshot failure must never break the pipeline.
+                        print(f"[Reel {reel_id}] Dev snapshot save failed: {snap_err}")
             else:
-                # Single segment for 15s or less
                 video_prompt = (
                     f"Cinematic vertical social media reel video that visually depicts: {script_preview}. "
                     f"Topic: {topic}. Tone: {tone}. "
                     f"Smooth motion, engaging visuals, no text overlays, no subtitles."
                 )
-                ok = await generate_ai_video_xai(
+                ok = await generate_ai_video_openai(
                     prompt=video_prompt,
                     output_path=ai_video_path,
                     duration=duration_target,
-                    aspect_ratio=XAI_VIDEO_ASPECT_RATIO,
-                    resolution=XAI_VIDEO_RESOLUTION,
                 )
                 if ok:
-                    print(f"[Reel {reel_id}] xAI video generated.")
+                    print(f"[Reel {reel_id}] OpenAI video generated.")
                     use_ai_video = True
 
         # --- Option 2: Pexels stock videos (fallback) ---
@@ -1697,6 +1964,7 @@ async def process_reel_generation(
             if not videos:
                 raise Exception("Could not find suitable stock videos")
 
+        _check_cancelled(db_session, reel_id)
         _set_status(db_session, reel_id, "processing_video" if use_ai_video else "downloading_videos")
 
         # Step 4 & 5: Build final video
@@ -1706,7 +1974,7 @@ async def process_reel_generation(
             print(f"[Reel {reel_id}] Re-encoding native-audio AI video for upload...")
             await asyncio.to_thread(_reencode_sync, ai_video_path, output_path)
         elif use_ai_video:
-            # xAI video without our voiceover — mix Edge TTS narration in.
+            # AI video without an embedded audio track — mix Edge TTS narration in.
             print(f"[Reel {reel_id}] Adding Edge TTS voiceover to AI video...")
             audio_url = reused_audio_url or await upload_reel_to_supabase(
                 audio_path, user_id, "audio"
@@ -1734,6 +2002,7 @@ async def process_reel_generation(
             if not video_paths:
                 raise Exception("Could not download any videos")
 
+            _check_cancelled(db_session, reel_id)
             _set_status(db_session, reel_id, "composing_video")
             print(f"[Reel {reel_id}] Composing final video...")
             await compose_reel(
@@ -1743,6 +2012,7 @@ async def process_reel_generation(
                 target_duration=duration_target,
             )
 
+        _check_cancelled(db_session, reel_id)
         # Upload final video + thumbnail
         video_url = await upload_reel_to_supabase(output_path, user_id, "video")
         print(f"[Reel {reel_id}] Generating thumbnail...")
@@ -1771,6 +2041,19 @@ async def process_reel_generation(
         print(f"[Reel {reel_id}] Generation complete")
         return result
 
+    except ReelCancelledError:
+        # User-initiated cancel — finalise status and re-raise so the
+        # caller (run_reel_generation) can skip the generic-failure refund
+        # path (the cancel endpoint already handled refunding).
+        print(f"[Reel {reel_id}] Cancelled by user — stopping pipeline.")
+        if db_session:
+            reel = db_session.query(Reel).filter(Reel.id == reel_id).first()
+            if reel:
+                reel.status = "cancelled"
+                reel.error_message = "Cancelled by user"
+                db_session.commit()
+        raise
+
     except Exception as e:
         print(f"[Reel {reel_id}] Error: {e}")
         if db_session:
@@ -1782,7 +2065,12 @@ async def process_reel_generation(
         raise
 
     finally:
-        import shutil
+        # NOTE: do NOT add `import shutil` here. Doing so makes `shutil` a
+        # local variable for the WHOLE function (because Python pre-scans
+        # function bodies for assignments), which then crashes earlier
+        # references like `shutil.copy(merged_path, ai_video_path)` with
+        # an UnboundLocalError. The module-level import at the top is
+        # already available everywhere in this function.
         try:
             shutil.rmtree(temp_dir)
         except Exception as cleanup_err:

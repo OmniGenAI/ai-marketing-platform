@@ -6,6 +6,7 @@ import { analyzeContent, contentLengthStatus, type SEOAnalysisResult } from "@/l
 import { cn } from "@/lib/utils";
 import { RichEditor } from "@/components/ui/rich-editor";
 import api from "@/lib/api";
+import { useCreditCosts } from "@/hooks/queries";
 import { toast } from "sonner";
 import Link from "next/dist/client/link";
 import { useQuery } from "@tanstack/react-query";
@@ -479,6 +480,11 @@ function SEOEditorContent() {
     const searchParams = useSearchParams();
     const router = useRouter();
     const pathname = usePathname();
+    // Backend-tunable credit costs — shown on each AI action button so users
+    // know the price up-front. Falls back to defaults while in flight.
+    const _seoCosts = useCreditCosts();
+    const tipsCost = _seoCosts.seo_tips;
+    const applyTipsCost = _seoCosts.seo_apply_tips;
     const [content, setContent] = useState("");      // HTML (editor value)
     const [plainText, setPlainText] = useState("");  // plain text for tips API
     const [targetWords, setTargetWords] = useState("1500");
@@ -1354,7 +1360,7 @@ function SEOEditorContent() {
                                 ) : wordCount < MIN_WORDS_FOR_TIPS ? (
                                     `${MIN_WORDS_FOR_TIPS - wordCount} more words needed`
                                 ) : (
-                                    <><Sparkles className="h-3.5 w-3.5" /> Generate AI Tips</>
+                                    <><Sparkles className="h-3.5 w-3.5" /> Generate AI Tips ({tipsCost} credit{tipsCost === 1 ? "" : "s"})</>
                                 )}
                             </button>
                             {undoStackRef.current.length > 0 && (
@@ -1401,7 +1407,7 @@ function SEOEditorContent() {
                                                 : "bg-emerald-500 text-white hover:bg-emerald-600 active:scale-[0.98]"
                                         )}
                                     >
-                                        {isApplying ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Applying tips...</> : `Apply all ${tips.length} tips`}
+                                        {isApplying ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Applying tips...</> : `Apply all ${tips.length} tips (${applyTipsCost} credit${applyTipsCost === 1 ? "" : "s"})`}
                                     </button>
                                     <ul className="space-y-2">
                                         {tips.map((tip, i) => {

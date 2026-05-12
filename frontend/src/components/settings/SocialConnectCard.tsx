@@ -93,6 +93,26 @@ const HOW_TO_CONNECT: Record<
     helpUrl: "https://www.reddit.com/prefs/apps",
     helpLabel: "Reddit app preferences",
   },
+  twitter: {
+    steps: [
+      "Click Connect — opens X (Twitter) authorization.",
+      "Log in and approve tweet.read, tweet.write, users.read permissions.",
+      "We'll fetch your @username once linked.",
+      "Tokens last 2 hours and auto-refresh via offline.access.",
+    ],
+    helpUrl: "https://developer.x.com/en/portal/dashboard",
+    helpLabel: "X Developer Portal",
+  },
+  threads: {
+    steps: [
+      "Click Connect — opens Threads authorization on threads.net.",
+      "Log in with your Threads account and approve the requested scopes.",
+      "We exchange the short-lived token for a 60-day long-lived one.",
+      "Token auto-refreshes before expiry — no manual reconnect needed.",
+    ],
+    helpUrl: "https://developers.facebook.com/docs/threads/get-started",
+    helpLabel: "Threads API setup",
+  },
 };
 
 export type ProviderStatus = {
@@ -243,7 +263,11 @@ export function SocialConnectCard({
   };
 
   return (
-    <Card className="relative gap-0 py-3">
+    <Card
+      className={`relative gap-0 py-3 ${
+        !status.configured && !status.connected ? "border-dashed bg-muted/20" : ""
+      }`}
+    >
       {/* Info button — opens a dialog with step-by-step connection instructions.
           Positioned absolute top-right so it doesn't interfere with the card's
           flex layout below. Only render if we have help copy for this platform. */}
@@ -260,7 +284,9 @@ export function SocialConnectCard({
       <CardHeader className="px-3 pb-2">
         <div className="flex items-center gap-2.5 pr-6">
           <div
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white [&_svg]:h-3.5 [&_svg]:w-3.5"
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white [&_svg]:h-3.5 [&_svg]:w-3.5 ${
+              !status.configured && !status.connected ? "opacity-60" : ""
+            }`}
             style={{ backgroundColor: iconColor }}
           >
             {icon}
@@ -273,9 +299,12 @@ export function SocialConnectCard({
                   Connected
                 </Badge>
               )}
-              {!status.configured && (
-                <Badge variant="outline" className="h-4 px-1.5 text-[9px]">
-                  Not set
+              {!status.configured && !status.connected && (
+                <Badge
+                  variant="outline"
+                  className="h-4 border-amber-400 bg-amber-50 px-1.5 text-[9px] font-semibold text-amber-700"
+                >
+                  Coming Soon
                 </Badge>
               )}
             </CardTitle>
@@ -311,7 +340,7 @@ export function SocialConnectCard({
           </div>
         ) : !status.configured ? (
           <p className="text-[11px] text-muted-foreground">
-            Admin must add {label} credentials in environment variables.
+            Support for {label} is on the roadmap — stay tuned.
           </p>
         ) : isApiKey ? (
           <div className="flex gap-1.5">

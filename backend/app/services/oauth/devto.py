@@ -45,8 +45,9 @@ class DevToProvider(OAuthProvider):
         )
 
     async def exchange_code(
-        self, *, code: str, redirect_uri: str
+        self, *, code: str, redirect_uri: str, state: str | None = None,
     ) -> TokenBundle:
+        del state  # not used
         raise NotImplementedError("Dev.to uses API keys, not OAuth.")
 
     async def fetch_profile(self, token: TokenBundle) -> AccountProfile:

@@ -11,7 +11,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.plan import Plan
-from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster, analytics, social_oauth, post_analytics, calendar as calendar_router
+from app.routers import auth, plans, subscription, wallet, business_config, generate, posts, webhooks, social_accounts, social_accounts_dev, business_images, upload, reels, seo, blog, repurpose, poster, analytics, social_oauth, post_analytics, calendar as calendar_router, credits as credits_router
 
 
 def seed_default_plans():
@@ -395,6 +395,7 @@ app.include_router(auth.router)
 app.include_router(plans.router)
 app.include_router(subscription.router)
 app.include_router(wallet.router)
+app.include_router(credits_router.router)
 app.include_router(business_config.router)
 app.include_router(generate.router)
 app.include_router(post_analytics.router)  # Must be before posts.router — /published-summary must not be matched by /{post_id}

@@ -33,9 +33,45 @@ class Settings(BaseSettings):
     OPENAI_TEXT_MODEL: str = "gpt-4.1-mini"
     OPENAI_IMAGE_MODEL: str = "gpt-image-1"
     OPENAI_IMAGE_SIZE: str = "1024x1024"
+    # OpenAI Sora video generation (primary video provider for reels).
+    # sora-2 supports 720x1280 / 1280x720; durations of 4, 8, or 12 seconds.
+    OPENAI_VIDEO_MODEL: str = "sora-2"
+    OPENAI_VIDEO_SIZE: str = "720x1280"  # 9:16 portrait for reels
 
-    # Poster generation — credit cost per AI poster (background + copy)
+    # -------------------------------------------------------------------
+    # AI feature credit costs — overridable per deployment via env vars.
+    # Change these to retune billing without touching code or restarting
+    # a deploy that pre-shipped them. The frontend reads them from
+    # GET /api/credits/costs so the UI always matches the backend.
+    #
+    # Pricing rationale:
+    #   - SOCIAL_POST: 1 LLM text + 1 image gen, cheap
+    #   - POSTER:      1 LLM copy + 1 image gen, similar to social post
+    #   - REEL_SCRIPT: text only, free as a teaser
+    #   - REEL_VIDEO:  Sora-2 video — expensive, biggest cost
+    #   - BLOG:        long-form LLM call (~1500 words)
+    #   - SEO_BRIEF:   SERP fetch + multi-step LLM (~3 calls + scraping)
+    #   - SEO_KEYWORDS / TIPS: single LLM call
+    #   - SEO_APPLY_TIPS: full HTML rewrite LLM call
+    #   - REPURPOSE:   one big LLM call producing many platform formats
+    # -------------------------------------------------------------------
     POSTER_CREDIT_COST: int = 1
+    SOCIAL_POST_CREDIT_COST: int = 1
+    REEL_VIDEO_CREDIT_COST: int = 4
+    # Cost the user pays to cancel an in-flight reel generation. The
+    # outstanding REEL_VIDEO_CREDIT_COST charge is refunded minus this
+    # cancel fee — it covers what we've already spent on the half-finished
+    # render (TTS, partial Sora call, etc.).
+    REEL_CANCEL_CREDIT_COST: int = 1
+    BLOG_CREDIT_COST: int = 3
+    SEO_BRIEF_CREDIT_COST: int = 2
+    SEO_KEYWORDS_CREDIT_COST: int = 1
+    SEO_TIPS_CREDIT_COST: int = 1
+    SEO_APPLY_TIPS_CREDIT_COST: int = 2
+    REPURPOSE_CREDIT_COST: int = 1
+    # Phase-B: free rerolls before charging on the repurpose detail page.
+    REPURPOSE_FREE_REROLLS_PER_DAY: int = 3
+    REPURPOSE_REROLL_CREDIT_COST: int = 1
 
     # Pexels API (free stock videos - fallback)
     PEXELS_API_KEY: str = ""
@@ -86,14 +122,28 @@ class Settings(BaseSettings):
     # Reddit's API requires a unique, descriptive User-Agent per their TOS.
     REDDIT_USER_AGENT: str = "ai-marketing-platform/1.0 (by /u/anonymous)"
 
+    # Twitter / X — https://developer.x.com/en/portal/dashboard
+    # OAuth 2.0 with PKCE. Scopes: tweet.read, tweet.write, users.read,
+    # offline.access (for refresh tokens).
+    TWITTER_CLIENT_ID: str = ""
+    TWITTER_CLIENT_SECRET: str = ""
+
+    # Threads — https://developers.facebook.com/docs/threads
+    # Uses Meta's Threads Graph API. Scopes: threads_basic, threads_content_publish,
+    # threads_manage_insights. Requires a separate Threads app (NOT the same
+    # as Facebook/Instagram app credentials).
+    THREADS_CLIENT_ID: str = ""
+    THREADS_CLIENT_SECRET: str = ""
+
     # Dev.to has no OAuth — users paste a personal API key from
     # https://dev.to/settings/extensions. No global config needed; this flag
     # lets us hide the connect card if we want to disable the feature.
     DEVTO_ENABLED: bool = True
 
-    # AI video generation toggle (xAI grok-imagine-video). Set to false to use
-    # Pexels stock + Edge TTS instead — saves credits + minutes per reel.
-    USE_AI_VIDEO: bool = False
+    # AI video generation toggle (OpenAI Sora-2). Set to false to skip the
+    # AI provider and go straight to Pexels stock + Edge TTS — saves credits
+    # + minutes per reel when the OpenAI video quota is exhausted.
+    USE_AI_VIDEO: bool = True
 
     # When true, /api/social/{facebook,instagram}/quick-connect is enabled.
     # That endpoint attaches the operator's shared FB Page / IG Business

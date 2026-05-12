@@ -740,6 +740,159 @@ async def publish_to_reddit(
 
 
 # ---------------------------------------------------------------------------
+# Twitter / X
+# ---------------------------------------------------------------------------
+async def publish_to_twitter(
+    access_token: str,
+    content: str,
+    image_url: Optional[str] = None,
+) -> dict:
+    """
+    Publish a tweet via the Twitter API v2.
+
+    Free tier supports text-only via POST /2/tweets. Media upload uses the
+    v1.1 endpoint (still active under v2 apps) — chunked upload for files,
+    INIT/APPEND/FINALIZE for large media. For simple post-time images we use
+    the v1.1 simple upload, which accepts JPEG/PNG up to 5MB.
+
+    Args:
+        access_token: User access token (OAuth 2.0, tweet.write scope).
+        content: Tweet text (max 280 chars on free tier).
+        image_url: Optional image — public http URL or data:image/... data URL.
+
+    Returns:
+        dict with 'id' of the created tweet.
+    """
+    headers_json = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Tweet text only — bail early if no image.
+    payload: dict = {"text": content[:280]}
+
+    if image_url:
+        # Resolve image bytes from URL or data URL.
+        try:
+            if _is_data_url(image_url):
+                image_bytes, mime, _ = _decode_data_url_image(image_url)
+            else:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    img_res = await client.get(image_url)
+                    img_res.raise_for_status()
+                    image_bytes = img_res.content
+                    mime = img_res.headers.get("content-type", "image/jpeg")
+
+            # v1.1 media upload — still the supported path for OAuth 2.0 apps.
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                up_res = await client.post(
+                    "https://upload.twitter.com/1.1/media/upload.json",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    files={"media": ("image", image_bytes, mime)},
+                )
+                if up_res.status_code != 200:
+                    print(f"[Twitter] media upload failed: {up_res.status_code} {up_res.text[:200]}")
+                else:
+                    media_id = str(up_res.json().get("media_id_string", ""))
+                    if media_id:
+                        payload["media"] = {"media_ids": [media_id]}
+        except Exception as e:
+            print(f"[Twitter] media upload error: {e}")
+            # Fall through to text-only
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            "https://api.x.com/2/tweets",
+            json=payload,
+            headers=headers_json,
+        )
+        if r.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Twitter publish failed ({r.status_code}): {r.text[:300]}"
+            )
+        data = r.json().get("data") or {}
+
+    tweet_id = str(data.get("id", ""))
+    username = ""  # caller passes account.extra_metadata if they want a deep link
+    url = f"https://x.com/i/web/status/{tweet_id}" if tweet_id else ""
+    print(f"✅ Published to Twitter: {tweet_id}")
+    return {"id": tweet_id, "url": url}
+
+
+# ---------------------------------------------------------------------------
+# Threads
+# ---------------------------------------------------------------------------
+async def publish_to_threads(
+    threads_user_id: str,
+    access_token: str,
+    content: str,
+    image_url: Optional[str] = None,
+) -> dict:
+    """
+    Publish a thread via the Threads Graph API.
+
+    Two-step flow:
+      1. POST /{user_id}/threads with media_type=TEXT|IMAGE → returns container id
+      2. POST /{user_id}/threads_publish?creation_id={container_id} → publishes
+
+    Args:
+        threads_user_id: Threads user id stored as account.page_id.
+        access_token: Long-lived Threads access token.
+        content: Post body (max ~500 chars).
+        image_url: Optional public image URL (data URLs are NOT supported by
+            Meta — caller must upload to a host first).
+
+    Returns:
+        dict with 'id' of the published thread.
+    """
+    base = "https://graph.threads.net/v1.0"
+
+    # Step 1: create the media container.
+    create_params: dict = {
+        "media_type": "IMAGE" if image_url else "TEXT",
+        "text": content[:500],
+        "access_token": access_token,
+    }
+    if image_url:
+        if _is_data_url(image_url):
+            raise RuntimeError(
+                "Threads does not accept data URLs — upload the image to a "
+                "public host and pass an https URL instead."
+            )
+        create_params["image_url"] = image_url
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            f"{base}/{threads_user_id}/threads",
+            params=create_params,
+        )
+        if r.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Threads container create failed ({r.status_code}): {r.text[:300]}"
+            )
+        container_id = str(r.json().get("id", ""))
+        if not container_id:
+            raise RuntimeError("Threads container create returned no id.")
+
+        # Meta recommends a small delay before publish to allow media processing.
+        await asyncio.sleep(2)
+
+        # Step 2: publish the container.
+        pub = await client.post(
+            f"{base}/{threads_user_id}/threads_publish",
+            params={"creation_id": container_id, "access_token": access_token},
+        )
+        if pub.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Threads publish failed ({pub.status_code}): {pub.text[:300]}"
+            )
+        post_id = str(pub.json().get("id", ""))
+
+    print(f"✅ Published to Threads: {post_id}")
+    return {"id": post_id, "url": ""}
+
+
+# ---------------------------------------------------------------------------
 # Video publish — Facebook Reel
 # ---------------------------------------------------------------------------
 async def publish_to_facebook_reel(

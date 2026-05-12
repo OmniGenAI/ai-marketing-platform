@@ -1133,11 +1133,14 @@ function GeneratePageContent() {
                 )}
 
                 {getDisplayImageUrl() ? (
-                  <div className="rounded-lg overflow-hidden border">
+                  // Centered, max-height preview that respects the original
+                  // aspect ratio. `object-contain` prevents the tall posters
+                  // (like the 4:5 example) from blowing out the panel height.
+                  <div className="rounded-lg overflow-hidden border bg-muted/30 flex items-center justify-center">
                     <img
                       src={getDisplayImageUrl()!}
                       alt="Post image"
-                      className="w-full "
+                      className="max-h-96 w-auto max-w-full object-contain"
                     />
                   </div>
                 ) : isImagePending ? (

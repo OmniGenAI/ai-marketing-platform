@@ -29,15 +29,22 @@ from app.schemas.repurpose import (
 )
 from app.services.repurpose_service import regenerate_section, repurpose_content
 
+from app.services.credits import (
+    COST_REPURPOSE,
+    COST_REPURPOSE_REROLL,
+    REPURPOSE_FREE_REROLLS_PER_DAY,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/repurpose", tags=["repurpose"])
 
 
-REPURPOSE_CREDIT_COST = 1
-# Phase B: free rerolls per save per day before credit is charged
-FREE_REROLLS_PER_DAY = 3
-REROLL_CREDIT_COST = 1
+# Costs sourced from settings via app.services.credits so a single env var
+# tunes both the API and the /api/credits/costs catalog the UI reads.
+REPURPOSE_CREDIT_COST = COST_REPURPOSE
+FREE_REROLLS_PER_DAY = REPURPOSE_FREE_REROLLS_PER_DAY
+REROLL_CREDIT_COST = COST_REPURPOSE_REROLL
 # Inline autosave payload guard — reject anything unreasonably large.
 MAX_PATCH_PAYLOAD_BYTES = 512 * 1024
 

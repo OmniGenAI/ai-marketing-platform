@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import api from "@/lib/api";
+import { useCreditCosts } from "@/hooks/queries";
 
 interface MetaSuggestion {
   title: string;
@@ -330,6 +331,10 @@ function SEOBriefContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const savedBriefId = searchParams.get("id");
+  // Backend-tunable cost — shown on the Generate button so users know the
+  // price before they click. Falls back to the catalog default while the
+  // /api/credits/costs query is in flight.
+  const briefCost = useCreditCosts().seo_brief;
 
   const [topic, setTopic] = useState("");
   const [wordCount, setWordCount] = useState("1500");
@@ -1155,9 +1160,9 @@ function SEOBriefContent() {
                   {isLoading ? (
                     <><Loader2 className="h-4 w-4 animate-spin" /> Generating Magic...</>
                   ) : currentSaveId ? (
-                    <><Brain className="h-4 w-4" /> Regenerate Brief</>
+                    <><Brain className="h-4 w-4" /> Regenerate Brief ({briefCost} credit{briefCost === 1 ? "" : "s"})</>
                   ) : (
-                    <><Brain className="h-4 w-4" /> Generate AI Brief</>
+                    <><Brain className="h-4 w-4" /> Generate AI Brief ({briefCost} credit{briefCost === 1 ? "" : "s"})</>
                   )}
                 </Button>
                 {brief && (

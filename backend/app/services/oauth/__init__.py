@@ -93,9 +93,14 @@ class OAuthProvider(ABC):
 
     @abstractmethod
     async def exchange_code(
-        self, *, code: str, redirect_uri: str
+        self, *, code: str, redirect_uri: str, state: str | None = None,
     ) -> TokenBundle:
-        """Trade an authorization code for an access token bundle."""
+        """Trade an authorization code for an access token bundle.
+
+        `state` is forwarded so PKCE-based providers (e.g. Twitter) can look
+        up the code_verifier they stashed during `auth_url`. Most providers
+        can ignore it.
+        """
 
     @abstractmethod
     async def fetch_profile(self, token: TokenBundle) -> AccountProfile:
@@ -238,6 +243,8 @@ from app.services.oauth import (  # noqa: E402  (intentional bottom import)
     youtube as _youtube,
     devto as _devto,
     reddit as _reddit,
+    twitter as _twitter,
+    threads as _threads,
 )
 
 __all__ = [
