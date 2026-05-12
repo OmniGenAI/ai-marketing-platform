@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import re
 import time
 import warnings
@@ -9,6 +8,8 @@ from collections import Counter
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -515,9 +516,8 @@ def json_to_website_context(json_str: str) -> dict:
 _PLAYWRIGHT_UA = _HEADERS["User-Agent"]
 
 # Scrape.do fallback — used when Playwright fails / is unavailable. Token is
-# read from env so it can be rotated without a code change. Fallback is silently
-# skipped when the token is missing.
-_SCRAPEDO_TOKEN = os.getenv("SCRAPEDO_TOKEN", "9c866fcc8f7840bdb8d30b765c7794c46542f274983")
+# read from settings so it can be rotated without a code change. Fallback is
+# silently skipped when the token is missing.
 _SCRAPEDO_ENDPOINT = "http://api.scrape.do/"
 
 
@@ -526,10 +526,11 @@ def _scrape_via_scrapedo(url: str, timeout: float = 30.0) -> dict | None:
 
     Returns None on any failure so callers can decide their own fallback path.
     """
-    if not _SCRAPEDO_TOKEN:
+    token = settings.SCRAPEDO_TOKEN
+    if not token:
         return None
     try:
-        proxied = f"{_SCRAPEDO_ENDPOINT}?url={quote(url, safe='')}&token={_SCRAPEDO_TOKEN}"
+        proxied = f"{_SCRAPEDO_ENDPOINT}?url={quote(url, safe='')}&token={token}"
         resp = httpx.get(proxied, timeout=timeout, follow_redirects=True)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")

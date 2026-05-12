@@ -37,11 +37,11 @@ class Settings(BaseSettings):
     # Poster generation — credit cost per AI poster (background + copy)
     POSTER_CREDIT_COST: int = 1
 
-    # fal.ai API (for Pika AI video generation)
-    FAL_API_KEY: str = ""
-
     # Pexels API (free stock videos - fallback)
     PEXELS_API_KEY: str = ""
+
+    # Scrape.do (proxy fallback when Playwright fails / blocked)
+    SCRAPEDO_TOKEN: str = ""
 
     # Stripe
     STRIPE_SECRET_KEY: str = ""
