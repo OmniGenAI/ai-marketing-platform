@@ -259,6 +259,15 @@ async def reschedule_item(
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid scheduled_at format")
 
+    # Reject past times — the scheduler can't run a job in the past, and any
+    # client that managed to send one (clock skew, bypassed UI) would get an
+    # instant publish which is almost never what the user wanted.
+    if new_dt <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=400,
+            detail="Scheduled time must be in the future.",
+        )
+
     if item_type == "post":
         obj = db.query(Post).filter(Post.id == item_id, Post.user_id == current_user.id).first()
         if not obj:

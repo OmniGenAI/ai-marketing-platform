@@ -50,7 +50,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { DateTimePicker, isPastDateTime } from "@/components/ui/date-time-picker";
 import { toast } from "sonner";
 import api from "@/lib/api";
 import type { Post } from "@/types";
@@ -79,6 +79,10 @@ export interface CalendarItem {
   hashtags: string | null;
   scheduled_at: string | null;
   published_at: string | null;
+  // Public URL of the published item on its platform (populated only after
+  // a successful publish). Used by the calendar detail panel to render a
+  // "View on …" link.
+  external_url: string | null;
   created_at: string;
 }
 
@@ -168,6 +172,21 @@ const STATUS_CONFIG: Record<
   published: { icon: <CheckCircle2 className="h-3 w-3" />, label: "Published", variant: "default" },
   failed: { icon: <AlertCircle className="h-3 w-3" />, label: "Failed", variant: "destructive" },
 };
+
+// Feature flag — controls whether the calendar detail panel shows the
+// primary "View on {platform}" button that deep-links into the published
+// post. Toggle via NEXT_PUBLIC_ENABLE_VIEW_PUBLISHED_BUTTON in .env.local
+// or the deployment environment. Defaults to ON when unset so existing
+// setups keep the link visible without touching env files.
+//
+// Accepted truthy values (case-insensitive): "true", "1", "yes", "on".
+// Anything else disables the button. NEXT_PUBLIC_* values are inlined at
+// build / dev-server start, so restart `next dev` after toggling.
+const SHOW_VIEW_PUBLISHED_BUTTON = (() => {
+  const raw = process.env.NEXT_PUBLIC_ENABLE_VIEW_PUBLISHED_BUTTON;
+  if (raw === undefined) return true;
+  return ["true", "1", "yes", "on"].includes(raw.trim().toLowerCase());
+})();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -386,8 +405,21 @@ export default function CalendarPage() {
 
   const submitReschedule = async () => {
     if (!reschedulePost || !rescheduleValue) return;
+
+    // Reject past dates so the scheduler doesn't fire instantly. Bail before
+    // the network call so the user gets immediate feedback.
+    const picked = new Date(rescheduleValue);
+    if (Number.isNaN(picked.getTime())) {
+      toast.error("Invalid date/time");
+      return;
+    }
+    if (picked.getTime() <= Date.now()) {
+      toast.error("Please pick a future date and time.");
+      return;
+    }
+
     try {
-      const iso = new Date(rescheduleValue).toISOString();
+      const iso = picked.toISOString();
       await api.patch(`/api/calendar/${reschedulePost.type}/${reschedulePost.id}/reschedule`, {
         scheduled_at: iso,
       });
@@ -793,7 +825,32 @@ export default function CalendarPage() {
 
                 {/* Sticky action bar */}
                 <div className="shrink-0 w-full fixed bottom-0 border-t px-5 py-3 flex items-center gap-2 bg-background flex-wrap">
-                  {/* Open button — navigates to the editor for this content type */}
+                  {/* "View on {platform}" — only shown for published items
+                       that came back from the backend with an external_url,
+                       AND when the SHOW_VIEW_PUBLISHED_BUTTON flag is on.
+                       Opens the live post on the platform in a new tab. */}
+                  {SHOW_VIEW_PUBLISHED_BUTTON
+                    && selectedItem.status === "published"
+                    && selectedItem.external_url && (
+                    <Button
+                      size="sm"
+                      className="gap-1.5"
+                      asChild
+                    >
+                      <a
+                        href={selectedItem.external_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        View on {selectedItem.platform
+                          ? selectedItem.platform.charAt(0).toUpperCase() + selectedItem.platform.slice(1)
+                          : "platform"}
+                      </a>
+                    </Button>
+                  )}
+                  {/* Open in editor — always available so users can tweak
+                       the source even after publishing. */}
                   <Button
                     size="sm"
                     variant="outline"
@@ -808,7 +865,7 @@ export default function CalendarPage() {
                     }}
                   >
                     <ExternalLink className="h-3.5 w-3.5" />
-                    Open
+                    Open in editor
                   </Button>
                   {selectedItem.type === "post" && (selectedItem.status === "draft" || selectedItem.status === "scheduled") && (
                     <Button
@@ -955,13 +1012,17 @@ export default function CalendarPage() {
           </DialogHeader>
           <div className="space-y-2 py-2">
             <Label htmlFor="schedule-dt">Date & Time</Label>
+            {/* DateTimePicker shows its own inline past-time warning. */}
             <DateTimePicker value={rescheduleValue} onChange={setRescheduleValue} />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRescheduleOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={submitReschedule} disabled={!rescheduleValue}>
+            <Button
+              onClick={submitReschedule}
+              disabled={!rescheduleValue || isPastDateTime(rescheduleValue)}
+            >
               Confirm
             </Button>
           </DialogFooter>

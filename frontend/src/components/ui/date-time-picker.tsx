@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { format } from "date-fns"
-import { CalendarIcon, X } from "lucide-react"
+import { CalendarIcon, X, AlertCircle } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -17,6 +17,22 @@ interface DateTimePickerProps {
   min?: Date
   placeholder?: string
   className?: string
+  /**
+   * When true (default), shows an inline red warning below the picker
+   * whenever the selected datetime is in the past. Set to false to opt
+   * out (e.g. when the parent renders its own validation message).
+   */
+  showPastWarning?: boolean
+}
+
+/** Check if an ISO/datetime-local string represents a past moment. Returns
+ * false for empty/invalid input so callers can use this for "is the
+ * selection actually invalid?" checks. */
+export function isPastDateTime(value: string): boolean {
+  if (!value) return false
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return false
+  return d.getTime() <= Date.now()
 }
 
 export function DateTimePicker({
@@ -25,6 +41,7 @@ export function DateTimePicker({
   min = new Date(),
   placeholder = "Pick date & time",
   className,
+  showPastWarning = true,
 }: DateTimePickerProps) {
   const [open, setOpen] = React.useState(false)
 
@@ -55,13 +72,17 @@ export function DateTimePicker({
     onChange(formatForInput(base))
   }
 
+  // True if the currently-selected datetime is in the past.
+  const isPast = selected ? selected.getTime() <= Date.now() : false
+
   const handleClear = (e: React.MouseEvent) => {
     e.stopPropagation()
     onChange("")
   }
 
   return (
-    <div className={cn("flex gap-2 items-center", className)}>
+    <div className={cn("flex flex-col gap-1.5", className)}>
+      <div className="flex gap-2 items-center">
       {/* Date popover */}
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
@@ -107,6 +128,16 @@ export function DateTimePicker({
         >
           <X className="h-4 w-4" />
         </Button>
+      )}
+      </div>
+
+      {/* Inline past-time warning — opt-in via showPastWarning (default on).
+          Parents can disable when they render their own validation copy. */}
+      {showPastWarning && isPast && (
+        <p className="text-xs text-destructive flex items-center gap-1.5">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          Pick a future date and time — past times can&apos;t be scheduled.
+        </p>
       )}
     </div>
   )

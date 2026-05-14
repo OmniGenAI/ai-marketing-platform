@@ -11,7 +11,7 @@ import { toast } from "sonner";
 import Link from "next/dist/client/link";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, PenLine, Send, Code2, Loader2, Linkedin, CheckCircle2, Recycle, AlertCircle, Check, X, Undo2, Sparkles, RotateCw } from "lucide-react";
-import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { DateTimePicker, isPastDateTime } from "@/components/ui/date-time-picker";
 import {
     Dialog,
     DialogContent,
@@ -1767,9 +1767,17 @@ function SEOEditorContent() {
                         <div className="flex gap-2 pt-1">
                             <Button
                                 className="flex-1 gap-1.5"
-                                disabled={selectedPlatforms.length === 0 || isPublishing}
+                                disabled={
+                                    selectedPlatforms.length === 0 ||
+                                    isPublishing ||
+                                    isPastDateTime(scheduledDate)
+                                }
                                 onClick={async () => {
                                     if (selectedPlatforms.length === 0) { toast.error("Select at least one platform"); return; }
+                                    if (scheduledDate && isPastDateTime(scheduledDate)) {
+                                        toast.error("Pick a future date/time to schedule.");
+                                        return;
+                                    }
                                     setIsPublishing(true);
                                     // Capture date before any state changes — explicit save so scheduledAt is persisted
                                     const pickedDate = scheduledDate;

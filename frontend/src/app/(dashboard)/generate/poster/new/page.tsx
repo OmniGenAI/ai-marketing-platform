@@ -55,7 +55,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { DateTimePicker, isPastDateTime } from "@/components/ui/date-time-picker";
 
 import { DownloadButton } from "@/components/poster/DownloadButton";
 import { PosterPreview } from "@/components/poster/PosterPreview";
@@ -441,6 +441,10 @@ function PosterNewPageInner() {
     if (!poster) return;
     if (publishPlatforms.length === 0) {
       toast.error("Select at least one platform");
+      return;
+    }
+    if (scheduleValue && isPastDateTime(scheduleValue)) {
+      toast.error("Pick a future date/time to schedule.");
       return;
     }
 
@@ -1388,7 +1392,11 @@ function PosterNewPageInner() {
             <div className="flex gap-2 pt-1">
               <Button
                 className="flex-1 gap-1.5 bg-purple-500 hover:bg-purple-600 text-white"
-                disabled={publishPlatforms.length === 0 || isPublishing}
+                disabled={
+                  publishPlatforms.length === 0 ||
+                  isPublishing ||
+                  isPastDateTime(scheduleValue)
+                }
                 onClick={handleConfirmPublish}
               >
                 {isPublishing ? (

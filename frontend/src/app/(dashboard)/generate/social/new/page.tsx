@@ -55,7 +55,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import api from "@/lib/api";
-import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { DateTimePicker, isPastDateTime } from "@/components/ui/date-time-picker";
 import { useQuery } from "@tanstack/react-query";
 import { useSubscription } from "@/hooks/use-subscription";
 import type { GenerateResponse } from "@/types";
@@ -165,6 +165,10 @@ function GeneratePageContent() {
   // Tracks per-platform progress in `publishProgress` so the UI can ping-pong status.
   const handleConfirmPublish = async () => {
     if (publishPlatforms.length === 0) { toast.error("Select at least one platform"); return; }
+    if (scheduleValue && isPastDateTime(scheduleValue)) {
+      toast.error("Pick a future date/time to schedule.");
+      return;
+    }
     setIsPublishing(true);
 
     // Seed all platforms as "pending"
@@ -1390,7 +1394,11 @@ function GeneratePageContent() {
             <div className="flex gap-2 pt-1">
               <Button
                 className="flex-1 gap-1.5 bg-purple-500 hover:bg-purple-600 text-white"
-                disabled={publishPlatforms.length === 0 || isPublishing}
+                disabled={
+                  publishPlatforms.length === 0 ||
+                  isPublishing ||
+                  isPastDateTime(scheduleValue)
+                }
                 onClick={handleConfirmPublish}
               >
                 {isPublishing

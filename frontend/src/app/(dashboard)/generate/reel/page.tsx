@@ -56,7 +56,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { DateTimePicker, isPastDateTime } from "@/components/ui/date-time-picker";
 import api from "@/lib/api";
 import { useSubscription } from "@/hooks/use-subscription";
 import { useCreditCosts } from "@/hooks/queries";
@@ -1390,7 +1390,11 @@ export default function ReelsPage() {
             <Button variant="outline" onClick={() => setPublishDialogReel(null)}>Cancel</Button>
             <Button
               onClick={() => publishDialogReel && handlePublish(publishDialogReel, publishPlatforms, publishScheduledAt)}
-              disabled={publishPlatforms.length === 0 || !!publishingReelId}
+              disabled={
+                publishPlatforms.length === 0 ||
+                !!publishingReelId ||
+                isPastDateTime(publishScheduledAt)
+              }
               className="gap-1.5"
             >
               {publishingReelId ? (
