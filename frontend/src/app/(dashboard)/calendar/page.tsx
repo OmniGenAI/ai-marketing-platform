@@ -81,8 +81,9 @@ export interface CalendarItem {
   published_at: string | null;
   // Public URL of the published item on its platform (populated only after
   // a successful publish). Used by the calendar detail panel to render a
-  // "View on …" link.
-  external_url: string | null;
+  // "View on …" link. Optional because not every code path that constructs
+  // a CalendarItem locally (e.g. the "New Post" reschedule stub) has one.
+  external_url?: string | null;
   created_at: string;
 }
 
