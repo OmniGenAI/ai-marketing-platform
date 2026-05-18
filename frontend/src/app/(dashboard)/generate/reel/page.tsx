@@ -110,7 +110,6 @@ const STATUS_PROGRESS: Record<string, { progress: number; label: string }> = {
   processing_video: { progress: 70, label: "Processing video..." },
   composing_video: { progress: 80, label: "Composing final video..." },
   ready: { progress: 100, label: "Ready!" },
-  publishing: { progress: 92, label: "Publishing to social..." },
   published: { progress: 100, label: "Published" },
   failed: { progress: 0, label: "Failed" },
   publish_failed: { progress: 100, label: "Publish failed" },
@@ -424,10 +423,7 @@ export default function ReelsPage() {
       const label = platforms.length === 1
         ? platforms[0].charAt(0).toUpperCase() + platforms[0].slice(1)
         : `${platforms.length} platforms`;
-      // Publish now runs in the background — it can take a few minutes while
-      // Instagram processes the video. The reel row will flip to "published"
-      // (or "publish_failed") via the existing polling.
-      toast.success(`Publishing to ${label}… this can take a few minutes.`);
+      toast.success(`Reel published to ${label}!`);
       setPublishDialogReel(null);
       setPublishScheduledAt("");
     } catch (error: unknown) {
@@ -1011,7 +1007,7 @@ export default function ReelsPage() {
                           )}
                         </Button>
                       )}
-                      {(selectedReel.status === "ready" || selectedReel.status === "published" || selectedReel.status === "publish_failed") && (() => {
+                      {(selectedReel.status === "ready" || selectedReel.status === "published") && (() => {
                         // Determine button mode:
                         //   - published_at in the past  → already published
                         //   - published_at in the future → scheduled (status stays "ready" until scheduler fires)
@@ -1183,7 +1179,7 @@ export default function ReelsPage() {
                           {/* Publish button for ready/published/scheduled reels.
                               Mirrors the detail-panel logic so list and detail
                               views stay in sync. */}
-                          {(reel.status === "ready" || reel.status === "published" || reel.status === "publish_failed") && (() => {
+                          {(reel.status === "ready" || reel.status === "published") && (() => {
                             const hasPublishedAt = !!reel.published_at;
                             const publishMoment = hasPublishedAt
                               ? new Date(reel.published_at as string).getTime()
