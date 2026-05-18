@@ -4,11 +4,41 @@ Facebook and Instagram Graph API integrations for publishing posts.
 """
 import base64
 import httpx
+import json
 import uuid
 import asyncio
 from typing import Optional
 from app.utils.image_processor import resize_for_instagram, resize_for_instagram_bytes, upload_processed_image
 from app.config import settings
+
+
+def _meta_error_message(response: httpx.Response, step: str) -> str:
+    """Extract Meta's error.message from a Graph API error response.
+
+    The Graph API returns errors as JSON like:
+        {"error": {"message": "...", "code": 100, "error_subcode": 33, ...}}
+    httpx's `raise_for_status()` discards this and produces a generic
+    "Client error '400 Bad Request' for url ..." which is useless for users
+    trying to figure out why their reel didn't publish. This pulls the real
+    message out so it can be surfaced into reel.error_message and the UI.
+    """
+    try:
+        body = response.json()
+        err = body.get("error") or {}
+        parts: list[str] = []
+        msg = err.get("message")
+        if msg:
+            parts.append(str(msg))
+        code = err.get("code")
+        sub = err.get("error_subcode")
+        if code is not None or sub is not None:
+            tag = f"code={code}" + (f"/{sub}" if sub is not None else "")
+            parts.append(f"({tag})")
+        if parts:
+            return f"{step}: " + " ".join(parts)
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        pass
+    return f"{step}: HTTP {response.status_code} {response.text[:300]}"
 
 
 def _is_public_http_url(value: str) -> bool:
@@ -397,13 +427,15 @@ async def publish_to_instagram_reels(
             container_payload["thumb_offset"] = "0"  # Use custom thumbnail
 
         print(f"📤 Creating Instagram Reels container...")
+        print(f"   video_url={video_url}")
         container_response = await client.post(container_url, data=container_payload)
 
         if container_response.status_code != 200:
-            error_detail = container_response.text
-            print(f"❌ Instagram API Error: {error_detail}")
+            msg = _meta_error_message(container_response, "create container")
+            print(f"❌ Instagram API Error: {msg}")
+            print(f"   raw body: {container_response.text[:500]}")
+            raise Exception(msg)
 
-        container_response.raise_for_status()
         creation_id = container_response.json()["id"]
         print(f"✅ Media container created: {creation_id}")
 
@@ -414,7 +446,7 @@ async def publish_to_instagram_reels(
         for attempt in range(max_attempts):
             status_url = f"https://graph.facebook.com/v18.0/{creation_id}"
             status_params = {
-                "fields": "status_code",
+                "fields": "status_code,status",
                 "access_token": access_token,
             }
             status_response = await client.get(status_url, params=status_params)
@@ -426,7 +458,9 @@ async def publish_to_instagram_reels(
             if status_code == "FINISHED":
                 break
             elif status_code == "ERROR":
-                raise Exception("Instagram video processing failed")
+                # `status` carries Meta's human-readable processing-error string
+                detail = status_data.get("status") or "no detail"
+                raise Exception(f"Instagram video processing failed: {detail}")
 
             # Wait 10 seconds before checking again
             await asyncio.sleep(10)
@@ -444,10 +478,11 @@ async def publish_to_instagram_reels(
         publish_response = await client.post(publish_url, data=publish_payload)
 
         if publish_response.status_code not in [200, 201]:
-            error_detail = publish_response.text
-            print(f"❌ Instagram Publish Error ({publish_response.status_code}): {error_detail}")
+            msg = _meta_error_message(publish_response, "publish")
+            print(f"❌ Instagram Publish Error: {msg}")
+            print(f"   raw body: {publish_response.text[:500]}")
+            raise Exception(msg)
 
-        publish_response.raise_for_status()
         result = publish_response.json()
 
     print(f"✅ Published to Instagram Reels: Media ID {result.get('id')}")
