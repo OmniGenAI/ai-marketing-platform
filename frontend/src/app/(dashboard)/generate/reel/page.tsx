@@ -77,6 +77,27 @@ const DURATIONS = [
   { value: 60, label: "60 seconds" },
 ];
 
+// Terminal reel statuses — when every reel sits in one of these, polling can stop.
+const TERMINAL_REEL_STATUSES = [
+  "script_ready",
+  "ready",
+  "published",
+  "failed",
+  "publish_failed",
+  "cancelled",
+];
+
+// Only poll reels that were active within this window. Older "stuck"
+// processing rows (e.g. a worker crash) don't keep the UI hammering forever.
+const REEL_POLL_WINDOW_MS = 30 * 60 * 1000;
+
+const isReelRecentlyProcessing = (r: Reel): boolean => {
+  if (TERMINAL_REEL_STATUSES.includes(r.status)) return false;
+  const created = new Date(r.created_at).getTime();
+  const updated = r.updated_at ? new Date(r.updated_at).getTime() : 0;
+  return Date.now() - Math.max(created, updated) < REEL_POLL_WINDOW_MS;
+};
+
 // Status progress mapping
 const STATUS_PROGRESS: Record<string, { progress: number; label: string }> = {
   pending: { progress: 5, label: "Initializing..." },
@@ -155,11 +176,23 @@ export default function ReelsPage() {
   // Data state
   const [voices, setVoices] = useState<VoiceOption[]>([]);
   const qc = useQueryClient();
-  const { data: reels = [], isLoading: loadingReels, refetch: refetchReels } = useQuery<Reel[]>({
+  const { data: reels = [], isLoading: loadingReels } = useQuery<Reel[]>({
     queryKey: ["reels"],
     queryFn: async () => (await api.get<Reel[]>("/api/reels")).data,
     staleTime: 15 * 1000,  // reels update frequently while generating
     refetchOnWindowFocus: true,
+    // Poll every 3s while any reel is mid-pipeline. Using refetchInterval
+    // (instead of a manual setInterval) survives tab-switches: setInterval
+    // gets throttled/frozen in background tabs which made the UI look "stuck"
+    // even after the backend had finished the reel.
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || !data.some(isReelRecentlyProcessing)) return false;
+      return 3000;
+    },
+    // Keep polling even when the tab is in the background so the UI catches
+    // the "ready" transition the moment the user switches back.
+    refetchIntervalInBackground: true,
   });
   const [selectedReel, setSelectedReel] = useState<Reel | null>(null);
   const [publishingReelId, setPublishingReelId] = useState<string | null>(null);
@@ -203,43 +236,6 @@ export default function ReelsPage() {
     fetchVoices();
   }, []);
 
-  // fetchReels alias for places that trigger a refresh after mutations
-  const fetchReels = () => { qc.invalidateQueries({ queryKey: ["reels"] }); };
-
-  // Poll for updates only while at least one reel is still processing.
-  // The "recently active" gate uses max(created_at, updated_at) so that a
-  // regenerate on an old reel (which keeps its original created_at but
-  // updates updated_at when the pipeline ticks) still triggers polling.
-  useEffect(() => {
-    const TERMINAL = ["script_ready", "ready", "published", "failed", "publish_failed", "cancelled"];
-    const POLL_WINDOW_MS = 30 * 60 * 1000; // only poll reels active within last 30 minutes
-
-    const lastActiveTs = (r: Reel): number => {
-      const created = new Date(r.created_at).getTime();
-      const updated = r.updated_at ? new Date(r.updated_at).getTime() : 0;
-      return Math.max(created, updated);
-    };
-
-    const isRecentlyProcessing = (r: Reel, now: number): boolean => {
-      if (TERMINAL.includes(r.status)) return false;
-      return now - lastActiveTs(r) < POLL_WINDOW_MS;
-    };
-
-    if (!reels.some(r => isRecentlyProcessing(r, Date.now()))) return;
-
-    const interval = setInterval(async () => {
-      try {
-        await refetchReels();
-        if (!reels.some(r => isRecentlyProcessing(r, Date.now()))) {
-          clearInterval(interval);
-        }
-      } catch {
-        clearInterval(interval);
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [reels]);
 
   const validateTopic = (): boolean => {
     if (!topic.trim()) {

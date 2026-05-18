@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -174,30 +174,23 @@ export default function BrandKitPage() {
     website_context: null,
   });
 
-  const { isLoading: isFetching } = useQuery({
+  const qc = useQueryClient();
+  // Server-shape of the brand kit (BusinessConfigResponse). We keep this
+  // separate from `config` (the editable form state) so React Query can cache
+  // it and a useEffect can rehydrate `config` on every remount — including
+  // remounts that read straight from the cache and never invoke queryFn.
+  type BrandKitServer = BrandKitState & {
+    id?: string;
+    user_id?: string;
+    created_at?: string;
+    updated_at?: string;
+  };
+  const { data: brandKit, isLoading: isFetching } = useQuery<BrandKitServer | null>({
     queryKey: ["brand-kit"],
     queryFn: async () => {
       try {
-        const response = await api.get("/api/brand-kit");
-        if (response.data) {
-          setConfig((prev) => ({
-            ...prev,
-            ...response.data,
-            location: response.data.location || "",
-            competitors: response.data.competitors || "",
-            website: response.data.website || "",
-          }));
-          if (response.data.website_context) {
-            try {
-              const ctx = JSON.parse(response.data.website_context);
-              setScrapedContext(ctx);
-              if (ctx.ai_summary) {
-                try { setWebsiteSummary(JSON.parse(ctx.ai_summary)); } catch { /* ignore */ }
-              }
-            } catch { /* ignore */ }
-          }
-        }
-        return response.data;
+        const response = await api.get<BrandKitServer | null>("/api/brand-kit");
+        return response.data ?? null;
       } catch (error: unknown) {
         const err = error as { response?: { status?: number } };
         if (err.response?.status !== 404) toast.error("Failed to load brand kit");
@@ -208,6 +201,43 @@ export default function BrandKitPage() {
     refetchOnWindowFocus: false,
   });
 
+  // Rehydrate the form once per mount from whatever React Query gave us
+  // (fresh fetch OR cached value). Doing this in a useEffect instead of as a
+  // queryFn side-effect is what makes tab-switches and in-app navigation work:
+  // when the cached data is fresh, queryFn doesn't run, but this effect still
+  // fires because `brandKit` is delivered to the component.
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (hydratedRef.current) return;
+    if (brandKit === undefined) return;  // still loading
+    hydratedRef.current = true;
+    if (!brandKit) return;
+
+    setConfig({
+      business_name: brandKit.business_name || "",
+      niche: brandKit.niche || "",
+      location: brandKit.location || "",
+      tone: brandKit.tone || "professional",
+      products: brandKit.products || "",
+      brand_voice: brandKit.brand_voice || "",
+      target_audience: brandKit.target_audience || "",
+      hashtags: brandKit.hashtags || "",
+      competitors: brandKit.competitors || "",
+      website: brandKit.website || "",
+      website_context: brandKit.website_context || null,
+    });
+
+    if (brandKit.website_context) {
+      try {
+        const ctx = JSON.parse(brandKit.website_context);
+        setScrapedContext(ctx);
+        if (ctx.ai_summary) {
+          try { setWebsiteSummary(JSON.parse(ctx.ai_summary)); } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
+  }, [brandKit]);
+
   const handleChange = (field: string, value: string) => {
     setConfig((prev) => ({ ...prev, [field]: value }));
   };
@@ -216,12 +246,16 @@ export default function BrandKitPage() {
     e.preventDefault();
     setIsLoading(true);
     try {
-      await api.post("/api/brand-kit", {
+      const response = await api.post<BrandKitServer>("/api/brand-kit", {
         ...config,
         location: config.location || null,
         competitors: config.competitors || null,
         website: config.website || null,
       });
+      // Seed the cache with the persisted record so a subsequent remount
+      // (tab change, in-app navigation, etc.) sees the saved values instead
+      // of the pre-save snapshot.
+      qc.setQueryData(["brand-kit"], response.data);
       toast.success("Brand kit saved!");
     } catch {
       toast.error("Failed to save brand kit");
