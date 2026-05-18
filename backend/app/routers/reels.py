@@ -8,6 +8,7 @@ Two-phase flow:
                                            the video pipeline in the background.
 """
 import asyncio
+import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel
@@ -44,6 +45,8 @@ from app.services.social import (
 )
 
 from app.services.credits import COST_REEL_VIDEO, COST_REEL_CANCEL
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/reels", tags=["reels"])
 
@@ -561,14 +564,106 @@ async def _publish_reel_to_platform(
     raise ValueError(f"Unsupported platform for reel publish: {platform}")
 
 
+async def _run_reel_publish(
+    reel_id: str,
+    user_id: str,
+    targets: list[str],
+    caption: str,
+) -> None:
+    """Background worker: actually publishes the reel to each target platform.
+
+    Runs after the HTTP response is sent so the request handler isn't held
+    open while Instagram processes the video (up to 5 minutes of polling).
+    Render's platform-level request timeout would otherwise kill the
+    connection and return a non-app 500 without CORS headers.
+
+    The frontend polls GET /api/reels/{id} until status flips from
+    "publishing" → "published" / "publish_failed".
+    """
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        reel = (
+            db.query(Reel)
+            .filter(Reel.id == reel_id, Reel.user_id == user_id)
+            .first()
+        )
+        if not reel:
+            logger.warning(f"[Reel {reel_id}] vanished before background publish started")
+            return
+
+        # Re-resolve accounts in the worker's session (the request session is
+        # already closed by the time we get here).
+        accounts: dict[str, SocialAccount] = {}
+        for plat in targets:
+            acct = (
+                db.query(SocialAccount)
+                .filter(
+                    SocialAccount.user_id == user_id,
+                    SocialAccount.platform == plat,
+                )
+                .first()
+            )
+            if not acct:
+                reel.status = "publish_failed"
+                reel.error_message = f"No {plat} account connected"
+                db.commit()
+                return
+            accounts[plat] = acct
+
+        results: dict[str, dict] = {}
+        failures: dict[str, str] = {}
+        for plat in targets:
+            try:
+                results[plat] = await _publish_reel_to_platform(plat, accounts[plat], reel, caption)
+            except Exception as e:
+                logger.exception(f"[Reel {reel_id}] publish to {plat} failed")
+                failures[plat] = str(e)
+
+        if not results:
+            reel.status = "publish_failed"
+            reel.error_message = ("; ".join(f"{p}: {e}" for p, e in failures.items()))[:500]
+        else:
+            reel.status = "published"
+            reel.published_at = datetime.now(timezone.utc)
+            if "instagram" in results:
+                reel.instagram_media_id = results["instagram"].get("id")
+            if failures:
+                reel.error_message = ("Partial failure: " + "; ".join(f"{p}: {e}" for p, e in failures.items()))[:500]
+            else:
+                reel.error_message = None
+        db.commit()
+    except Exception:
+        logger.exception(f"[Reel {reel_id}] background publish crashed")
+        try:
+            db.rollback()
+            reel = db.query(Reel).filter(Reel.id == reel_id).first()
+            if reel and reel.status == "publishing":
+                reel.status = "publish_failed"
+                reel.error_message = "Unexpected error during publish"
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()
+
+
 @router.post("/{reel_id}/publish", response_model=ReelResponse)
 async def publish_reel(
     reel_id: str,
+    background_tasks: BackgroundTasks,
     payload: PublishReelRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Publish a reel to one or more platforms (instagram, facebook, linkedin, youtube, reddit)."""
+    """Kick off a background publish to one or more platforms.
+
+    Returns immediately with reel.status="publishing" so the HTTP request
+    doesn't sit open while Instagram processes the video (up to ~5 minutes,
+    which exceeds Render's platform request timeout). The frontend polls
+    GET /api/reels/{id} for the final status transition.
+    """
     reel = (
         db.query(Reel)
         .filter(Reel.id == reel_id, Reel.user_id == current_user.id)
@@ -576,12 +671,6 @@ async def publish_reel(
     )
     if not reel:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reel not found")
-
-    if reel.status != "ready":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Reel is not ready for publishing. Current status: {reel.status}",
-        )
 
     if not reel.video_url:
         raise HTTPException(
@@ -598,16 +687,8 @@ async def publish_reel(
     if not targets:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No platforms selected")
 
-    # Build caption (override or default content+hashtags)
-    if payload and payload.caption_override and payload.caption_override.strip():
-        caption = payload.caption_override.strip()
-    else:
-        caption = reel.script or ""
-        if reel.hashtags:
-            caption = f"{caption}\n\n{reel.hashtags}"
-
-    # Lookup connected accounts for each platform up-front
-    accounts: dict[str, SocialAccount] = {}
+    # Verify connected accounts up-front so a missing connection surfaces as
+    # a clear 400 in the response instead of failing silently in the worker.
     for plat in targets:
         acct = (
             db.query(SocialAccount)
@@ -622,40 +703,44 @@ async def publish_reel(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"No {plat} account connected. Please connect it in Settings.",
             )
-        accounts[plat] = acct
 
-    # Publish to each — track per-platform results
-    results: dict[str, dict] = {}
-    failures: dict[str, str] = {}
-    for plat in targets:
-        try:
-            results[plat] = await _publish_reel_to_platform(plat, accounts[plat], reel, caption)
-        except Exception as e:
-            logger.exception(f"Failed to publish reel {reel_id} to {plat}")
-            failures[plat] = str(e)
-
-    # All failed → mark publish_failed and raise
-    if not results:
-        reel.status = "publish_failed"
-        reel.error_message = "; ".join(f"{p}: {e}" for p, e in failures.items())
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to publish reel: {reel.error_message}",
-        )
-
-    # At least one succeeded — mark published
-    reel.status = "published"
-    reel.published_at = datetime.now(timezone.utc)
-    # If Instagram is one of the successful platforms, persist its media_id (legacy column)
-    if "instagram" in results:
-        reel.instagram_media_id = results["instagram"].get("id")
-    if failures:
-        reel.error_message = "Partial failure: " + "; ".join(f"{p}: {e}" for p, e in failures.items())
+    # Build caption (override or default content+hashtags)
+    if payload and payload.caption_override and payload.caption_override.strip():
+        caption = payload.caption_override.strip()
     else:
-        reel.error_message = None
+        caption = reel.script or ""
+        if reel.hashtags:
+            caption = f"{caption}\n\n{reel.hashtags}"
+
+    # Atomic transition into "publishing" — a double-click can't enqueue two
+    # background publishes. Allow entry from "ready", "published" (republish),
+    # and "publish_failed" (retry).
+    transition = db.execute(
+        update(Reel)
+        .where(and_(
+            Reel.id == reel_id,
+            Reel.user_id == current_user.id,
+            Reel.status.in_(("ready", "published", "publish_failed")),
+        ))
+        .values(status="publishing", error_message=None)
+    )
+    if transition.rowcount == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Reel is not ready for publishing. Current status: {reel.status}",
+        )
     db.commit()
     db.refresh(reel)
+
+    background_tasks.add_task(
+        _run_reel_publish,
+        reel_id=reel.id,
+        user_id=current_user.id,
+        targets=targets,
+        caption=caption,
+    )
+
     return reel
 
 
