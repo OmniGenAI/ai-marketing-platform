@@ -103,7 +103,7 @@ def _x264_args(crf: str = "28") -> list[str]:
     """Standard Instagram-compatible x264 encode args."""
     return [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", crf,
-        "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
+        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
         "-movflags", "+faststart",
     ]
 
@@ -794,7 +794,7 @@ def _merge_video_segments_moviepy(
             preset="ultrafast", threads=4, logger=None,
             ffmpeg_params=[
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
+                "-profile:v", "high", "-level", "4.1", "-crf", "28",
             ],
         )
         print(f"[Merge-moviepy] Saved merged video to {output_path}")
@@ -1341,7 +1341,7 @@ def _add_audio_to_video_moviepy(video_path: str, audio_path: str, output_path: s
         preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
+            "-profile:v", "high", "-level", "4.1", "-crf", "28",
         ],
     )
     video.close()
@@ -1562,13 +1562,12 @@ def _compose_reel_sync(
                 f"crop={target_width}:{target_height},setsar=1,fps=30"
             )
             cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
+                _FFMPEG_BIN, "-y", "-loglevel", "error",
                 "-i", vp,
                 "-t", str(per_clip),
                 "-vf", vf,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
-                "-an", "-movflags", "+faststart",
+                *_x264_args("28"),
+                "-an",
                 out,
             ]
             print(f"[compose_reel] scaling clip {i+1}/{n}: {vp}")
@@ -1591,7 +1590,7 @@ def _compose_reel_sync(
                 f.write(f"file '{safe}'\n")
 
         cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
+            _FFMPEG_BIN, "-y", "-loglevel", "error",
             "-f", "concat", "-safe", "0", "-i", list_file,
             "-i", audio_path,
             "-t", f"{audio_duration:.3f}",
@@ -1771,7 +1770,7 @@ def _reencode_sync(src: str, dst: str) -> None:
         preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            "-profile:v", "baseline", "-level", "3.0", "-crf", "26",
+            "-profile:v", "high", "-level", "4.1", "-crf", "26",
         ],
     )
     clip.close()
