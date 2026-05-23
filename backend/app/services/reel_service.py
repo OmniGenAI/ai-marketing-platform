@@ -103,9 +103,9 @@ def _x264_args(crf: str = "28") -> list[str]:
     """Standard Instagram-compatible x264 encode args."""
     return [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", crf,
-        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+        "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
+        "-movflags", "+faststart",
     ]
-
 
 # ---- Prompt-engineering constants ----------------------------------------
 HOOK_STYLES = ("question", "stat", "contrarian", "promise")
@@ -722,7 +722,7 @@ def _merge_video_segments_ffmpeg(
             cmd = [
                 _FFMPEG_BIN, "-y", "-loglevel", "error",
                 "-i", path,
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase:force_divisible_by=2,"
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
                        "crop=1080:1920,setsar=1,fps=30",
                 *_x264_args("28"),
                 "-an",
@@ -794,7 +794,7 @@ def _merge_video_segments_moviepy(
             preset="ultrafast", threads=4, logger=None,
             ffmpeg_params=[
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                "-profile:v", "high", "-level", "4.1", "-crf", "28",
+                "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
             ],
         )
         print(f"[Merge-moviepy] Saved merged video to {output_path}")
@@ -1341,7 +1341,7 @@ def _add_audio_to_video_moviepy(video_path: str, audio_path: str, output_path: s
         preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            "-profile:v", "high", "-level", "4.1", "-crf", "28",
+            "-profile:v", "baseline", "-level", "3.0", "-crf", "28",
         ],
     )
     video.close()
@@ -1537,7 +1537,7 @@ def _compose_reel_sync(
     try:
         probe = subprocess.run(
             [
-                _FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
             ],
             capture_output=True, text=True, timeout=10,
@@ -1553,34 +1553,33 @@ def _compose_reel_sync(
 
     workdir = tempfile.mkdtemp(prefix="compose_")
     scaled_paths: list[str] = []
-    last_err = "no clips processed"
     try:
         # Pass 1: per-clip scale+crop+trim+encode (parallelizable in future).
         for i, vp in enumerate(video_paths):
             out = os.path.join(workdir, f"s{i}.mp4")
             vf = (
-                f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase:force_divisible_by=2,"
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
                 f"crop={target_width}:{target_height},setsar=1,fps=30"
             )
             cmd = [
-                _FFMPEG_BIN, "-y", "-loglevel", "error",
+                "ffmpeg", "-y", "-loglevel", "error",
                 "-i", vp,
                 "-t", str(per_clip),
                 "-vf", vf,
-                *_x264_args("28"),
-                "-an",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.0",
+                "-an", "-movflags", "+faststart",
                 out,
             ]
             print(f"[compose_reel] scaling clip {i+1}/{n}: {vp}")
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0 or not os.path.exists(out):
-                last_err = r.stderr or "file not found"
-                print(f"[compose_reel] clip {i+1} failed: {last_err[-400:]}")
+                print(f"[compose_reel] clip {i+1} failed: {r.stderr[-400:]}")
                 continue
             scaled_paths.append(out)
 
         if not scaled_paths:
-            raise Exception(f"No valid video clips to compose. Tried {n} videos. Detail: {last_err[-200:]}")
+            raise Exception(f"No valid video clips to compose. Tried {n} videos.")
 
         # Pass 2: concat scaled clips + add voiceover. -c:v copy is the win:
         # we don't re-encode the already-encoded scaled clips.
@@ -1592,7 +1591,7 @@ def _compose_reel_sync(
                 f.write(f"file '{safe}'\n")
 
         cmd = [
-            _FFMPEG_BIN, "-y", "-loglevel", "error",
+            "ffmpeg", "-y", "-loglevel", "error",
             "-f", "concat", "-safe", "0", "-i", list_file,
             "-i", audio_path,
             "-t", f"{audio_duration:.3f}",
@@ -1772,7 +1771,7 @@ def _reencode_sync(src: str, dst: str) -> None:
         preset="ultrafast", threads=4, logger=None,
         ffmpeg_params=[
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            "-profile:v", "high", "-level", "4.1", "-crf", "26",
+            "-profile:v", "baseline", "-level", "3.0", "-crf", "26",
         ],
     )
     clip.close()
