@@ -104,8 +104,8 @@ def _x264_args(crf: str = "28") -> list[str]:
     return [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", crf,
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-        "-movflags", "+faststart",
     ]
+
 
 # ---- Prompt-engineering constants ----------------------------------------
 HOOK_STYLES = ("question", "stat", "contrarian", "promise")
@@ -722,7 +722,7 @@ def _merge_video_segments_ffmpeg(
             cmd = [
                 _FFMPEG_BIN, "-y", "-loglevel", "error",
                 "-i", path,
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase:force_divisible_by=2,"
                        "crop=1080:1920,setsar=1,fps=30",
                 *_x264_args("28"),
                 "-an",
@@ -1537,7 +1537,7 @@ def _compose_reel_sync(
     try:
         probe = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                _FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
             ],
             capture_output=True, text=True, timeout=10,
@@ -1553,12 +1553,13 @@ def _compose_reel_sync(
 
     workdir = tempfile.mkdtemp(prefix="compose_")
     scaled_paths: list[str] = []
+    last_err = "no clips processed"
     try:
         # Pass 1: per-clip scale+crop+trim+encode (parallelizable in future).
         for i, vp in enumerate(video_paths):
             out = os.path.join(workdir, f"s{i}.mp4")
             vf = (
-                f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase:force_divisible_by=2,"
                 f"crop={target_width}:{target_height},setsar=1,fps=30"
             )
             cmd = [
@@ -1573,12 +1574,13 @@ def _compose_reel_sync(
             print(f"[compose_reel] scaling clip {i+1}/{n}: {vp}")
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0 or not os.path.exists(out):
-                print(f"[compose_reel] clip {i+1} failed: {r.stderr[-400:]}")
+                last_err = r.stderr or "file not found"
+                print(f"[compose_reel] clip {i+1} failed: {last_err[-400:]}")
                 continue
             scaled_paths.append(out)
 
         if not scaled_paths:
-            raise Exception(f"No valid video clips to compose. Tried {n} videos.")
+            raise Exception(f"No valid video clips to compose. Tried {n} videos. Detail: {last_err[-200:]}")
 
         # Pass 2: concat scaled clips + add voiceover. -c:v copy is the win:
         # we don't re-encode the already-encoded scaled clips.
